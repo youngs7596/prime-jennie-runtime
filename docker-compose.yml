@@ -105,6 +105,11 @@ services:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
       VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     extra_hosts:
       - "host.docker.internal:host-gateway"

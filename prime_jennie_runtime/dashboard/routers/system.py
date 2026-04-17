@@ -20,15 +20,16 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 logger = logging.getLogger(__name__)
 
-# v3 기본 서비스 목록. docker-compose 네트워크 내부 호스트명:포트.
+# v3 기본 서비스 목록. HTTP 엔드포인트가 있는 서비스만 probe.
+# slow-loop / fast-loop / news-pipeline / price-scheduler / job-worker 는 pure async daemon
+# (HTTP 없음) → scheduled_jobs 기반 별도 heartbeat 관측 (Phase 2.11).
+# docker-compose 네트워크 내부 호스트명:포트.
 _DEFAULT_TARGETS: list[tuple[str, str]] = [
     ("kis-gateway", "http://kis-gateway:8080/health"),
-    ("slow-loop", "http://slow-loop:8087/health"),
-    ("fast-loop", "http://fast-loop:8081/health"),
-    ("news-pipeline", "http://news-pipeline:8092/health"),
-    ("price-scheduler", "http://price-scheduler:8088/health"),
-    ("telegram-bot", "http://telegram-bot:8091/health"),
     ("dashboard", "http://dashboard:8090/health"),
+    ("monitor", "http://monitor:8091/health"),
+    ("control-ui", "http://control-ui:80/"),
+    ("telegram-bot", "http://telegram-bot:8000/healthz"),
 ]
 
 

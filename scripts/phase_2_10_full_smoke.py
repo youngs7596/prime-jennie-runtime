@@ -151,11 +151,10 @@ async def step_scheduled_jobs_seed(
 
 PHASE_2_10_ENDPOINTS = [
     # (step_name, url, task_id)
+    # Track D 확정: briefing(#6), backtest(#8) 은 library/CLI 라 compose 서비스 아님 →
+    # 제외. council(#7) 는 형태 확정 대기 중이라 현재 미포함.
     ("dashboard", "http://localhost:8090/health", "#4"),
     ("monitor", "http://localhost:8091/health", "#5"),
-    ("briefing", "http://localhost:8093/health", "#6"),
-    ("council_log", "http://localhost:8094/health", "#7"),
-    ("backtest", "http://localhost:8096/health", "#8"),
     ("job_worker", "http://localhost:8095/health", "#1"),
 ]
 

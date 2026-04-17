@@ -320,12 +320,14 @@ services:
     # monitor 는 KIS Gateway 의존이므로 full 전용. apps 프로파일에는 포함하지 않는다.
     profiles: ["full"]
 
-  # --- Application Services (Phase 2.10 — 각 Track 포팅 중, Dockerfile 올라오면 활성화) ---
+  # --- Application Services (Phase 2.10 — 아직 미배선) ---
   #
-  # TODO #11 — 블로커 해소 후 주석 해제:
-  #   briefing   (Track D, #6)  — Dockerfile.briefing (대기)
-  #   council    (Track D, #7)  — Dockerfile.council 또는 일반 runner (대기)
-  #   backtest   (Track D, #8)  — Dockerfile.backtest (대기)
+  # Track D 설계 확정 (2026-04-17):
+  #   briefing (#6)  — pure async library. job worker 이미지에 import 됨 → 단독 서비스 없음
+  #   backtest (#8)  — library. Phase 3 engine/daily_strategies 포팅 후 CLI 추가 예정
+  #   council  (#7)  — 로깅/히스토리. 형태 확정 대기 (library vs consumer)
+  #
+  # TODO #11 — Dockerfile 도착 시 주석 해제:
   #   job-worker (Track B, #1)  — Dockerfile.job_worker (대기)
 
 networks:

@@ -32,6 +32,7 @@ from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
     NaverNewsCrawler,
 )
 
+from .analytics import analyst_feedback, analyze_ai_performance
 from .asset_snapshot import daily_asset_snapshot
 from .council_macro import (
     macro_collect_global,
@@ -143,6 +144,12 @@ def build_handlers(
             stop_loss_pct=stop_loss_pct,
         )
 
+    async def h_analyze_ai_performance(period_days: int = 30) -> None:
+        await analyze_ai_performance(pool, redis_client, period_days=period_days)
+
+    async def h_analyst_feedback() -> None:
+        await analyst_feedback(redis_client)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -163,6 +170,8 @@ def build_handlers(
         "seed_stock_masters": h_seed_stock_masters,
         "daily_asset_snapshot": h_daily_asset_snapshot,
         "sync_positions": h_sync_positions,
+        "analyze_ai_performance": h_analyze_ai_performance,
+        "analyst_feedback": h_analyst_feedback,
     }
 
 

@@ -52,6 +52,7 @@ from .market_data import (
     collect_us_market,
     refresh_market_caps,
 )
+from .positions import sync_positions
 from .stock_masters import seed_stock_masters
 
 OWNER = "job_worker"
@@ -130,6 +131,18 @@ def build_handlers(
     async def h_daily_asset_snapshot() -> None:
         await daily_asset_snapshot(pool, http, kis_gateway_url)
 
+    async def h_sync_positions(
+        dry_run: bool = True, stop_loss_pct: float = 6.0
+    ) -> None:
+        await sync_positions(
+            pool,
+            http,
+            redis_client,
+            kis_gateway_url,
+            dry_run=dry_run,
+            stop_loss_pct=stop_loss_pct,
+        )
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -149,6 +162,7 @@ def build_handlers(
         "collect_quarterly_financials": h_collect_quarterly_financials,
         "seed_stock_masters": h_seed_stock_masters,
         "daily_asset_snapshot": h_daily_asset_snapshot,
+        "sync_positions": h_sync_positions,
     }
 
 

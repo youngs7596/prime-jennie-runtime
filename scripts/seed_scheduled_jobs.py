@@ -151,6 +151,14 @@ SEEDS: list[SeedJob] = [
         cron="5 16 * * 1-5",
         kwargs={"days": 250},
     ),
+    # Track B — collect_us_market (v2 utility_jobs_dag: 0 7 * * 2-6, 미장 마감 후 KST 아침).
+    SeedJob(
+        id="job_worker.collect_us_market",
+        owner="job_worker",
+        handler_key="collect_us_market",
+        cron="0 7 * * 2-6",
+        kwargs={"days": 500},
+    ),
 ]
 
 

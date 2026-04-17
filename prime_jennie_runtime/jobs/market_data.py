@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 
 from .crawlers.naver_market import fetch_index_daily_prices
+from .crawlers.us_market import fetch_us_market_batch
 
 logger = logging.getLogger(__name__)
 
@@ -163,12 +164,59 @@ async def collect_index_daily_prices(
     logger.info("collect_index_daily_prices: total=%d", total)
 
 
+US_MARKET_DEFAULT_DAYS = 500
+
+
+async def collect_us_market(
+    pool: Any,
+    http: httpx.AsyncClient,
+    *,
+    days: int = US_MARKET_DEFAULT_DAYS,
+) -> None:
+    """v2 `/jobs/collect-us-market` 포팅 (app.py:310-361).
+
+    SOX / NVDA / S&P 500 / NASDAQ / NQ 선물 일봉을 Yahoo chart API 로 받아
+    `us_market_daily` 에 upsert. change_pct 는 crawler 가 이미 계산 (round 4).
+    """
+    batch = await fetch_us_market_batch(http, days=days)
+    total = 0
+    async with pool.acquire() as conn:
+        for ticker_name, rows in batch.items():
+            for row in rows:
+                await conn.execute(
+                    "INSERT INTO us_market_daily (ticker, price_date, "
+                    "open_price, high_price, low_price, close_price, volume, "
+                    "change_pct) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
+                    "ON CONFLICT (ticker, price_date) DO UPDATE SET "
+                    "open_price=EXCLUDED.open_price, "
+                    "high_price=EXCLUDED.high_price, "
+                    "low_price=EXCLUDED.low_price, "
+                    "close_price=EXCLUDED.close_price, "
+                    "volume=EXCLUDED.volume, "
+                    "change_pct=EXCLUDED.change_pct, "
+                    "updated_at=NOW()",
+                    row.ticker,
+                    row.price_date,
+                    row.open_price,
+                    row.high_price,
+                    row.low_price,
+                    row.close_price,
+                    row.volume,
+                    row.change_pct,
+                )
+                total += 1
+            logger.info("us_market %s: %d rows upserted", ticker_name, len(rows))
+    logger.info("collect_us_market: total=%d tickers=%s", total, list(batch.keys()))
+
+
 __all__ = [
     "INDEX_CODES",
     "INDEX_DAILY_DEFAULT_DAYS",
     "MARKET_CAP_BATCH_COMMIT_EVERY",
     "MARKET_CAP_RATE_PER_SEC",
     "MARKET_CAP_TOP_N",
+    "US_MARKET_DEFAULT_DAYS",
     "collect_index_daily_prices",
+    "collect_us_market",
     "refresh_market_caps",
 ]

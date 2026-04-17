@@ -223,11 +223,10 @@ services:
 
   loki:
     image: grafana/loki:2.9.0
-    user: "1000"
     command: -config.file=/etc/loki/loki-config.yaml
     volumes:
       - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
-      - ${DOCKER_DATA_DIR:-./data}/loki_data:/loki
+      - loki_data:/loki
     restart: unless-stopped
     profiles: ["observe", "full"]
 
@@ -252,7 +251,7 @@ services:
     ports:
       - "3300:3300"
     volumes:
-      - ${DOCKER_DATA_DIR:-./data}/grafana_data:/var/lib/grafana
+      - grafana_data:/var/lib/grafana
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - loki
@@ -366,6 +365,10 @@ services:
   #   briefing (#6)  — pure async library. job worker 이미지에 import 됨 → 단독 서비스 없음
   #   backtest (#8)  — library. Phase 3 engine/daily_strategies 포팅 후 CLI 추가 예정
   #   council  (#7)  — pure library. slow_loop Macro + dashboard macro router + telegram_bot import → 단독 서비스 없음
+
+volumes:
+  grafana_data:
+  loki_data:
 
 networks:
   default:

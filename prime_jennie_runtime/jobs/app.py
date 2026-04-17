@@ -38,6 +38,7 @@ from .council_macro import (
     macro_quick,
     macro_validate_store,
 )
+from .investor_data import collect_foreign_holding, collect_investor_trading
 from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
 from .market_data import (
     collect_index_daily_prices,
@@ -96,6 +97,12 @@ def build_handlers(
     async def h_collect_us_market(days: int = 500) -> None:
         await collect_us_market(pool, http, days=days)
 
+    async def h_collect_investor_trading() -> None:
+        await collect_investor_trading(pool, http)
+
+    async def h_collect_foreign_holding() -> None:
+        await collect_foreign_holding(pool, http)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -107,6 +114,8 @@ def build_handlers(
         "refresh_market_caps": h_refresh_market_caps,
         "collect_index_daily_prices": h_collect_index_daily_prices,
         "collect_us_market": h_collect_us_market,
+        "collect_investor_trading": h_collect_investor_trading,
+        "collect_foreign_holding": h_collect_foreign_holding,
     }
 
 

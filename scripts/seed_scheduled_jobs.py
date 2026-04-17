@@ -159,6 +159,22 @@ SEEDS: list[SeedJob] = [
         cron="0 7 * * 2-6",
         kwargs={"days": 500},
     ),
+    # Track B — collect_investor_trading (v2 utility_jobs_dag: 30 18 * * 1-5, 장후 수급).
+    SeedJob(
+        id="job_worker.collect_investor_trading",
+        owner="job_worker",
+        handler_key="collect_investor_trading",
+        cron="30 18 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — collect_foreign_holding (v2 utility_jobs_dag: 0 19 * * 1-5, 외국인 지분율).
+    SeedJob(
+        id="job_worker.collect_foreign_holding",
+        owner="job_worker",
+        handler_key="collect_foreign_holding",
+        cron="0 19 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

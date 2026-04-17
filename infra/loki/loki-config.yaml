@@ -1,0 +1,40 @@
+# Loki config — v2 `prime-jennie/infra/loki/loki-config.yaml` 에서 원형 포팅.
+# v3 변경: 없음. http_listen_port 3100 유지 (v3 compose 는 bridge 네트워크이므로
+# 외부 충돌 문제 없음).
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+  replication_factor: 1
+  path_prefix: /loki
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  filesystem:
+    directory: /loki/chunks
+
+limits_config:
+  retention_period: 30d
+  max_query_length: 721h
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true

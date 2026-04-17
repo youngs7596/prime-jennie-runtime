@@ -215,6 +215,146 @@ services:
     networks:
       - screening-isolated
 
+  # --- Observability (Track E, Phase 2.10 #11) ---
+  #
+  # v2 `prime-jennie/infra/{loki,promtail,grafana}` 원형 포팅. v3 bridge 네트워크로
+  # 전환했으므로 서비스명 기반 주소 사용 (promtail → loki:3100, grafana → loki:3100).
+  # profile "observe" 로 분리 — 무거운 설치 없이 코어만 띄우고 싶을 때 제외 가능.
+
+  loki:
+    image: grafana/loki:2.9.0
+    user: "1000"
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - ${DOCKER_DATA_DIR:-./data}/loki_data:/loki
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    command: -config.file=/etc/promtail/promtail-config.yaml
+    volumes:
+      - ./infra/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SERVER_HTTP_PORT: "3300"
+    ports:
+      - "3300:3300"
+    volumes:
+      - ${DOCKER_DATA_DIR:-./data}/grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
+  # --- Cloudflare Tunnel (Track E, Phase 2.10 #11) ---
+  #
+  # MS-01 외부 노출 경로. CLOUDFLARE_TUNNEL_TOKEN 으로 제어.
+  # profile "tunnel" — 운영서버에서만 기동.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    restart: unless-stopped
+    profiles: ["tunnel", "full"]
+
+  # --- Dashboard (Track C, Phase 2.10 #4) ---
+  #
+  # FastAPI 백엔드 8090. CORS allowlist 는 DASHBOARD_CORS_ORIGINS 로 주입.
+  # control-ui (별 repo) 와 airflow/llm_stats/logs/macro/portfolio/system/trades/watchlist
+  # 9개 router 소비.
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      <<: *common-env
+      DASHBOARD_CORS_ORIGINS: ${DASHBOARD_CORS_ORIGINS:-http://localhost:5173}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full", "apps"]
+
+  # --- Monitor (Track C, Phase 2.10 #5) ---
+  #
+  # poller 기반 포지션/체결 모니터 8091. KIS Gateway REST 로 price/balance 폴링.
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    environment:
+      <<: *common-env
+      KIS_GATEWAY_URL: http://kis-gateway:8080
+      MONITOR_POLL_INTERVAL_SEC: ${MONITOR_POLL_INTERVAL_SEC:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8091:8091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kis-gateway:
+        condition: service_started
+    restart: unless-stopped
+    # monitor 는 KIS Gateway 의존이므로 full 전용. apps 프로파일에는 포함하지 않는다.
+    profiles: ["full"]
+
+  # --- Job Worker (Track B, Phase 2.10 #1 — v2 job-worker 22 엔드포인트 대체) ---
+  #
+  # v2 `prime_jennie/services/jobs/app.py` (FastAPI, 2883줄) 는 Airflow DAG 가 http_conn
+  # 으로 불러 돌리던 함수 shell 이었다. v3 는 `scheduled_jobs` 테이블 (owner=job_worker)
+  # 을 단일 진실 공급원으로 삼고 apscheduler 로 직접 실행 → daemon 1개로 압축.
+  #
+  # HTTP 미노출 (health 포함) — slow-loop/news-pipeline 패턴과 일치. 외부 모니터링은
+  # dashboard `/api/airflow/jobs` 프록시 또는 `scheduled_job_runs` 테이블로.
+  # cleanup/macro/contract_smoke 등은 `scripts/seed_scheduled_jobs.py` 에서 시드.
+
+  job-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.job_worker
+    environment:
+      <<: *common-env
+      # macro_collect_global/korea 는 BOK ECOS 키가 있을 때만 실제 호출.
+      # 비어 있으면 jobs/app.py 가 None 으로 전달 → fallback 경로만 동작.
+      BOK_ECOS_API_KEY: ${BOK_ECOS_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # --- Application Services (Phase 2.10 library 정리) ---
+  #
+  # Track D 설계 확정 (2026-04-17):
+  #   briefing (#6)  — pure async library. job worker 이미지에 import 됨 → 단독 서비스 없음
+  #   backtest (#8)  — library. Phase 3 engine/daily_strategies 포팅 후 CLI 추가 예정
+  #   council  (#7)  — pure library. slow_loop Macro + dashboard macro router + telegram_bot import → 단독 서비스 없음
+
 networks:
   default:
     driver: bridge

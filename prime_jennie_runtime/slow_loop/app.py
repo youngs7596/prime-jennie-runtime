@@ -133,8 +133,14 @@ def _try_build_tiered_router() -> Any | None:
     return {"strong": strong, "reasoning": reasoning, "default": strong}
 
 
-def _build_slow_loop_components(redis_client: aioredis.Redis) -> SlowLoopComponents | None:
-    """SlowLoopComponents 조립. tier 라우터 구성 실패 시 None."""
+def _build_slow_loop_components(
+    redis_client: aioredis.Redis,
+    db_engine: Any = None,
+) -> SlowLoopComponents | None:
+    """SlowLoopComponents 조립. tier 라우터 구성 실패 시 None.
+
+    db_engine 이 주어지면 macro_runs/scout_runs 를 persist. None 이면 기록 없이 실행.
+    """
     tiers = _try_build_tiered_router()
     if tiers is None:
         return None
@@ -178,6 +184,7 @@ def _build_slow_loop_components(redis_client: aioredis.Redis) -> SlowLoopCompone
         publisher=publisher,
         state_store=state_store,
         observer=observer,
+        db_engine=db_engine,
     )
 
 
@@ -192,7 +199,11 @@ async def run() -> None:
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=False)
         stack.push_async_callback(redis_client.aclose)
 
-        components = _build_slow_loop_components(redis_client)
+        # DB engine 은 SchedulerStore + slow_loop persistence 양쪽이 공유
+        engine = create_engine(cfg.postgres)
+        stack.push_async_callback(engine.dispose)
+
+        components = _build_slow_loop_components(redis_client, db_engine=engine)
         if components is None:
             logger.warning(
                 "slow_loop components 미구성 (VLLM_LLM_URL/MODEL 또는 langchain_openai 누락). "
@@ -232,9 +243,6 @@ async def run() -> None:
             )
 
         handlers = {"scout_daily": scout_daily}
-
-        engine = create_engine(cfg.postgres)
-        stack.push_async_callback(engine.dispose)
 
         scheduler = SchedulerRunner(
             owner=OWNER,

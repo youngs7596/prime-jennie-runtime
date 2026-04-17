@@ -18,6 +18,7 @@ from datetime import datetime
 import redis.asyncio as aioredis
 
 from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.position_sheet.schema import KST
 from prime_jennie_runtime.slow_loop.app import _build_slow_loop_components
 from prime_jennie_runtime.slow_loop.pipeline import run_slow_loop
@@ -30,8 +31,9 @@ async def main() -> int:
     )
     cfg = AppConfig()
     redis_client = aioredis.from_url(cfg.redis.url, decode_responses=False)
+    engine = create_engine(cfg.postgres)
     try:
-        comp = _build_slow_loop_components(redis_client)
+        comp = _build_slow_loop_components(redis_client, db_engine=engine)
         if comp is None:
             print("components unavailable — VLLM_LLM_URL/MODEL 또는 langchain_openai 누락")
             return 1
@@ -63,6 +65,7 @@ async def main() -> int:
         return 0
     finally:
         await redis_client.aclose()
+        await engine.dispose()
 
 
 if __name__ == "__main__":

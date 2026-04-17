@@ -46,6 +46,7 @@ from .scout.schemas import (
 )
 from .scout.screening_stub import ScreeningInvoker
 from .scout.validators import ScoutValidationResult, validate_candidates
+from .persistence import persist_macro_run, persist_scout_run
 from .strategy.engine import StrategyEngine, StrategyEngineInputs
 from .strategy.publisher import PositionSheetPublisher
 
@@ -138,6 +139,7 @@ class SlowLoopComponents:
     publisher: PositionSheetPublisher
     state_store: MacroStateStore
     observer: Observer
+    db_engine: Any = None  # AsyncEngine | None — macro_runs/scout_runs 기록용
 
 
 def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
@@ -216,6 +218,17 @@ async def run_slow_loop(
         observer,
     )
 
+    # DB 기록 (engine=None 이면 no-op)
+    await persist_macro_run(
+        comp.db_engine,
+        macro_run_id=macro_run_id,
+        generated_at=as_of_dt,
+        trigger_reason=macro_trigger,
+        post=post,
+        macro_step_result=macro_result.state["macro_gate"],
+        news_digest_ref=getattr(macro_ctx, "news_digest_ref", None),
+    )
+
     # 상태 저장
     await comp.state_store.set(
         MacroCurrentState(
@@ -268,6 +281,16 @@ async def run_slow_loop(
     if scout_out is None:
         await observer.emit(pj_event("pj.scout.output_missing", role="scout", ok=False))
         return SlowLoopResult(macro_post=post, skipped_reason="scout_output_missing")
+
+    # DB 기록 (engine=None 이면 no-op). candidates_count 는 screening 후 갱신되지 않으므로
+    # expected_candidates 로 대체.
+    await persist_scout_run(
+        comp.db_engine,
+        scout_run_id=scout_run_id,
+        generated_at=as_of_dt,
+        scout_out=scout_out,
+        scout_step_result=scout_result.state["scout"],
+    )
 
     await observer.emit(
         pj_event(

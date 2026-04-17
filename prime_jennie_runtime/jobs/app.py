@@ -51,6 +51,7 @@ from .market_data import (
     collect_us_market,
     refresh_market_caps,
 )
+from .stock_masters import seed_stock_masters
 
 OWNER = "job_worker"
 
@@ -122,6 +123,9 @@ def build_handlers(
     async def h_collect_quarterly_financials() -> None:
         await collect_quarterly_financials(pool, http)
 
+    async def h_seed_stock_masters(market: str = "KOSPI") -> None:
+        await seed_stock_masters(pool, http, market=market)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -139,6 +143,7 @@ def build_handlers(
         "collect_consensus": h_collect_consensus,
         "collect_naver_roe": h_collect_naver_roe,
         "collect_quarterly_financials": h_collect_quarterly_financials,
+        "seed_stock_masters": h_seed_stock_masters,
     }
 
 

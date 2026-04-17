@@ -45,3 +45,20 @@
 - 원본 v2 경로를 커밋 메시지에 명시
 - 재작성 금지, 포팅 후 v3 인터페이스 어댑터만 추가
 - v2에서 안정적이었던 부분을 다시 짜는 건 자존심 낭비 (설계 원칙 1.6)
+
+## Memory Sync
+
+사용자는 여러 머신에서 작업하므로, Claude의 장기 기억은 **별도 private GitHub repo**(`~/.claude/global-memory-youngs7596/`, GitHub: `youngs7596/claude-global-memory`)로 동기화됩니다.
+
+- **본 프로젝트가 참조할 글로벌 메모리 파일:**
+  - `~/.claude/global-memory-youngs7596/prime-jennie-family.md` — 4 repo 구조, 핵심 설계 결정, v2 운영 상태
+  - `~/.claude/global-memory-youngs7596/trading-domain.md` — 거래비용, KIS API, Exit Rules, Risk Throttle
+  - `~/.claude/global-memory-youngs7596/minyoung-mah.md` — harness 라이브러리 궤적, gap feedback
+- **세션 시작 시:** 위 파일들을 읽고 (`cd ~/.claude/global-memory-youngs7596 && git pull --rebase -q` 선행) 적용
+- **장기 기억 승격:** 프로젝트 로컬 auto memory는 scratch 전용. 다른 머신에서도 필요한 지식은 위 파일로 승격
+- **세션 종료 또는 `sync memory` 지시 시:** `cd ~/.claude/global-memory-youngs7596 && git add -A && git commit -m "..." && git push`
+- **금지:** 프로젝트 로컬 auto memory에만 중요한 장기 기억을 남기지 말 것
+
+## 서브폴더 AGENTS.md
+
+각 서브 패키지에 해당 디렉토리의 책임과 규칙을 기술하는 `AGENTS.md`가 있습니다. LLM이 디렉토리에 진입할 때 먼저 읽어야 합니다.

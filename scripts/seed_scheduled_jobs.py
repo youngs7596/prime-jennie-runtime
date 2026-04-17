@@ -207,6 +207,14 @@ SEEDS: list[SeedJob] = [
         cron="0 4 15 1,4,7,10 *",
         kwargs={},
     ),
+    # Track B — daily_asset_snapshot (v2 utility_jobs_dag: 45 15 * * 1-5, 장마감 직후).
+    SeedJob(
+        id="job_worker.daily_asset_snapshot",
+        owner="job_worker",
+        handler_key="daily_asset_snapshot",
+        cron="45 15 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

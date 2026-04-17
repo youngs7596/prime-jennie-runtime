@@ -32,6 +32,7 @@ from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
     NaverNewsCrawler,
 )
 
+from .asset_snapshot import daily_asset_snapshot
 from .council_macro import (
     macro_collect_global,
     macro_collect_korea,
@@ -126,6 +127,9 @@ def build_handlers(
     async def h_seed_stock_masters(market: str = "KOSPI") -> None:
         await seed_stock_masters(pool, http, market=market)
 
+    async def h_daily_asset_snapshot() -> None:
+        await daily_asset_snapshot(pool, http, kis_gateway_url)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -144,6 +148,7 @@ def build_handlers(
         "collect_naver_roe": h_collect_naver_roe,
         "collect_quarterly_financials": h_collect_quarterly_financials,
         "seed_stock_masters": h_seed_stock_masters,
+        "daily_asset_snapshot": h_daily_asset_snapshot,
     }
 
 

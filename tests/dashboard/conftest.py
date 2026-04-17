@@ -79,6 +79,21 @@ _SCHEMA_STATEMENTS = [
         metadata_json TEXT DEFAULT '{}'
     )
     """,
+    # scout_runs
+    """
+    CREATE TABLE IF NOT EXISTS scout_runs (
+        scout_run_id TEXT PRIMARY KEY,
+        generated_at TIMESTAMP NOT NULL,
+        code_hash TEXT NOT NULL,
+        code_text TEXT NOT NULL,
+        hypothesis TEXT,
+        candidates_count INT,
+        model_used TEXT,
+        prompt_version TEXT,
+        cost_usd NUMERIC,
+        metadata_json TEXT DEFAULT '{}'
+    )
+    """,
     # scheduled_jobs
     """
     CREATE TABLE IF NOT EXISTS scheduled_jobs (

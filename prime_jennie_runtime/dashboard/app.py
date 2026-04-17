@@ -5,6 +5,7 @@ v2 `prime_jennie/services/dashboard/app.py` 포팅 (MariaDB/SQLModel → Postgre
 라우터:
 - /api/portfolio  — 포트폴리오 / 보유 종목 / 자산 히스토리
 - /api/macro      — 매크로 인사이트 (macro_runs)
+- /api/scout      — Scout run 이력 (scout_runs)
 - /api/watchlist  — 워치리스트 (Redis + position_sheets)
 - /api/trades     — 거래 기록 (executions)
 - /api/llm        — LLM 사용량 (Redis llm:stats:*)
@@ -34,6 +35,7 @@ from .routers import (
     logs,
     macro,
     portfolio,
+    scout,
     system,
     trades,
     watchlist,
@@ -85,6 +87,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     app.include_router(portfolio.router, prefix="/api")
     app.include_router(macro.router, prefix="/api")
+    app.include_router(scout.router, prefix="/api")
     app.include_router(watchlist.router, prefix="/api")
     app.include_router(trades.router, prefix="/api")
     app.include_router(llm_stats.router, prefix="/api")

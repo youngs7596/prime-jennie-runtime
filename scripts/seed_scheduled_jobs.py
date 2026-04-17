@@ -231,6 +231,14 @@ SEEDS: list[SeedJob] = [
         cron="0 18 * * 1-5",
         kwargs={},
     ),
+    # Track B — weekly_factor_analysis (v2 utility_jobs_dag: 0 22 * * 5, 주간 금요일 밤).
+    SeedJob(
+        id="job_worker.weekly_factor_analysis",
+        owner="job_worker",
+        handler_key="weekly_factor_analysis",
+        cron="0 22 * * 5",
+        kwargs={"period_days": 30},
+    ),
 ]
 
 

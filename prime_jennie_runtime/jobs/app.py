@@ -41,6 +41,7 @@ from .council_macro import (
     macro_validate_store,
 )
 from .disclosures import collect_dart_filings
+from .factor_analysis import weekly_factor_analysis
 from .fundamentals import (
     collect_consensus,
     collect_naver_roe,
@@ -150,6 +151,9 @@ def build_handlers(
     async def h_analyst_feedback() -> None:
         await analyst_feedback(redis_client)
 
+    async def h_weekly_factor_analysis(period_days: int = 30) -> None:
+        await weekly_factor_analysis(pool, redis_client, period_days=period_days)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -172,6 +176,7 @@ def build_handlers(
         "sync_positions": h_sync_positions,
         "analyze_ai_performance": h_analyze_ai_performance,
         "analyst_feedback": h_analyst_feedback,
+        "weekly_factor_analysis": h_weekly_factor_analysis,
     }
 
 

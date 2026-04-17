@@ -54,6 +54,7 @@ from .market_data import (
     collect_us_market,
     refresh_market_caps,
 )
+from .minute_chart import collect_minute_chart
 from .positions import sync_positions
 from .stock_masters import seed_stock_masters
 
@@ -154,6 +155,9 @@ def build_handlers(
     async def h_weekly_factor_analysis(period_days: int = 30) -> None:
         await weekly_factor_analysis(pool, redis_client, period_days=period_days)
 
+    async def h_collect_minute_chart(top_n: int = 30) -> None:
+        await collect_minute_chart(pool, http, kis_gateway_url, top_n=top_n)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -177,6 +181,7 @@ def build_handlers(
         "analyze_ai_performance": h_analyze_ai_performance,
         "analyst_feedback": h_analyst_feedback,
         "weekly_factor_analysis": h_weekly_factor_analysis,
+        "collect_minute_chart": h_collect_minute_chart,
     }
 
 

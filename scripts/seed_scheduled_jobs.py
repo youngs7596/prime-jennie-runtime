@@ -239,6 +239,15 @@ SEEDS: list[SeedJob] = [
         cron="0 22 * * 5",
         kwargs={"period_days": 30},
     ),
+    # Track B — collect_minute_chart (v2 utility_jobs_dag: */5 9-15 * * 1-5, 백테스트 보조).
+    # price_scheduler.collect_minute (universe-driven) 와 별개 — 이건 top30+watchlist 자동 발견.
+    SeedJob(
+        id="job_worker.collect_minute_chart",
+        owner="job_worker",
+        handler_key="collect_minute_chart",
+        cron="*/5 9-15 * * 1-5",
+        kwargs={"top_n": 30},
+    ),
 ]
 
 

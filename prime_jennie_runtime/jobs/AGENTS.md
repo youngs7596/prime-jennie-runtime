@@ -21,7 +21,7 @@ slow_loop.scout_daily) 는 이미 전용 runner 로 분리됨.
 | `market_data.py` | collect_index_daily_prices, collect_us_market, collect_investor_trading, collect_foreign_holding, refresh_market_caps, collect_minute_chart (백테스트 상위30) |
 | `fundamentals.py` | collect_dart_filings, collect_consensus, collect_naver_roe, collect_quarterly_financials |
 | `analytics.py` | daily_asset_snapshot, analyze_ai_performance, analyst_feedback, weekly_factor_analysis |
-| `council_macro.py` | macro_collect_global/korea, macro_validate_store, macro_quick, council_trigger, council_insight |
+| `council_macro.py` | macro_collect_global/korea, macro_validate_store, macro_quick (council_trigger/council_insight 는 slow_loop 전담 — 아래 참조) |
 | `positions.py` | sync_positions |
 | `briefing_glue.py` | daily_briefing_report (호출만 — 구현은 Track D briefing) |
 
@@ -47,3 +47,27 @@ v2 `dags/utility_jobs_dag.py` 의 default_args + schedule_interval 과 맞춘다
 
 `tests/jobs/` 에 도메인 별 happy path smoke test. 외부 HTTP 는 `respx` 로
 mock, DB 는 asyncpg 에 fakes 또는 test DB 접근(conftest).
+
+## 범위 제외 — council_trigger / council_insight (deferred)
+
+v2 `/jobs/council-trigger` (app.py:1689-1788) 와 `/jobs/council-insight`
+(app.py:1791-1798) 는 v3 에선 **job-worker 소관이 아니다**.
+
+이유:
+- `MacroCouncilPipeline.run` (Council 상태 머신) 은 v3 에서 `slow_loop` 가
+  소유. 해당 파이프라인을 job-worker 가 다시 호출하면 DI/상태 이원화.
+- v2 엔드포인트는 단순 "트리거" 가 아니라 `CouncilInput` 조립 orchestrator —
+  Redis snapshot 로드 + Telegram (hedgecat) + WSJ Gmail + 네이버 헤드라인 +
+  index technical text 수집 + 결과 persist + TradingContext 업데이트.
+  이 전부가 slow_loop 이 이미 포팅 중인 의존 그래프 안에 있다.
+- `council_insight` 는 Redis TypedCache 단순 GET — v3 dashboard API 가
+  `/insight/latest` 로 노출 (Track D `council_logging`).
+
+v3 에서의 대체 진입점:
+- 트리거: `slow_loop` runner 의 council 사이클 (owner=`slow_loop` 의
+  `scout_daily` / 별도 `council_cycle`) — seed_scheduled_jobs 에 slow_loop
+  owner 로 등록.
+- 조회: Dashboard API (`control-ui` → Track D `council_logging.router`).
+
+결과적으로 Track B 의 22/22 포팅 목표에는 영향 없음 — 이 두 엔드포인트는
+"v3 에선 해당 없음 (owner 변경)" 으로 처리.

@@ -24,21 +24,42 @@ from typing import Any
 import asyncpg
 import httpx
 import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
     NaverNewsCrawler,
 )
 
+from .analytics import analyst_feedback, analyze_ai_performance
+from .asset_snapshot import daily_asset_snapshot
+from .briefing_glue import daily_briefing_report
 from .council_macro import (
     macro_collect_global,
     macro_collect_korea,
     macro_quick,
     macro_validate_store,
 )
+from .disclosures import collect_dart_filings
+from .factor_analysis import weekly_factor_analysis
+from .full_market_daily import collect_full_market_data
+from .fundamentals import (
+    collect_consensus,
+    collect_naver_roe,
+    collect_quarterly_financials,
+)
+from .investor_data import collect_foreign_holding, collect_investor_trading
 from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
+from .market_data import (
+    collect_index_daily_prices,
+    collect_us_market,
+    refresh_market_caps,
+)
+from .minute_chart import collect_minute_chart
+from .positions import sync_positions
+from .stock_masters import seed_stock_masters
 
 OWNER = "job_worker"
 
@@ -50,6 +71,9 @@ def build_handlers(
     pool: asyncpg.Pool,
     http: httpx.AsyncClient,
     redis_client: aioredis.Redis,
+    kis_gateway_url: str,
+    engine: AsyncEngine,
+    telegram_config: TelegramConfig | None,
 ) -> dict[str, Callable[..., Awaitable[Any]]]:
     """handler_key → async callable 매핑.
 
@@ -62,6 +86,7 @@ def build_handlers(
         await macro_validate_store(redis_client)
 
     bok_ecos_api_key = os.environ.get("BOK_ECOS_API_KEY") or None
+    dart_api_key = os.environ.get("DART_API_KEY") or ""
 
     async def h_macro_collect_global() -> None:
         await macro_collect_global(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
@@ -81,6 +106,73 @@ def build_handlers(
     async def h_update_naver_sectors() -> None:
         await update_naver_sectors(pool, http)
 
+    async def h_refresh_market_caps() -> None:
+        await refresh_market_caps(pool, http, kis_gateway_url)
+
+    async def h_collect_index_daily_prices(days: int = 250) -> None:
+        await collect_index_daily_prices(pool, http, days=days)
+
+    async def h_collect_us_market(days: int = 500) -> None:
+        await collect_us_market(pool, http, days=days)
+
+    async def h_collect_investor_trading() -> None:
+        await collect_investor_trading(pool, http)
+
+    async def h_collect_foreign_holding() -> None:
+        await collect_foreign_holding(pool, http)
+
+    async def h_collect_dart_filings(days: int = 7) -> None:
+        await collect_dart_filings(pool, http, api_key=dart_api_key, days=days)
+
+    async def h_collect_consensus() -> None:
+        await collect_consensus(pool, http)
+
+    async def h_collect_naver_roe() -> None:
+        await collect_naver_roe(pool, http)
+
+    async def h_collect_quarterly_financials() -> None:
+        await collect_quarterly_financials(pool, http)
+
+    async def h_seed_stock_masters(market: str = "KOSPI") -> None:
+        await seed_stock_masters(pool, http, market=market)
+
+    async def h_daily_asset_snapshot() -> None:
+        await daily_asset_snapshot(pool, http, kis_gateway_url)
+
+    async def h_sync_positions(
+        dry_run: bool = True, stop_loss_pct: float = 6.0
+    ) -> None:
+        await sync_positions(
+            pool,
+            http,
+            redis_client,
+            kis_gateway_url,
+            dry_run=dry_run,
+            stop_loss_pct=stop_loss_pct,
+        )
+
+    async def h_analyze_ai_performance(period_days: int = 30) -> None:
+        await analyze_ai_performance(pool, redis_client, period_days=period_days)
+
+    async def h_analyst_feedback() -> None:
+        await analyst_feedback(redis_client)
+
+    async def h_weekly_factor_analysis(period_days: int = 30) -> None:
+        await weekly_factor_analysis(pool, redis_client, period_days=period_days)
+
+    async def h_collect_minute_chart(top_n: int = 30) -> None:
+        await collect_minute_chart(pool, http, kis_gateway_url, top_n=top_n)
+
+    async def h_collect_full_market_data(top_n: int = 300, days: int = 30) -> None:
+        await collect_full_market_data(
+            pool, http, kis_gateway_url, top_n=top_n, days=days
+        )
+
+    async def h_daily_briefing_report() -> None:
+        await daily_briefing_report(
+            engine, http, telegram_config=telegram_config, llm_caller=None
+        )
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -89,6 +181,24 @@ def build_handlers(
         "macro_quick": h_macro_quick,
         "contract_smoke_test": h_contract_smoke_test,
         "update_naver_sectors": h_update_naver_sectors,
+        "refresh_market_caps": h_refresh_market_caps,
+        "collect_index_daily_prices": h_collect_index_daily_prices,
+        "collect_us_market": h_collect_us_market,
+        "collect_investor_trading": h_collect_investor_trading,
+        "collect_foreign_holding": h_collect_foreign_holding,
+        "collect_dart_filings": h_collect_dart_filings,
+        "collect_consensus": h_collect_consensus,
+        "collect_naver_roe": h_collect_naver_roe,
+        "collect_quarterly_financials": h_collect_quarterly_financials,
+        "seed_stock_masters": h_seed_stock_masters,
+        "daily_asset_snapshot": h_daily_asset_snapshot,
+        "sync_positions": h_sync_positions,
+        "analyze_ai_performance": h_analyze_ai_performance,
+        "analyst_feedback": h_analyst_feedback,
+        "weekly_factor_analysis": h_weekly_factor_analysis,
+        "collect_minute_chart": h_collect_minute_chart,
+        "collect_full_market_data": h_collect_full_market_data,
+        "daily_briefing_report": h_daily_briefing_report,
     }
 
 
@@ -116,10 +226,28 @@ async def run() -> None:
         )
         stack.push_async_callback(pool.close)
 
-        handlers = build_handlers(pool=pool, http=http, redis_client=redis_client)
+        kis_gateway_url = os.environ.get(
+            "KIS_GATEWAY_URL", cfg.kis.gateway_url
+        ).rstrip("/")
 
         engine = create_engine(cfg.postgres)
         stack.push_async_callback(engine.dispose)
+
+        telegram_cfg: TelegramConfig | None = (
+            cfg.telegram
+            if (cfg.telegram.bot_token and cfg.telegram.chat_id)
+            or cfg.telegram.dry_run
+            else None
+        )
+
+        handlers = build_handlers(
+            pool=pool,
+            http=http,
+            redis_client=redis_client,
+            kis_gateway_url=kis_gateway_url,
+            engine=engine,
+            telegram_config=telegram_cfg,
+        )
 
         scheduler = SchedulerRunner(
             owner=OWNER,

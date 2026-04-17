@@ -135,6 +135,138 @@ SEEDS: list[SeedJob] = [
         cron="0 20 * * 0",
         kwargs={},
     ),
+    # Track B — refresh_market_caps (v2 utility_jobs_dag: 50 15 * * 1-5, 장마감 후).
+    SeedJob(
+        id="job_worker.refresh_market_caps",
+        owner="job_worker",
+        handler_key="refresh_market_caps",
+        cron="50 15 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — collect_index_daily_prices (v2 utility_jobs_dag: 5 16 * * 1-5).
+    SeedJob(
+        id="job_worker.collect_index_daily_prices",
+        owner="job_worker",
+        handler_key="collect_index_daily_prices",
+        cron="5 16 * * 1-5",
+        kwargs={"days": 250},
+    ),
+    # Track B — collect_us_market (v2 utility_jobs_dag: 0 7 * * 2-6, 미장 마감 후 KST 아침).
+    SeedJob(
+        id="job_worker.collect_us_market",
+        owner="job_worker",
+        handler_key="collect_us_market",
+        cron="0 7 * * 2-6",
+        kwargs={"days": 500},
+    ),
+    # Track B — collect_investor_trading (v2 utility_jobs_dag: 30 18 * * 1-5, 장후 수급).
+    SeedJob(
+        id="job_worker.collect_investor_trading",
+        owner="job_worker",
+        handler_key="collect_investor_trading",
+        cron="30 18 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — collect_foreign_holding (v2 utility_jobs_dag: 0 19 * * 1-5, 외국인 지분율).
+    SeedJob(
+        id="job_worker.collect_foreign_holding",
+        owner="job_worker",
+        handler_key="collect_foreign_holding",
+        cron="0 19 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — collect_dart_filings (v2 utility_jobs_dag: 45 18 * * 1-5, DART 정기공시).
+    SeedJob(
+        id="job_worker.collect_dart_filings",
+        owner="job_worker",
+        handler_key="collect_dart_filings",
+        cron="45 18 * * 1-5",
+        kwargs={"days": 7},
+    ),
+    # Track B — collect_consensus (v2 utility_jobs_dag: 0 6 * * 1,4, 주간 월/목).
+    SeedJob(
+        id="job_worker.collect_consensus",
+        owner="job_worker",
+        handler_key="collect_consensus",
+        cron="0 6 * * 1,4",
+        kwargs={},
+    ),
+    # Track B — collect_naver_roe (v2 utility_jobs_dag: 0 3 1 * *, 월간 1일 03:00).
+    SeedJob(
+        id="job_worker.collect_naver_roe",
+        owner="job_worker",
+        handler_key="collect_naver_roe",
+        cron="0 3 1 * *",
+        kwargs={},
+    ),
+    # Track B — collect_quarterly_financials (v2 utility_jobs_dag: 0 4 15 1,4,7,10 *, 분기).
+    SeedJob(
+        id="job_worker.collect_quarterly_financials",
+        owner="job_worker",
+        handler_key="collect_quarterly_financials",
+        cron="0 4 15 1,4,7,10 *",
+        kwargs={},
+    ),
+    # Track B — daily_asset_snapshot (v2 utility_jobs_dag: 45 15 * * 1-5, 장마감 직후).
+    SeedJob(
+        id="job_worker.daily_asset_snapshot",
+        owner="job_worker",
+        handler_key="daily_asset_snapshot",
+        cron="45 15 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — analyze_ai_performance (v2 utility_jobs_dag: 0 7 * * 1-5, 개장 전 분석).
+    SeedJob(
+        id="job_worker.analyze_ai_performance",
+        owner="job_worker",
+        handler_key="analyze_ai_performance",
+        cron="0 7 * * 1-5",
+        kwargs={"period_days": 30},
+    ),
+    # Track B — analyst_feedback (v2 utility_jobs_dag: 0 18 * * 1-5, analyze 결과 기반).
+    SeedJob(
+        id="job_worker.analyst_feedback",
+        owner="job_worker",
+        handler_key="analyst_feedback",
+        cron="0 18 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — weekly_factor_analysis (v2 utility_jobs_dag: 0 22 * * 5, 주간 금요일 밤).
+    SeedJob(
+        id="job_worker.weekly_factor_analysis",
+        owner="job_worker",
+        handler_key="weekly_factor_analysis",
+        cron="0 22 * * 5",
+        kwargs={"period_days": 30},
+    ),
+    # Track B — collect_minute_chart (v2 utility_jobs_dag: */5 9-15 * * 1-5, 백테스트 보조).
+    # price_scheduler.collect_minute (universe-driven) 와 별개 — 이건 top30+watchlist 자동 발견.
+    SeedJob(
+        id="job_worker.collect_minute_chart",
+        owner="job_worker",
+        handler_key="collect_minute_chart",
+        cron="*/5 9-15 * * 1-5",
+        kwargs={"top_n": 30},
+    ),
+    # Track B — collect_full_market_data (v2 utility_jobs_dag: 0 16 * * 1-5, 일봉 top300).
+    # price_scheduler.collect_daily 와 동일 시간대 → 기본 disabled. 운영 전환 시 enable.
+    SeedJob(
+        id="job_worker.collect_full_market_data",
+        owner="job_worker",
+        handler_key="collect_full_market_data",
+        cron="0 16 * * 1-5",
+        kwargs={"top_n": 300, "days": 30},
+        enabled=False,
+    ),
+    # Track B — daily_briefing_report (v2 utility_jobs_dag: 0 17 * * 1-5, 장마감 후 브리핑).
+    # Telegram 전송은 TELEGRAM_BOT_TOKEN/CHAT_ID 가 설정되어야 실제 발송. 기본은 skip.
+    SeedJob(
+        id="job_worker.daily_briefing_report",
+        owner="job_worker",
+        handler_key="daily_briefing_report",
+        cron="0 17 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

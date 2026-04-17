@@ -320,15 +320,40 @@ services:
     # monitor 는 KIS Gateway 의존이므로 full 전용. apps 프로파일에는 포함하지 않는다.
     profiles: ["full"]
 
-  # --- Application Services (Phase 2.10 — 아직 미배선) ---
+  # --- Job Worker (Track B, Phase 2.10 #1 — v2 job-worker 22 엔드포인트 대체) ---
+  #
+  # v2 `prime_jennie/services/jobs/app.py` (FastAPI, 2883줄) 는 Airflow DAG 가 http_conn
+  # 으로 불러 돌리던 함수 shell 이었다. v3 는 `scheduled_jobs` 테이블 (owner=job_worker)
+  # 을 단일 진실 공급원으로 삼고 apscheduler 로 직접 실행 → daemon 1개로 압축.
+  #
+  # HTTP 미노출 (health 포함) — slow-loop/news-pipeline 패턴과 일치. 외부 모니터링은
+  # dashboard `/api/airflow/jobs` 프록시 또는 `scheduled_job_runs` 테이블로.
+  # cleanup/macro/contract_smoke 등은 `scripts/seed_scheduled_jobs.py` 에서 시드.
+
+  job-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.job_worker
+    environment:
+      <<: *common-env
+      # macro_collect_global/korea 는 BOK ECOS 키가 있을 때만 실제 호출.
+      # 비어 있으면 jobs/app.py 가 None 으로 전달 → fallback 경로만 동작.
+      BOK_ECOS_API_KEY: ${BOK_ECOS_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # --- Application Services (Phase 2.10 library 정리) ---
   #
   # Track D 설계 확정 (2026-04-17):
   #   briefing (#6)  — pure async library. job worker 이미지에 import 됨 → 단독 서비스 없음
   #   backtest (#8)  — library. Phase 3 engine/daily_strategies 포팅 후 CLI 추가 예정
   #   council  (#7)  — pure library. slow_loop Macro + dashboard macro router + telegram_bot import → 단독 서비스 없음
-  #
-  # TODO #11 — Dockerfile 도착 시 주석 해제:
-  #   job-worker (Track B, #1)  — Dockerfile.job_worker (대기)
 
 networks:
   default:

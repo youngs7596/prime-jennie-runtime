@@ -18,16 +18,14 @@ MS-01 에서 `docker compose --profile full --profile observe up -d` 이후 실�
     6. Telegram Bot Redis heartbeat
     7. scheduled_jobs 4 cron seed (news/price-minute/price-daily/scout) 존재
 
-  Phase 2.10 신규 (블로커 해소 후 활성화)
+  Phase 2.10 확정:
     8. Dashboard /health            (#4 Track C)
     9. Monitor /health              (#5 Track C)
-   10. Briefing /health             (#6 Track C)
-   11. Council 로깅 consumer alive  (#7 Track C)
-   12. Backtest /health             (#8 Track D)
-   13. Job-worker /health           (#1 Track B)
+   10. job_worker seed 존재 확인    (#1 Track B — HTTP 없는 daemon)
+       — briefing/backtest/council 은 library 이므로 probe 없음.
 
   Tunnel (--with-tunnel, MS-01 만)
-   14. cloudflared metrics :2000
+   11. cloudflared metrics :2000
 
 실행:
     uv run python -m scripts.phase_2_10_full_smoke
@@ -134,14 +132,46 @@ async def step_scheduled_jobs_seed(
     }
     conn = await asyncpg.connect(host=host, port=port, user=user, password=password, database=db)
     try:
-        rows = await conn.fetch("SELECT job_name FROM scheduled_jobs")
-        found = {r["job_name"] for r in rows}
+        rows = await conn.fetch("SELECT id FROM scheduled_jobs")
+        found = {r["id"] for r in rows}
         missing = expected - found
         if missing:
             return StepResult(
                 "scheduled_jobs_seed", "FAIL", f"missing={sorted(missing)} found={len(found)}"
             )
         return StepResult("scheduled_jobs_seed", "PASS", f"4 cron seed 확인 ({len(found)} total)")
+    finally:
+        await conn.close()
+
+
+async def step_job_worker_seed(
+    host: str, port: int, user: str, password: str, db: str, min_count: int = 5
+) -> StepResult:
+    """job_worker 는 HTTP daemon 이 아니므로 DB seed 존재로 #1 도달 여부 판단.
+
+    `scheduled_jobs WHERE owner='job_worker'` 가 min_count 이상이면 PASS.
+    v2 utility_jobs_dag / macro_dag 대체 핸들러 (cleanup_old_data / macro_validate_store
+    / macro_collect_global / macro_collect_korea / macro_quick / contract_smoke_test /
+    update_naver_sectors) 가 seed 에 들어가 있을 때 #1 이 실질 도달.
+    """
+    try:
+        import asyncpg
+    except ImportError:
+        return StepResult("job_worker_seed", "FAIL", "asyncpg 미설치")
+
+    conn = await asyncpg.connect(host=host, port=port, user=user, password=password, database=db)
+    try:
+        rows = await conn.fetch(
+            "SELECT id FROM scheduled_jobs WHERE owner = 'job_worker' AND enabled"
+        )
+        count = len(rows)
+        if count < min_count:
+            return StepResult(
+                "job_worker_seed",
+                "FAIL",
+                f"owner=job_worker count={count} < {min_count} (seed 미실행?)",
+            )
+        return StepResult("job_worker_seed", "PASS", f"owner=job_worker {count} handler 시드 확인")
     finally:
         await conn.close()
 
@@ -153,9 +183,10 @@ PHASE_2_10_ENDPOINTS = [
     # (step_name, url, task_id)
     # Track D 확정: briefing(#6)/backtest(#8)/council(#7) 모두 library 로 확정 →
     # compose 서비스 없음 → smoke probe 에서 제외.
+    # Track B 확정 (#1): job_worker 도 HTTP 없는 pure daemon → DB seed 체크
+    # (step_job_worker_seed) 로 대체. 여기서는 제외.
     ("dashboard", "http://localhost:8090/health", "#4"),
     ("monitor", "http://localhost:8091/health", "#5"),
-    ("job_worker", "http://localhost:8095/health", "#1"),
 ]
 
 
@@ -229,6 +260,11 @@ async def _main() -> int:
     await _run(
         "scheduled_jobs_seed",
         step_scheduled_jobs_seed(pg_host, pg_port, pg_user, pg_password, pg_db),
+    )
+    # #1 job_worker 는 HTTP 가 없는 daemon. seed 로만 존재 확인.
+    await _run(
+        "job_worker_seed",
+        step_job_worker_seed(pg_host, pg_port, pg_user, pg_password, pg_db),
     )
 
     # Phase 2.10 신규 서비스 (블로커 대기)

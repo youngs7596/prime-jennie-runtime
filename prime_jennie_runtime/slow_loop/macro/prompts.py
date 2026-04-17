@@ -1,0 +1,129 @@
+"""Macro Gate 프롬프트.
+
+MACRO_GATE_SPEC §4. system prompt + user prompt template. few-shot은 Phase 2
+별도 디렉토리로 분리 예정.
+"""
+
+from __future__ import annotations
+
+from .schemas import MacroContext
+
+MACRO_SYSTEM_PROMPT = """당신은 Prime Jennie의 Macro Gate입니다. KOSPI/KOSDAQ 트레이딩 시스템의 거시 환경 게이트 역할을 합니다.
+
+책임:
+- 거시 환경을 종합 판단하여 오늘 매매 허용 여부(gate)와 포지션 크기 배수(size_multiplier)를 결정한다
+- 판단 근거(reasoning)는 명확히 기록하지만, 이는 로깅 용도이며 실행 로직은 두 숫자(gate, size_multiplier)만으로 결정된다
+
+중요 원칙:
+1. 당신은 어드바이저가 아닙니다. 두 숫자로 게이트 역할만 합니다.
+2. 불확실성을 reasoning으로 풀어쓰려 하지 말고, size_multiplier의 수치로 표현하십시오.
+3. "상황을 지켜봐야 한다" 같은 유보적 표현 대신, 현재 가용 정보로 결정하십시오. 6시간 후 재검토는 next_review_hint에 적으십시오.
+
+gate = "closed" 조건 (하나라도 충족 시 반드시 closed):
+1. 지정학적 critical 이벤트 (한반도/중동/대만 군사 충돌 임박 또는 발생)
+2. 유동성 경색 (호가 스프레드 2배 확대, 거래대금 50% 감소)
+3. 섹터 전염 (주요 섹터 3개 이상 동시 -5% 이상 하락)
+4. 환율 충격 (KRW/USD 일일 ±3% 이상)
+5. 시스템 이벤트 (시스템 장애, 서킷브레이커)
+
+1개 미만 충족 시 open. 이 조건은 엄격히 지킵니다.
+
+size_multiplier 가이드:
+- 1.00: 거시 매우 양호, 변동성 낮음, 뚜렷한 상승 환경
+- 0.75: 중립 ~ 약한 긍정
+- 0.50: 불확실, 혼재 신호
+- 0.25: 부정적이나 closed 조건 미충족, 극히 보수적 운용
+- 출력은 연속값이지만 0.25 단위로 이산화됨을 감안 (경계값은 아래 구간에 포함, 즉 0.50 출력은 0.50으로 매핑)
+
+중요 제약 — 모순 방지:
+- gate="open"과 size_multiplier=0.0은 동시에 내보낼 수 없습니다. 크기가 0이면 정의상 closed입니다.
+- 0에 가까운 값이면 size_multiplier=0.01 이상으로 내놓되 reasoning에 보수 이유 명시, 또는 gate=closed로 전환하십시오.
+
+top_risks는 최대 5개. 각 리스크는 category/severity/description 구조.
+severity "critical"이 1개 이상이면 gate 판단에 강하게 반영.
+
+reasoning은 500자 이내. 결론→근거 순서. 감정어 배제, 사실과 판단만.
+
+과거 run 연속성 고려:
+- 제공되는 최근 7일 run 이력을 참고하십시오
+- 급격한 게이트 전환(전일 1.00 → 오늘 0.25)은 명확한 사유와 함께
+- 반대로 상황이 명확히 개선되었는데도 관성적으로 낮은 multiplier를 유지하지 마십시오
+"""
+
+
+def build_user_prompt(ctx: MacroContext) -> str:
+    """User prompt 조립."""
+    snap = ctx.market_snapshot
+
+    recent_str = (
+        "\n".join(
+            f"  - {r.macro_run_id}: gate={r.gate} size={r.size_multiplier:.2f} risks={r.top_risks_summary or '(없음)'}"
+            for r in ctx.recent_runs[:7]
+        )
+        or "  (이력 없음)"
+    )
+
+    sector_str = (
+        "\n".join(f"    - {s.sector}: {s.change_pct:+.2%}" for s in snap.major_sector_drops)
+        or "    (섹터 스냅샷 없음)"
+    )
+
+    return f"""## 분석 기준 시각
+{ctx.as_of.isoformat()}
+Trigger: {ctx.trigger_reason}
+
+## 시장 스냅샷
+
+국내:
+- KOSPI: {snap.kospi.close:.2f} ({snap.kospi.change_pct:+.2%})
+- KOSDAQ: {snap.kosdaq.close:.2f} ({snap.kosdaq.change_pct:+.2%})
+
+해외 (전일 / 현재 선물):
+- S&P500: {snap.sp500.close:.2f} ({snap.sp500.change_pct:+.2%})
+- Nasdaq: {snap.nasdaq.close:.2f} ({snap.nasdaq.change_pct:+.2%})
+- Nikkei: {snap.nikkei.close:.2f} ({snap.nikkei.change_pct:+.2%})
+- HSI: {snap.hsi.close:.2f} ({snap.hsi.change_pct:+.2%})
+
+환율/원자재:
+- USD/KRW: {snap.usd_krw:.2f} ({snap.usd_krw_change_pct:+.2%})
+- Crude WTI: {snap.crude_oil:.2f} ({snap.crude_oil_change_pct:+.2%})
+- Gold: {snap.gold:.2f} ({snap.gold_change_pct:+.2%})
+
+공포 지수:
+- VIX: {snap.vix:.2f} (전일 {snap.vix_prev if snap.vix_prev is not None else "N/A"})
+- VKOSPI: {snap.vkospi if snap.vkospi is not None else "N/A"}
+
+변동성:
+- KOSPI 20d vol: {snap.kospi_20d_vol:.1%}
+- KOSPI 60d vol: {snap.kospi_60d_vol:.1%}
+
+섹터 하락 스냅샷 (closed 조건 참고):
+{sector_str}
+
+## WSJ News Digest
+Digest ID: {ctx.wsj_digest_id}
+{ctx.wsj_macro_summary}
+
+주요 헤드라인:
+{ctx.wsj_headlines_formatted}
+
+## 국내 매크로 뉴스
+{ctx.kor_macro_news_formatted}
+
+## 최근 Macro Gate 이력
+{recent_str}
+
+---
+
+다음 JSON 형식으로만 응답하십시오. news_digest_ref는 "{ctx.wsj_digest_id}" 사용:
+
+{{
+  "gate": "open" | "closed",
+  "size_multiplier": 0.0 ~ 1.0,
+  "reasoning": "<500자 이내>",
+  "top_risks": [{{"category": "...", "description": "...", "severity": "..."}}],
+  "confidence": "high" | "medium" | "low",
+  "news_digest_ref": "{ctx.wsj_digest_id}",
+  "next_review_hint": "<없으면 null>"
+}}
+"""

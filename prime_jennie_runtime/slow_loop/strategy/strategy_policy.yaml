@@ -1,0 +1,74 @@
+# Strategy Policy v3.0.1 — strategy_tag별 base_pct와 기본 exit rules.
+# Strategy Engine이 ScreeningCandidate를 PositionSheet로 조립할 때 참고.
+# base_pct, max_notional_krw, exit rule 파라미터 모두 영석이 수동 관리.
+#
+# 참고:
+# - v2 실증: Breakeven +3%→+0.3%, Profit Floor +15%→+10%, Death Cross MA5/MA20 min_loss 1%
+# - POSITION_SHEET_SPEC §5.3 권장 순서대로 rule 배열
+# - fixed_sl, time_stop은 모든 정책에 반드시 포함
+
+policy_version: "v3.0.1"
+
+strategies:
+  GAP_UP_REBOUND:
+    base_pct: 0.05
+    max_notional_krw: 5000000
+    default_exit_rules:
+      - type: trailing_tp
+        activate_pct: 0.05
+        drop_pct: 0.03
+      - type: breakeven
+        activate_pct: 0.03
+        floor_pct: 0.003
+      - type: fixed_sl
+        pct: 0.04
+      - type: time_stop
+        mode: eod
+
+  SECTOR_MOMENTUM:
+    base_pct: 0.05
+    max_notional_krw: 5000000
+    default_exit_rules:
+      - type: profit_floor
+        activate_pct: 0.15
+        floor_pct: 0.10
+      - type: trailing_tp
+        activate_pct: 0.06
+        drop_pct: 0.03
+      - type: breakeven
+        activate_pct: 0.03
+        floor_pct: 0.003
+      - type: death_cross
+        ma_short: 5
+        ma_long: 20
+        min_loss_pct: 0.01
+      - type: fixed_sl
+        pct: 0.05
+      - type: time_stop
+        mode: hold_days
+        value: 5
+
+  EARNINGS_DRIFT:
+    base_pct: 0.03
+    max_notional_krw: 3000000
+    default_exit_rules:
+      - type: trailing_tp
+        activate_pct: 0.07
+        drop_pct: 0.04
+      - type: fixed_sl
+        pct: 0.05
+      - type: time_stop
+        mode: hold_days
+        value: 10
+
+  MEAN_REVERT_RSI:
+    base_pct: 0.03
+    max_notional_krw: 3000000
+    default_exit_rules:
+      - type: fixed_tp
+        pct: 0.04
+      - type: fixed_sl
+        pct: 0.03
+      - type: time_stop
+        mode: hold_days
+        value: 3

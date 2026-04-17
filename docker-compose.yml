@@ -325,7 +325,7 @@ services:
   # Track D 설계 확정 (2026-04-17):
   #   briefing (#6)  — pure async library. job worker 이미지에 import 됨 → 단독 서비스 없음
   #   backtest (#8)  — library. Phase 3 engine/daily_strategies 포팅 후 CLI 추가 예정
-  #   council  (#7)  — 로깅/히스토리. 형태 확정 대기 (library vs consumer)
+  #   council  (#7)  — pure library. slow_loop Macro + dashboard macro router + telegram_bot import → 단독 서비스 없음
   #
   # TODO #11 — Dockerfile 도착 시 주석 해제:
   #   job-worker (Track B, #1)  — Dockerfile.job_worker (대기)

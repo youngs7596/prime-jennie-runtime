@@ -270,15 +270,63 @@ services:
     restart: unless-stopped
     profiles: ["tunnel", "full"]
 
+  # --- Dashboard (Track C, Phase 2.10 #4) ---
+  #
+  # FastAPI 백엔드 8090. CORS allowlist 는 DASHBOARD_CORS_ORIGINS 로 주입.
+  # control-ui (별 repo) 와 airflow/llm_stats/logs/macro/portfolio/system/trades/watchlist
+  # 9개 router 소비.
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      <<: *common-env
+      DASHBOARD_CORS_ORIGINS: ${DASHBOARD_CORS_ORIGINS:-http://localhost:5173}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full", "apps"]
+
+  # --- Monitor (Track C, Phase 2.10 #5) ---
+  #
+  # poller 기반 포지션/체결 모니터 8091. KIS Gateway REST 로 price/balance 폴링.
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    environment:
+      <<: *common-env
+      KIS_GATEWAY_URL: http://kis-gateway:8080
+      MONITOR_POLL_INTERVAL_SEC: ${MONITOR_POLL_INTERVAL_SEC:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8091:8091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kis-gateway:
+        condition: service_started
+    restart: unless-stopped
+    # monitor 는 KIS Gateway 의존이므로 full 전용. apps 프로파일에는 포함하지 않는다.
+    profiles: ["full"]
+
   # --- Application Services (Phase 2.10 — 각 Track 포팅 중, Dockerfile 올라오면 활성화) ---
   #
   # TODO #11 — 블로커 해소 후 주석 해제:
-  #   dashboard (Track C, #4)  — Dockerfile.dashboard
-  #   monitor   (Track C, #5)  — Dockerfile.monitor
-  #   briefing  (Track C, #6)  — Dockerfile.briefing
-  #   council   (Track C, #7)  — Dockerfile.council (로깅 전용)
-  #   backtest  (Track D, #8)  — Dockerfile.backtest
-  #   job-worker (Track B, #1) — Dockerfile.job_worker
+  #   briefing   (Track D, #6)  — Dockerfile.briefing (대기)
+  #   council    (Track D, #7)  — Dockerfile.council 또는 일반 runner (대기)
+  #   backtest   (Track D, #8)  — Dockerfile.backtest (대기)
+  #   job-worker (Track B, #1)  — Dockerfile.job_worker (대기)
 
 networks:
   default:

@@ -32,7 +32,11 @@ from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
     NaverNewsCrawler,
 )
 
-from .council_macro import macro_validate_store
+from .council_macro import (
+    macro_collect_global,
+    macro_collect_korea,
+    macro_validate_store,
+)
 from .maintenance import cleanup_old_data, contract_smoke_test
 
 OWNER = "job_worker"
@@ -56,6 +60,14 @@ def build_handlers(
     async def h_macro_validate_store() -> None:
         await macro_validate_store(redis_client)
 
+    bok_ecos_api_key = os.environ.get("BOK_ECOS_API_KEY") or None
+
+    async def h_macro_collect_global() -> None:
+        await macro_collect_global(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
+
+    async def h_macro_collect_korea() -> None:
+        await macro_collect_korea(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
+
     async def h_contract_smoke_test() -> None:
         # 뉴스 크롤러는 Track E 의 공통 HTTP 클라이언트를 재사용하지 않고
         # 각자 client 를 열고 닫는다 (v2 에서도 분리). 핸들러 수명과 일치.
@@ -65,6 +77,8 @@ def build_handlers(
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
+        "macro_collect_global": h_macro_collect_global,
+        "macro_collect_korea": h_macro_collect_korea,
         "contract_smoke_test": h_contract_smoke_test,
     }
 

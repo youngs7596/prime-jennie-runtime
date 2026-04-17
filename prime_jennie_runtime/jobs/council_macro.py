@@ -16,16 +16,29 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
+
+import httpx
+
+from .crawlers.naver_market import fetch_index_data, fetch_investor_flows
 
 logger = logging.getLogger(__name__)
 
 MACRO_SNAPSHOT_KEY_PREFIX = "macro:data:snapshot:"
+MACRO_SNAPSHOT_TTL_SEC = 7 * 86400  # v2 와 동일: 일주일 보관
 MACRO_VALIDATE_LOOKBACK_DAYS = 7
 MACRO_REQUIRED_FIELDS: tuple[str, ...] = ("kospi_index", "kosdaq_index")
 MACRO_KOSPI_RANGE = (1000, 10000)
 MACRO_KOSDAQ_RANGE = (300, 3000)
+
+_YAHOO_CHART_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+_YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
+_BOK_ECOS_BASE = "https://ecos.bok.or.kr/api/StatisticSearch"
+
+
+class MacroCollectError(RuntimeError):
+    """macro_collect_global 이 필수 입력(KOSPI/KOSDAQ 지수) 을 얻지 못했을 때."""
 
 
 class MacroValidationError(RuntimeError):
@@ -91,12 +104,200 @@ async def macro_validate_store(redis_client: Any) -> dict[str, Any]:
     return summary
 
 
+async def _fetch_vix(client: httpx.AsyncClient) -> tuple[float | None, str]:
+    """Yahoo ^VIX 5 일 종가에서 마지막 유효값 + regime (v2 app.py:923-957)."""
+    try:
+        resp = await client.get(
+            f"{_YAHOO_CHART_BASE}/%5EVIX",
+            params={"range": "5d", "interval": "1d"},
+            headers=_YAHOO_HEADERS,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        closes = resp.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        vix: float | None = None
+        for v in reversed(closes):
+            if v is not None:
+                vix = round(float(v), 2)
+                break
+        if vix is None:
+            return None, "unknown"
+        if vix < 15:
+            regime = "low_vol"
+        elif vix < 25:
+            regime = "normal"
+        elif vix < 35:
+            regime = "elevated"
+        else:
+            regime = "crisis"
+        return vix, regime
+    except Exception as e:
+        logger.warning("VIX fetch failed: %s", e)
+        return None, "unknown"
+
+
+async def _fetch_us_latest(
+    client: httpx.AsyncClient, yahoo_ticker: str, label: str
+) -> dict[str, float] | None:
+    """Yahoo 미국 지표 5 일 창에서 직전/최신 유효 종가 → 변동률 (v2 app.py:960-987)."""
+    try:
+        resp = await client.get(
+            f"{_YAHOO_CHART_BASE}/{yahoo_ticker}",
+            params={"range": "5d", "interval": "1d"},
+            headers=_YAHOO_HEADERS,
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        closes = resp.json()["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        valid = [(i, c) for i, c in enumerate(closes) if c is not None]
+        if len(valid) < 2:
+            return None
+        prev_close = valid[-2][1]
+        latest_close = valid[-1][1]
+        change_pct = round((latest_close - prev_close) / prev_close * 100, 2)
+        return {"close": round(latest_close, 2), "change_pct": change_pct}
+    except Exception as e:
+        logger.warning("%s fetch failed: %s", label, e)
+        return None
+
+
+async def _fetch_usd_krw(client: httpx.AsyncClient, api_key: str) -> float | None:
+    """BOK ECOS 통계 730Y001 (원/달러 매매기준율) 최근 10 일 중 최신 (v2 app.py:990-1013)."""
+    try:
+        end = date.today()
+        start = end - timedelta(days=10)
+        url = (
+            f"{_BOK_ECOS_BASE}/{api_key}/json/kr/1/10/731Y001/D/"
+            f"{start.strftime('%Y%m%d')}/{end.strftime('%Y%m%d')}/0000001"
+        )
+        resp = await client.get(url, timeout=10.0)
+        resp.raise_for_status()
+        rows = resp.json().get("StatisticSearch", {}).get("row", [])
+        if not rows:
+            return None
+        return float(rows[-1]["DATA_VALUE"].replace(",", ""))
+    except Exception as e:
+        logger.warning("USD/KRW fetch failed: %s", e)
+        return None
+
+
+async def macro_collect_global(
+    redis_client: Any,
+    http: httpx.AsyncClient,
+    *,
+    bok_ecos_api_key: str | None = None,
+) -> dict[str, Any]:
+    """v2 `/jobs/macro-collect-global` 포팅 (app.py:1016-1109).
+
+    네이버 금융 → KOSPI/KOSDAQ 지수/수급, Yahoo → VIX/SOX/NVDA, BOK ECOS →
+    USD/KRW. `macro:data:snapshot:{YYYY-MM-DD}` 에 merge-upsert 저장 (기존
+    글로벌 필드 보존, 한국 필드만 갱신). TTL 7일. macro_validate_store 와
+    동일 schema.
+
+    kospi/kosdaq 지수 둘 다 실패 시 `MacroCollectError` — scheduler runner 가
+    실패로 기록. Yahoo/BOK 는 실패해도 스냅샷은 저장한다 (v2 와 동일).
+    """
+    snapshot: dict[str, Any] = {}
+    trading_date: date | None = None
+
+    for code, prefix in (("KOSPI", "kospi"), ("KOSDAQ", "kosdaq")):
+        idx = await fetch_index_data(http, code)
+        if idx is None:
+            continue
+        snapshot[f"{prefix}_index"] = idx.close
+        snapshot[f"{prefix}_change_pct"] = idx.change_pct
+        if trading_date is None:
+            trading_date = idx.traded_at
+
+    if trading_date is None:
+        raise MacroCollectError("No trading data available from Naver")
+
+    td_str = trading_date.strftime("%Y%m%d")
+    for market, prefix in (("kospi", "kospi"), ("kosdaq", "kosdaq")):
+        flows = await fetch_investor_flows(http, market, td_str)
+        if flows is None:
+            continue
+        snapshot[f"{prefix}_foreign_net"] = flows.foreign_net
+        if prefix == "kospi":
+            snapshot["kospi_institutional_net"] = flows.institutional_net
+            snapshot["kospi_retail_net"] = flows.retail_net
+
+    vix, vix_regime = await _fetch_vix(http)
+    if vix is not None:
+        snapshot["vix"] = vix
+        snapshot["vix_regime"] = vix_regime
+
+    sox_data = await _fetch_us_latest(http, "^SOX", "SOX")
+    if sox_data:
+        snapshot["sox_close"] = sox_data["close"]
+        snapshot["sox_change_pct"] = sox_data["change_pct"]
+
+    nvda_data = await _fetch_us_latest(http, "NVDA", "NVDA")
+    if nvda_data:
+        snapshot["nvda_close"] = nvda_data["close"]
+        snapshot["nvda_change_pct"] = nvda_data["change_pct"]
+
+    usd_krw: float | None = None
+    if bok_ecos_api_key:
+        usd_krw = await _fetch_usd_krw(http, bok_ecos_api_key)
+        if usd_krw is not None:
+            snapshot["usd_krw"] = usd_krw
+
+    td_iso = trading_date.isoformat()
+    key = f"{MACRO_SNAPSHOT_KEY_PREFIX}{td_iso}"
+    existing_raw = await redis_client.get(key)
+    if existing_raw:
+        existing = json.loads(existing_raw)
+        existing.update(snapshot)
+        existing["snapshot_time"] = datetime.now().astimezone().isoformat()
+        snapshot = existing
+    else:
+        snapshot["snapshot_date"] = td_iso
+        snapshot["snapshot_time"] = datetime.now().astimezone().isoformat()
+        snapshot["data_sources"] = ["naver"]
+
+    await redis_client.set(
+        key,
+        json.dumps(snapshot, ensure_ascii=False, default=str),
+        ex=MACRO_SNAPSHOT_TTL_SEC,
+    )
+    logger.info(
+        "macro_collect_global: trading_date=%s KOSPI=%s KOSDAQ=%s VIX=%s USD/KRW=%s",
+        td_iso,
+        snapshot.get("kospi_index"),
+        snapshot.get("kosdaq_index"),
+        vix,
+        usd_krw,
+    )
+    return snapshot
+
+
+async def macro_collect_korea(
+    redis_client: Any,
+    http: httpx.AsyncClient,
+    *,
+    bok_ecos_api_key: str | None = None,
+) -> dict[str, Any]:
+    """v2 `/jobs/macro-collect-korea` 포팅 (app.py:1112-1119).
+
+    v2 는 global 에 위임했다. v3 도 동일한 구현을 재사용 — 별도 크롤링 없음.
+    """
+    logger.info("macro_collect_korea: delegating to macro_collect_global")
+    return await macro_collect_global(
+        redis_client, http, bok_ecos_api_key=bok_ecos_api_key
+    )
+
+
 __all__ = [
     "MACRO_KOSDAQ_RANGE",
     "MACRO_KOSPI_RANGE",
     "MACRO_REQUIRED_FIELDS",
     "MACRO_SNAPSHOT_KEY_PREFIX",
+    "MACRO_SNAPSHOT_TTL_SEC",
     "MACRO_VALIDATE_LOOKBACK_DAYS",
+    "MacroCollectError",
     "MacroValidationError",
+    "macro_collect_global",
+    "macro_collect_korea",
     "macro_validate_store",
 ]

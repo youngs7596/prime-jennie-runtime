@@ -100,6 +100,23 @@ SEEDS: list[SeedJob] = [
         cron="0 21 * * *",
         kwargs={},
     ),
+    # Track B — macro collect global/korea (v2 macro_dag: 40 7,11 * * 1-5).
+    # v2 는 global + korea 를 병렬로 돌리지만 korea 는 global 위임이라 중복 수집이
+    # 된다. v3 도 동일 스케줄을 유지해서 validate_store 의 fallback 을 깨지 않는다.
+    SeedJob(
+        id="job_worker.macro_collect_global",
+        owner="job_worker",
+        handler_key="macro_collect_global",
+        cron="40 7,11 * * 1-5",
+        kwargs={},
+    ),
+    SeedJob(
+        id="job_worker.macro_collect_korea",
+        owner="job_worker",
+        handler_key="macro_collect_korea",
+        cron="40 7,11 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

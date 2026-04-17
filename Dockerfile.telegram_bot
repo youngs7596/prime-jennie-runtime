@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY prime_jennie_runtime ./prime_jennie_runtime
+
+RUN pip install --no-cache-dir uv && \
+    uv pip install --system -e "."
+
+CMD ["python", "-m", "prime_jennie_runtime.telegram_bot.app"]

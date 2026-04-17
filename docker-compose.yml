@@ -46,6 +46,69 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # --- KIS Gateway (Track C) ---
+
+  kis-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.kis_gateway
+    environment:
+      <<: *common-env
+      KIS_APP_KEY: ${KIS_APP_KEY:-}
+      KIS_APP_SECRET: ${KIS_APP_SECRET:-}
+      KIS_ACCOUNT_NO: ${KIS_ACCOUNT_NO:-}
+      KIS_ACCOUNT_PRODUCT_CODE: ${KIS_ACCOUNT_PRODUCT_CODE:-01}
+      KIS_BASE_URL: ${KIS_BASE_URL:-https://openapivts.koreainvestment.com:29443}
+      KIS_IS_PAPER: ${KIS_IS_PAPER:-true}
+      KIS_TOKEN_FILE_PATH: /app/data/kis_token/v3_kis_token.json
+      KIS_STREAMER_MODE: ${KIS_STREAMER_MODE:-websocket}
+    volumes:
+      # 토큰 캐시 — 장중 재시작 금지 원칙. v2와 경로 분리 (v3_kis_token.json).
+      - ${DOCKER_DATA_DIR:-./data}/kis_token:/app/data/kis_token
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # --- Fast Loop Executor (Track C) ---
+
+  fast-loop:
+    build:
+      context: .
+      dockerfile: Dockerfile.fast_loop
+    environment:
+      <<: *common-env
+      KIS_GATEWAY_URL: http://kis-gateway:8080
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      kis-gateway:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # --- Telegram Bot (Track C, Phase 1 단방향 발신) ---
+
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.telegram_bot
+    environment:
+      <<: *common-env
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_DRY_RUN: ${TELEGRAM_DRY_RUN:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full"]
+
   # --- Screening Executor placeholder (Track D) ---
 
   screening-executor:

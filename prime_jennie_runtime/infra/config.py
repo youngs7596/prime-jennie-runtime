@@ -61,7 +61,7 @@ class LangfuseConfig(BaseSettings):
 
 
 class KISConfig(BaseSettings):
-    """KIS Gateway 설정 (Track C에서 확장)."""
+    """KIS Gateway 설정 (Track C)."""
 
     model_config = SettingsConfigDict(env_prefix="KIS_")
 
@@ -71,14 +71,36 @@ class KISConfig(BaseSettings):
     account_product_code: str = "01"
     gateway_url: str = "http://localhost:8080"
 
+    # KIS OpenAPI 서버 (모의 vs 실계좌)
+    base_url: str = "https://openapivts.koreainvestment.com:29443"  # 모의
+    is_paper: bool = True
+
+    # 토큰 캐시 파일 — v2와 충돌 방지 위해 v3 별도 경로 사용
+    token_file_path: str = "./data/kis_token/v3_kis_token.json"
+
+    # 시세 공급 모드: "websocket" | "poller" | "both"
+    streamer_mode: str = "websocket"
+    polling_interval_sec: float = 1.0
+
+    # Rate limit (KIS 공식 상한)
+    rate_limit_market_per_sec: int = 19
+    rate_limit_trade_per_sec: int = 5
+
+    # Circuit breaker
+    circuit_fail_max: int = 20
+    circuit_reset_sec: int = 60
+
 
 class TelegramConfig(BaseSettings):
-    """Telegram Bot 설정 (Track C에서 확장)."""
+    """Telegram Bot 설정 (Track C)."""
 
     model_config = SettingsConfigDict(env_prefix="TELEGRAM_")
 
     bot_token: str = ""
     chat_id: str = ""
+    api_base: str = "https://api.telegram.org"
+    parse_mode: str = "HTML"
+    dry_run: bool = False  # True면 실제 전송 없이 로그만
 
 
 class AppConfig(BaseSettings):

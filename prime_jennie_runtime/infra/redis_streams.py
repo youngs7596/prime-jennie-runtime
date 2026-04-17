@@ -26,6 +26,10 @@ T = TypeVar("T", bound=BaseModel)
 # 스트림 이름 상수
 STREAM_POSITION_SHEETS = "v3:position_sheets"
 STREAM_POSITION_SHEETS_DLQ = "v3:position_sheets.dlq"
+# Track C
+STREAM_PRICES = "kis:prices"  # KIS Gateway → Fast loop
+STREAM_NOTIFICATIONS = "v3:notifications"  # Fast loop → Telegram / UI
+STREAM_EXECUTIONS = "v3:executions"  # Fast loop → DB writer / audit
 
 
 class TypedStreamPublisher(Generic[T]):

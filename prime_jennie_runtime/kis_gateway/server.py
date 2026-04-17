@@ -106,6 +106,7 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         nonlocal state
+        redis_client = None
         if state is None:
             cfg = config or KISConfig()
             logger.info("KIS Gateway starting — paper=%s, base_url=%s", cfg.is_paper, cfg.base_url)
@@ -117,7 +118,36 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                 logger.warning("KIS pre-auth failed (will retry on first request): %s", e)
 
             calendar = MarketCalendar()
-            state = GatewayState(config=cfg, kis_api=api, calendar=calendar)
+
+            streamer: Streamer | None = None
+            try:
+                import redis.asyncio as aioredis
+
+                from prime_jennie_runtime.infra.config import RedisConfig
+
+                redis_cfg = RedisConfig()
+                redis_client = aioredis.from_url(redis_cfg.url, decode_responses=False)
+
+                mode = cfg.streamer_mode.lower()
+                if mode == "poller":
+                    streamer = KISRestPoller(
+                        redis_client=redis_client,
+                        kis_api=api,
+                        polling_interval=cfg.polling_interval_sec,
+                        calendar=calendar,
+                    )
+                else:
+                    streamer = KISWebSocketStreamer(
+                        redis_client=redis_client,
+                        app_key=cfg.app_key,
+                        app_secret=cfg.app_secret,
+                        is_paper=cfg.is_paper,
+                        calendar=calendar,
+                    )
+            except Exception:
+                logger.exception("streamer init failed — subscribe API will return 503 until fixed")
+
+            state = GatewayState(config=cfg, kis_api=api, streamer=streamer, calendar=calendar)
 
         app.state.gateway = state
         try:
@@ -127,6 +157,8 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                 await state.streamer.stop()
             if state is not None:
                 await state.kis_api.close()
+            if redis_client is not None:
+                await redis_client.aclose()
 
     app = FastAPI(title="KIS Gateway", version="1.0.0", lifespan=lifespan)
 

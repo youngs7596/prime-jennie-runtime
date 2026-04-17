@@ -55,8 +55,7 @@ async def step_qdrant_init(url: str, collection: str, dimension: int) -> StepRes
         created = True
     info = client.get_collection(collection_name=collection)
     detail = (
-        f"collection={collection} created={created} "
-        f"vectors={info.points_count} dim={dimension}"
+        f"collection={collection} created={created} vectors={info.points_count} dim={dimension}"
     )
     return StepResult(name="qdrant_init", ok=True, detail=detail)
 

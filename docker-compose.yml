@@ -92,6 +92,83 @@ services:
     restart: unless-stopped
     profiles: ["full"]
 
+  # --- Slow Loop (Track B, Phase 2.9 scout/macro 주기 runner) ---
+  #
+  # scheduled_jobs(owner=slow_loop) 에서 cron 을 읽어 run_slow_loop() 호출.
+  # v2 scout_job DAG 대체. vLLM EXAONE 은 v2 재활용.
+
+  slow-loop:
+    build:
+      context: .
+      dockerfile: Dockerfile.slow_loop
+    environment:
+      <<: *common-env
+      VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
+      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # --- Price Scheduler (Track C, Phase 2.9 KIS 분봉/일봉 적재 runner) ---
+  #
+  # v2 collect_minute_chart / daily_market_data_collector DAG 대체. KIS Gateway
+  # REST endpoint 를 쳐서 minute_prices / daily_prices 에 upsert.
+
+  price-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.price_scheduler
+    environment:
+      <<: *common-env
+      KIS_GATEWAY_URL: http://kis-gateway:8080
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kis-gateway:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["full"]
+
+  # --- News Pipeline (Track E, Phase 2.9 데이터 수집 runner) ---
+  #
+  # apscheduler 기반 long-running runner. scheduled_jobs 테이블(owner=news_pipeline)
+  # 에서 cron 을 읽어 네이버 크롤 → EXAONE 감성 → kure 임베딩 → Postgres/Qdrant 적재.
+  # 외부 의존 (vLLM, Qdrant) 은 v2 재활용 — host 에서 접근 가능한 주소로 주입.
+
+  news-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.news_pipeline
+    environment:
+      <<: *common-env
+      VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
+      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
+      VLLM_EMBED_URL: ${VLLM_EMBED_URL:-http://host.docker.internal:8002/v1}
+      VLLM_EMBED_MODEL: ${VLLM_EMBED_MODEL:-kure-v1}
+      QDRANT_URL: ${QDRANT_URL:-http://host.docker.internal:6333}
+      QDRANT_COLLECTION_V3: ${QDRANT_COLLECTION_V3:-v3_news_sentiments}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    extra_hosts:
+      # v2 가 host 네트워크로 올라가 있는 Qdrant/vLLM 에 접근 (Linux 호환).
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: ["full"]
+
   # --- Telegram Bot (Track C, Phase 1 단방향 발신) ---
 
   telegram-bot:

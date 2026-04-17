@@ -171,7 +171,7 @@ async def test_run_snapshot_failure_but_daily_still_attempted():
 def test_main_returns_0_when_all_ok(capsys):
     """CLI entrypoint smoke — run() mock."""
 
-    async def _fake_run(ticker: str, do_order: bool) -> list[StepResult]:
+    async def _fake_run(ticker: str, do_order: bool, use_cached: bool = False) -> list[StepResult]:
         return [StepResult("stub", True, "ok")]
 
     with patch("scripts.kis_paper_smoke.run", _fake_run):
@@ -182,7 +182,7 @@ def test_main_returns_0_when_all_ok(capsys):
 
 
 def test_main_returns_1_when_any_fail(capsys):
-    async def _fake_run(ticker: str, do_order: bool) -> list[StepResult]:
+    async def _fake_run(ticker: str, do_order: bool, use_cached: bool = False) -> list[StepResult]:
         return [StepResult("a", True), StepResult("b", False, "boom")]
 
     with patch("scripts.kis_paper_smoke.run", _fake_run):

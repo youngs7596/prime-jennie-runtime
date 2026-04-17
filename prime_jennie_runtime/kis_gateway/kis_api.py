@@ -144,8 +144,24 @@ class KISApi:
                 method, path, headers=headers, params=params, json=json_data
             )
 
-        # 인증 오류 의심 → 토큰 재발급 후 재시도 (1회)
-        if resp.status_code in (401, 403, 500):
+        # 500 throttling (EGW00201 초당 거래건수 초과): 짧게 backoff 후 재시도, 재인증 금지.
+        # Paper 는 초당 2건 제한이라 쉽게 걸림.
+        if resp.status_code == 500:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if body.get("msg_cd") == "EGW00201":
+                logger.warning("KIS %s %s -> 500 EGW00201 throttle, backoff 1s", method, path)
+                await asyncio.sleep(1.0)
+                resp = await self._client.request(
+                    method, path, headers=headers, params=params, json=json_data
+                )
+
+        # 인증 오류 의심 → 토큰 재발급 후 재시도 (1회).
+        # 401/403 만 대상. 500 은 throttle/서버 오류라 재인증이 도움 안 됨 (오히려
+        # 토큰 1분/회 발급 제한 연쇄 실패).
+        if resp.status_code in (401, 403):
             logger.warning(
                 "KIS %s %s -> %d, retrying with fresh token",
                 method,

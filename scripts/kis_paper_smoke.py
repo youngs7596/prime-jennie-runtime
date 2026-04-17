@@ -38,7 +38,7 @@ class StepResult:
     detail: str = ""
 
 
-async def run(ticker: str, do_order: bool) -> list[StepResult]:
+async def run(ticker: str, do_order: bool, use_cached: bool = False) -> list[StepResult]:
     cfg = KISConfig()
     if not (cfg.app_key and cfg.app_secret and cfg.account_no):
         return [
@@ -55,10 +55,10 @@ async def run(ticker: str, do_order: bool) -> list[StepResult]:
     results: list[StepResult] = []
 
     try:
-        token = await api.authenticate(force=True)
+        token = await api.authenticate(force=not use_cached)
         results.append(StepResult("authenticate", True, detail=f"token={token[:8]}…"))
-    except KISApiError as e:
-        results.append(StepResult("authenticate", False, str(e)))
+    except (KISApiError, Exception) as e:
+        results.append(StepResult("authenticate", False, f"{type(e).__name__}: {e}"))
         await api.close()
         return results
 
@@ -69,6 +69,9 @@ async def run(ticker: str, do_order: bool) -> list[StepResult]:
         )
     except KISApiError as e:
         results.append(StepResult("snapshot", False, str(e)))
+
+    # Paper 는 초당 2건 제한이라 연속 호출 전 간격 확보.
+    await asyncio.sleep(0.7)
 
     try:
         daily = await api.get_daily_prices(ticker, days=10)
@@ -116,13 +119,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="KIS paper account smoke test")
     p.add_argument("--ticker", default="005930", help="조회용 종목 코드 (기본: 삼성전자)")
     p.add_argument("--order", action="store_true", help="1주 시장가 매수/매도까지 수행")
+    p.add_argument(
+        "--use-cached",
+        action="store_true",
+        help="캐시 토큰 재사용 (KIS 토큰 1분당 1회 발급 제한 회피용)",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    results = asyncio.run(run(args.ticker, args.order))
+    results = asyncio.run(run(args.ticker, args.order, use_cached=args.use_cached))
     for r in results:
         status = "OK" if r.ok else "FAIL"
         suffix = f" — {r.detail}" if r.detail else ""

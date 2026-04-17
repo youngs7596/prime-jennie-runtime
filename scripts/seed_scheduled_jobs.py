@@ -258,6 +258,15 @@ SEEDS: list[SeedJob] = [
         kwargs={"top_n": 300, "days": 30},
         enabled=False,
     ),
+    # Track B — daily_briefing_report (v2 utility_jobs_dag: 0 17 * * 1-5, 장마감 후 브리핑).
+    # Telegram 전송은 TELEGRAM_BOT_TOKEN/CHAT_ID 가 설정되어야 실제 발송. 기본은 skip.
+    SeedJob(
+        id="job_worker.daily_briefing_report",
+        owner="job_worker",
+        handler_key="daily_briefing_report",
+        cron="0 17 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

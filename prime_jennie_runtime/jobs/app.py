@@ -24,8 +24,9 @@ from typing import Any
 import asyncpg
 import httpx
 import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncEngine
 
-from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
@@ -34,6 +35,7 @@ from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
 
 from .analytics import analyst_feedback, analyze_ai_performance
 from .asset_snapshot import daily_asset_snapshot
+from .briefing_glue import daily_briefing_report
 from .council_macro import (
     macro_collect_global,
     macro_collect_korea,
@@ -70,6 +72,8 @@ def build_handlers(
     http: httpx.AsyncClient,
     redis_client: aioredis.Redis,
     kis_gateway_url: str,
+    engine: AsyncEngine,
+    telegram_config: TelegramConfig | None,
 ) -> dict[str, Callable[..., Awaitable[Any]]]:
     """handler_key → async callable 매핑.
 
@@ -164,6 +168,11 @@ def build_handlers(
             pool, http, kis_gateway_url, top_n=top_n, days=days
         )
 
+    async def h_daily_briefing_report() -> None:
+        await daily_briefing_report(
+            engine, http, telegram_config=telegram_config, llm_caller=None
+        )
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -189,6 +198,7 @@ def build_handlers(
         "weekly_factor_analysis": h_weekly_factor_analysis,
         "collect_minute_chart": h_collect_minute_chart,
         "collect_full_market_data": h_collect_full_market_data,
+        "daily_briefing_report": h_daily_briefing_report,
     }
 
 
@@ -220,15 +230,24 @@ async def run() -> None:
             "KIS_GATEWAY_URL", cfg.kis.gateway_url
         ).rstrip("/")
 
+        engine = create_engine(cfg.postgres)
+        stack.push_async_callback(engine.dispose)
+
+        telegram_cfg: TelegramConfig | None = (
+            cfg.telegram
+            if (cfg.telegram.bot_token and cfg.telegram.chat_id)
+            or cfg.telegram.dry_run
+            else None
+        )
+
         handlers = build_handlers(
             pool=pool,
             http=http,
             redis_client=redis_client,
             kis_gateway_url=kis_gateway_url,
+            engine=engine,
+            telegram_config=telegram_cfg,
         )
-
-        engine = create_engine(cfg.postgres)
-        stack.push_async_callback(engine.dispose)
 
         scheduler = SchedulerRunner(
             owner=OWNER,

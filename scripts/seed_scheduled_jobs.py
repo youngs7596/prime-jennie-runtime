@@ -76,6 +76,65 @@ SEEDS: list[SeedJob] = [
         cron="30 8-14 * * 1-5",
         kwargs={"trigger": "scout_daily"},
     ),
+    # Track B — job-worker (v2 utility_jobs_dag cleanup: 0 3 * * *)
+    SeedJob(
+        id="job_worker.cleanup_old_data",
+        owner="job_worker",
+        handler_key="cleanup_old_data",
+        cron="0 3 * * *",
+        kwargs={"days": 365},
+    ),
+    # Track B — macro_validate_store (v2 macro_dag validate: 30 8 * * 1-5)
+    SeedJob(
+        id="job_worker.macro_validate_store",
+        owner="job_worker",
+        handler_key="macro_validate_store",
+        cron="30 8 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — contract_smoke_test (v2 utility_jobs_dag: 0 21 * * *)
+    SeedJob(
+        id="job_worker.contract_smoke_test",
+        owner="job_worker",
+        handler_key="contract_smoke_test",
+        cron="0 21 * * *",
+        kwargs={},
+    ),
+    # Track B — macro collect global/korea (v2 macro_dag: 40 7,11 * * 1-5).
+    # v2 는 global + korea 를 병렬로 돌리지만 korea 는 global 위임이라 중복 수집이
+    # 된다. v3 도 동일 스케줄을 유지해서 validate_store 의 fallback 을 깨지 않는다.
+    SeedJob(
+        id="job_worker.macro_collect_global",
+        owner="job_worker",
+        handler_key="macro_collect_global",
+        cron="40 7,11 * * 1-5",
+        kwargs={},
+    ),
+    SeedJob(
+        id="job_worker.macro_collect_korea",
+        owner="job_worker",
+        handler_key="macro_collect_korea",
+        cron="40 7,11 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — macro_quick (v2 enhanced_macro_quick DAG: */5 9-15 * * 1-5).
+    # v2 는 snapshot 수집 + intraday risk throttle 이지만 v3 는 아직 Context 모델이
+    # 없어 snapshot 만 갱신한다. throttle 레이어는 Context 포팅 이후 슬라이스.
+    SeedJob(
+        id="job_worker.macro_quick",
+        owner="job_worker",
+        handler_key="macro_quick",
+        cron="*/5 9-15 * * 1-5",
+        kwargs={},
+    ),
+    # Track B — update_naver_sectors (v2 utility_jobs_dag: 0 20 * * 0, 주간).
+    SeedJob(
+        id="job_worker.update_naver_sectors",
+        owner="job_worker",
+        handler_key="update_naver_sectors",
+        cron="0 20 * * 0",
+        kwargs={},
+    ),
 ]
 
 

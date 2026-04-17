@@ -1,0 +1,284 @@
+"""네이버 금융 시장 크롤러 (async 포팅).
+
+v2 `prime_jennie/infra/crawlers/naver_market.py` 의 HTTP 만 `httpx.AsyncClient`
+로 변경. 파싱 규칙, fchart 엔드포인트 포맷, 컬럼 인덱스 판정은 유지한다.
+
+- `fetch_index_data(client, index_code)` : 모바일 API 로 KOSPI/KOSDAQ 실시간 지수
+- `fetch_investor_flows(client, market, bizdate)` : 외인/기관/개인 순매수 (억원)
+- `fetch_market_stocks(client, market)` : 시가총액 순위 페이지 전종목
+- `fetch_index_daily_prices(client, index_code, count)` : fchart 일봉 OHLCV
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import date
+
+import httpx
+from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
+
+NAVER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+
+
+@dataclass
+class IndexData:
+    close: float
+    change_pct: float
+    traded_at: date
+
+
+@dataclass
+class InvestorFlows:
+    foreign_net: float
+    institutional_net: float
+    retail_net: float
+    trade_date: date
+
+
+@dataclass
+class MarketStock:
+    stock_code: str
+    stock_name: str
+    market_cap: int  # 백만원
+
+
+@dataclass
+class IndexDailyOHLCV:
+    index_code: str
+    price_date: date
+    open_price: float
+    high_price: float
+    low_price: float
+    close_price: float
+    volume: int
+
+
+async def fetch_index_data(
+    client: httpx.AsyncClient, index_code: str
+) -> IndexData | None:
+    url = f"https://m.stock.naver.com/api/index/{index_code}/basic"
+    try:
+        resp = await client.get(url, headers=NAVER_HEADERS, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        close = float(data["closePrice"].replace(",", ""))
+        change_pct = float(data["fluctuationsRatio"])
+        traded_at_str = data["localTradedAt"][:10]
+        return IndexData(
+            close=close,
+            change_pct=change_pct,
+            traded_at=date.fromisoformat(traded_at_str),
+        )
+    except Exception as e:
+        logger.warning("Naver index fetch failed (%s): %s", index_code, e)
+        return None
+
+
+async def fetch_investor_flows(
+    client: httpx.AsyncClient, market: str, bizdate: str
+) -> InvestorFlows | None:
+    """외인/기관/개인 순매수 (억원). sosession: kospi=01, kosdaq=02."""
+    sosession = "01" if market.lower() == "kospi" else "02"
+    url = "https://finance.naver.com/sise/investorDealTrendDay.naver"
+    try:
+        resp = await client.get(
+            url,
+            headers=NAVER_HEADERS,
+            params={"bizdate": bizdate, "sosession": sosession},
+            timeout=10,
+        )
+        resp.encoding = "euc-kr"
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        table = soup.select_one("table.type_1")
+        if not table:
+            logger.warning("Naver investor table not found for %s", market)
+            return None
+
+        header_row = table.select_one("tr")
+        if not header_row:
+            return None
+        headers = [th.get_text(strip=True) for th in header_row.select("th")]
+        col_map: dict[str, int] = {}
+        for i, h in enumerate(headers):
+            if "외국인" in h:
+                col_map["foreign"] = i
+            elif h == "기관계":
+                col_map["institutional"] = i
+            elif "개인" in h:
+                col_map["retail"] = i
+        if not col_map:
+            logger.warning("Naver investor header parse failed for %s", market)
+            return None
+
+        def _parse(tds: list, idx: int) -> float:
+            if idx >= len(tds):
+                return 0.0
+            raw = tds[idx].get_text(strip=True).replace(",", "")
+            raw = raw.replace("−", "-").replace("–", "-")
+            if not raw or raw == "-":
+                return 0.0
+            try:
+                return float(raw)
+            except ValueError:
+                return 0.0
+
+        target_short = bizdate[2:]
+        for row in table.select("tr")[1:]:
+            tds = row.select("td")
+            if not tds:
+                continue
+            row_date = tds[0].get_text(strip=True).replace(".", "")
+            if row_date != target_short:
+                continue
+            trade_date = (
+                date(int("20" + bizdate[2:4]), int(bizdate[4:6]), int(bizdate[6:8]))
+                if len(bizdate) == 8
+                else date.fromisoformat(bizdate)
+            )
+            return InvestorFlows(
+                foreign_net=_parse(tds, col_map.get("foreign", 0)),
+                institutional_net=_parse(tds, col_map.get("institutional", 0)),
+                retail_net=_parse(tds, col_map.get("retail", 0)),
+                trade_date=trade_date,
+            )
+
+        logger.warning("Naver investor: no row for date %s (%s)", bizdate, market)
+        return None
+
+    except Exception as e:
+        logger.warning("Naver investor flows fetch failed (%s): %s", market, e)
+        return None
+
+
+async def fetch_market_stocks(
+    client: httpx.AsyncClient, market: str = "KOSPI", *, request_delay: float = 0.15
+) -> list[MarketStock]:
+    """시가총액 순위 페이지 전종목 (시총 억원 → 백만원 변환)."""
+    sosok = "0" if market.upper() == "KOSPI" else "1"
+    url = "https://finance.naver.com/sise/sise_market_sum.naver"
+    stocks: list[MarketStock] = []
+    seen: set[str] = set()
+
+    for page in range(1, 100):
+        try:
+            resp = await client.get(
+                url,
+                headers=NAVER_HEADERS,
+                params={"sosok": sosok, "page": str(page)},
+                timeout=10,
+            )
+            resp.encoding = "euc-kr"
+            soup = BeautifulSoup(resp.text, "html.parser")
+            table = soup.select_one("table.type_2")
+            if not table:
+                break
+
+            page_count = 0
+            for tr in table.select("tr"):
+                tds = tr.select("td")
+                if len(tds) < 7:
+                    continue
+                link = tr.select_one("a[href*='code=']")
+                if not link:
+                    continue
+                href = link.get("href", "")
+                code = href.split("code=")[-1].split("&")[0]
+                if len(code) != 6 or not code.isdigit() or code in seen:
+                    continue
+                name = link.get_text(strip=True)
+                if not name:
+                    continue
+                cap_text = tds[6].get_text(strip=True).replace(",", "")
+                if not cap_text or cap_text == "-":
+                    continue
+                try:
+                    cap_eok = int(cap_text)
+                except ValueError:
+                    continue
+                seen.add(code)
+                stocks.append(
+                    MarketStock(
+                        stock_code=code,
+                        stock_name=name,
+                        market_cap=cap_eok * 100,
+                    )
+                )
+                page_count += 1
+
+            if page_count == 0:
+                break
+            if page < 99:
+                await asyncio.sleep(request_delay)
+        except Exception as e:
+            logger.warning("Naver market stocks page %d failed: %s", page, e)
+            break
+
+    logger.info("Naver market stocks (%s): %d", market, len(stocks))
+    return stocks
+
+
+_FCHART_INDEX_CODE = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}
+
+
+async def fetch_index_daily_prices(
+    client: httpx.AsyncClient, index_code: str, count: int = 250
+) -> list[IndexDailyOHLCV]:
+    """fchart 에서 지수 일봉 OHLCV. 오래된 순 정렬."""
+    fchart_code = _FCHART_INDEX_CODE.get(index_code.upper(), index_code.upper())
+    url = "https://fchart.stock.naver.com/sise.nhn"
+    try:
+        resp = await client.get(
+            url,
+            headers=NAVER_HEADERS,
+            params={
+                "symbol": fchart_code,
+                "timeframe": "day",
+                "count": str(count),
+                "requestType": "0",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        items: list[IndexDailyOHLCV] = []
+        for item in root.iter("item"):
+            data = item.get("data", "")
+            parts = data.split("|")
+            if len(parts) < 6:
+                continue
+            try:
+                price_date = date(
+                    int(parts[0][:4]), int(parts[0][4:6]), int(parts[0][6:8])
+                )
+                items.append(
+                    IndexDailyOHLCV(
+                        index_code=index_code.upper(),
+                        price_date=price_date,
+                        open_price=float(parts[1]),
+                        high_price=float(parts[2]),
+                        low_price=float(parts[3]),
+                        close_price=float(parts[4]),
+                        volume=int(parts[5]),
+                    )
+                )
+            except (ValueError, IndexError) as e:
+                logger.debug("fchart item parse skip: %s — %s", data, e)
+                continue
+        items.sort(key=lambda x: x.price_date)
+        logger.info("fchart %s: %d bars", index_code, len(items))
+        return items
+    except Exception as e:
+        logger.warning("fchart index fetch failed (%s): %s", index_code, e)
+        return []

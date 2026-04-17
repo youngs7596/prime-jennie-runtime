@@ -199,9 +199,12 @@ async def test_tick_loop_no_match_persists_state(fake_redis):
 
     loop = TickLoop(fake_redis, tracker, exit_exec, fetch, group="tg2", consumer="tc2")
     await loop.ensure_group()
+    # ts 를 sheet 와 같은 날짜 (eod 전)로 고정 — 오늘 날짜에 따라 time_stop 이
+    # 우발적으로 트리거되는 것을 방지.
+    tick_ts = datetime(2026, 4, 16, 10, 0, 0, tzinfo=KST).isoformat()
     await fake_redis.xadd(
         "kis:prices",
-        {"payload": json.dumps({"ticker": "005930", "price": 71000.0})},
+        {"payload": json.dumps({"ticker": "005930", "price": 71000.0, "ts": tick_ts})},
     )
     messages = await fake_redis.xreadgroup("tg2", "tc2", {"kis:prices": ">"}, count=1, block=100)
     for _s, entries in messages:

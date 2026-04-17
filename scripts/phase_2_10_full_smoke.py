@@ -152,7 +152,7 @@ async def step_scheduled_jobs_seed(
 PHASE_2_10_ENDPOINTS = [
     # (step_name, url, task_id)
     ("dashboard", "http://localhost:8090/health", "#4"),
-    ("monitor", "http://localhost:8088/health", "#5"),
+    ("monitor", "http://localhost:8091/health", "#5"),
     ("briefing", "http://localhost:8093/health", "#6"),
     ("council_log", "http://localhost:8094/health", "#7"),
     ("backtest", "http://localhost:8096/health", "#8"),

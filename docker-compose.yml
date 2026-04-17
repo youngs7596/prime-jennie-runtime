@@ -215,6 +215,71 @@ services:
     networks:
       - screening-isolated
 
+  # --- Observability (Track E, Phase 2.10 #11) ---
+  #
+  # v2 `prime-jennie/infra/{loki,promtail,grafana}` 원형 포팅. v3 bridge 네트워크로
+  # 전환했으므로 서비스명 기반 주소 사용 (promtail → loki:3100, grafana → loki:3100).
+  # profile "observe" 로 분리 — 무거운 설치 없이 코어만 띄우고 싶을 때 제외 가능.
+
+  loki:
+    image: grafana/loki:2.9.0
+    user: "1000"
+    command: -config.file=/etc/loki/loki-config.yaml
+    volumes:
+      - ./infra/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - ${DOCKER_DATA_DIR:-./data}/loki_data:/loki
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    command: -config.file=/etc/promtail/promtail-config.yaml
+    volumes:
+      - ./infra/promtail/promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_SERVER_HTTP_PORT: "3300"
+    ports:
+      - "3300:3300"
+    volumes:
+      - ${DOCKER_DATA_DIR:-./data}/grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
+  # --- Cloudflare Tunnel (Track E, Phase 2.10 #11) ---
+  #
+  # MS-01 외부 노출 경로. CLOUDFLARE_TUNNEL_TOKEN 으로 제어.
+  # profile "tunnel" — 운영서버에서만 기동.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    restart: unless-stopped
+    profiles: ["tunnel", "full"]
+
+  # --- Application Services (Phase 2.10 — 각 Track 포팅 중, Dockerfile 올라오면 활성화) ---
+  #
+  # TODO #11 — 블로커 해소 후 주석 해제:
+  #   dashboard (Track C, #4)  — Dockerfile.dashboard
+  #   monitor   (Track C, #5)  — Dockerfile.monitor
+  #   briefing  (Track C, #6)  — Dockerfile.briefing
+  #   council   (Track C, #7)  — Dockerfile.council (로깅 전용)
+  #   backtest  (Track D, #8)  — Dockerfile.backtest
+  #   job-worker (Track B, #1) — Dockerfile.job_worker
+
 networks:
   default:
     driver: bridge

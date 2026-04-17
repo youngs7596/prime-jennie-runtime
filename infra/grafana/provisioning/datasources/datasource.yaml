@@ -1,0 +1,12 @@
+# Grafana datasource — v2 `prime-jennie/infra/grafana/provisioning/...` 포팅.
+# v3 변경: url 을 서비스명 기반(loki:3100) 으로 교체 (bridge 네트워크).
+
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false

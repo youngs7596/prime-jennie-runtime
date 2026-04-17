@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from .crawlers.naver_market import fetch_index_daily_prices
+
 logger = logging.getLogger(__name__)
 
 
@@ -103,9 +105,70 @@ async def refresh_market_caps(
     )
 
 
+INDEX_DAILY_DEFAULT_DAYS = 250
+INDEX_CODES: tuple[str, ...] = ("KOSPI", "KOSDAQ")
+
+
+async def collect_index_daily_prices(
+    pool: Any,
+    http: httpx.AsyncClient,
+    *,
+    days: int = INDEX_DAILY_DEFAULT_DAYS,
+) -> None:
+    """v2 `/jobs/collect-index-daily-prices` 포팅 (app.py:243-307).
+
+    KOSPI/KOSDAQ 지수 일봉 OHLCV 를 fchart API 로 가져와 `index_daily_prices` 에
+    upsert. change_pct 는 v2 원문대로 인접 바 기준 (`(close - prev_close) / prev_close * 100`).
+
+    크롤러(`fetch_index_daily_prices`) 는 이미 `price_date` 오름차순 정렬되어 반환됨.
+    """
+    total = 0
+    async with pool.acquire() as conn:
+        for index_code in INDEX_CODES:
+            rows = await fetch_index_daily_prices(http, index_code, count=days)
+            if not rows:
+                logger.warning("no index daily data for %s", index_code)
+                continue
+
+            prev_close: float | None = None
+            for row in rows:
+                change_pct: float | None = None
+                if prev_close is not None and prev_close > 0:
+                    change_pct = (row.close_price - prev_close) / prev_close * 100
+                prev_close = row.close_price
+
+                await conn.execute(
+                    "INSERT INTO index_daily_prices (index_code, price_date, "
+                    "open_price, high_price, low_price, close_price, volume, change_pct) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) "
+                    "ON CONFLICT (index_code, price_date) DO UPDATE SET "
+                    "open_price=EXCLUDED.open_price, "
+                    "high_price=EXCLUDED.high_price, "
+                    "low_price=EXCLUDED.low_price, "
+                    "close_price=EXCLUDED.close_price, "
+                    "volume=EXCLUDED.volume, "
+                    "change_pct=EXCLUDED.change_pct",
+                    row.index_code,
+                    row.price_date,
+                    row.open_price,
+                    row.high_price,
+                    row.low_price,
+                    row.close_price,
+                    row.volume,
+                    change_pct,
+                )
+                total += 1
+            logger.info("index %s: %d rows upserted", index_code, len(rows))
+
+    logger.info("collect_index_daily_prices: total=%d", total)
+
+
 __all__ = [
+    "INDEX_CODES",
+    "INDEX_DAILY_DEFAULT_DAYS",
     "MARKET_CAP_BATCH_COMMIT_EVERY",
     "MARKET_CAP_RATE_PER_SEC",
     "MARKET_CAP_TOP_N",
+    "collect_index_daily_prices",
     "refresh_market_caps",
 ]

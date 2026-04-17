@@ -143,6 +143,14 @@ SEEDS: list[SeedJob] = [
         cron="50 15 * * 1-5",
         kwargs={},
     ),
+    # Track B — collect_index_daily_prices (v2 utility_jobs_dag: 5 16 * * 1-5).
+    SeedJob(
+        id="job_worker.collect_index_daily_prices",
+        owner="job_worker",
+        handler_key="collect_index_daily_prices",
+        cron="5 16 * * 1-5",
+        kwargs={"days": 250},
+    ),
 ]
 
 

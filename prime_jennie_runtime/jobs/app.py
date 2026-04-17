@@ -39,7 +39,7 @@ from .council_macro import (
     macro_validate_store,
 )
 from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
-from .market_data import refresh_market_caps
+from .market_data import collect_index_daily_prices, refresh_market_caps
 
 OWNER = "job_worker"
 
@@ -86,6 +86,9 @@ def build_handlers(
     async def h_refresh_market_caps() -> None:
         await refresh_market_caps(pool, http, kis_gateway_url)
 
+    async def h_collect_index_daily_prices(days: int = 250) -> None:
+        await collect_index_daily_prices(pool, http, days=days)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -95,6 +98,7 @@ def build_handlers(
         "contract_smoke_test": h_contract_smoke_test,
         "update_naver_sectors": h_update_naver_sectors,
         "refresh_market_caps": h_refresh_market_caps,
+        "collect_index_daily_prices": h_collect_index_daily_prices,
     }
 
 

@@ -11,6 +11,7 @@ v2 `prime_jennie/services/dashboard/app.py` 포팅 (MariaDB/SQLModel → Postgre
 - /api/system     — v3 서비스 헬스 체크
 - /api/airflow    — scheduled_jobs/scheduled_job_runs CRUD (v3 apscheduler 대체)
 - /api/logs       — Loki 프록시
+- /api/control    — `v3:control.commands` stream publish (Phase 2.10 신규)
 """
 
 from __future__ import annotations
@@ -26,7 +27,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from prime_jennie_runtime.infra.config import AppConfig
 from prime_jennie_runtime.infra.db import create_engine, create_session_factory
 
-from .routers import airflow, llm_stats, logs, macro, portfolio, system, trades, watchlist
+from .routers import (
+    airflow,
+    control,
+    llm_stats,
+    logs,
+    macro,
+    portfolio,
+    system,
+    trades,
+    watchlist,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +91,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(system.router, prefix="/api")
     app.include_router(airflow.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
+    app.include_router(control.router, prefix="/api")
 
     @app.get("/health")
     async def health() -> dict:

@@ -248,6 +248,16 @@ SEEDS: list[SeedJob] = [
         cron="*/5 9-15 * * 1-5",
         kwargs={"top_n": 30},
     ),
+    # Track B — collect_full_market_data (v2 utility_jobs_dag: 0 16 * * 1-5, 일봉 top300).
+    # price_scheduler.collect_daily 와 동일 시간대 → 기본 disabled. 운영 전환 시 enable.
+    SeedJob(
+        id="job_worker.collect_full_market_data",
+        owner="job_worker",
+        handler_key="collect_full_market_data",
+        cron="0 16 * * 1-5",
+        kwargs={"top_n": 300, "days": 30},
+        enabled=False,
+    ),
 ]
 
 

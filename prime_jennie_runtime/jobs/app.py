@@ -42,6 +42,7 @@ from .council_macro import (
 )
 from .disclosures import collect_dart_filings
 from .factor_analysis import weekly_factor_analysis
+from .full_market_daily import collect_full_market_data
 from .fundamentals import (
     collect_consensus,
     collect_naver_roe,
@@ -158,6 +159,11 @@ def build_handlers(
     async def h_collect_minute_chart(top_n: int = 30) -> None:
         await collect_minute_chart(pool, http, kis_gateway_url, top_n=top_n)
 
+    async def h_collect_full_market_data(top_n: int = 300, days: int = 30) -> None:
+        await collect_full_market_data(
+            pool, http, kis_gateway_url, top_n=top_n, days=days
+        )
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -182,6 +188,7 @@ def build_handlers(
         "analyst_feedback": h_analyst_feedback,
         "weekly_factor_analysis": h_weekly_factor_analysis,
         "collect_minute_chart": h_collect_minute_chart,
+        "collect_full_market_data": h_collect_full_market_data,
     }
 
 

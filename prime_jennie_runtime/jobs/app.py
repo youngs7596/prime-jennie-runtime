@@ -28,9 +28,12 @@ import redis.asyncio as aioredis
 from prime_jennie_runtime.infra.config import AppConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
+from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
+    NaverNewsCrawler,
+)
 
 from .council_macro import macro_validate_store
-from .maintenance import cleanup_old_data
+from .maintenance import cleanup_old_data, contract_smoke_test
 
 OWNER = "job_worker"
 
@@ -47,17 +50,22 @@ def build_handlers(
 
     새 job 포팅 시 여기에 등록. kwargs 는 scheduled_jobs.kwargs 에서 옴.
     """
-    del http  # 현재 핸들러에서 미사용 — 추가 포팅에서 사용 예정.
-
     async def h_cleanup_old_data(days: int = 365) -> None:
         await cleanup_old_data(pool, days=days)
 
     async def h_macro_validate_store() -> None:
         await macro_validate_store(redis_client)
 
+    async def h_contract_smoke_test() -> None:
+        # 뉴스 크롤러는 Track E 의 공통 HTTP 클라이언트를 재사용하지 않고
+        # 각자 client 를 열고 닫는다 (v2 에서도 분리). 핸들러 수명과 일치.
+        news_crawler = NaverNewsCrawler(max_pages=1)
+        await contract_smoke_test(http, news_crawler)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
+        "contract_smoke_test": h_contract_smoke_test,
     }
 
 

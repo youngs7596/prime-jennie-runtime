@@ -92,6 +92,14 @@ SEEDS: list[SeedJob] = [
         cron="30 8 * * 1-5",
         kwargs={},
     ),
+    # Track B — contract_smoke_test (v2 utility_jobs_dag: 0 21 * * *)
+    SeedJob(
+        id="job_worker.contract_smoke_test",
+        owner="job_worker",
+        handler_key="contract_smoke_test",
+        cron="0 21 * * *",
+        kwargs={},
+    ),
 ]
 
 

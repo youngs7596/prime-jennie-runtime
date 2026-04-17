@@ -84,6 +84,14 @@ SEEDS: list[SeedJob] = [
         cron="0 3 * * *",
         kwargs={"days": 365},
     ),
+    # Track B — macro_validate_store (v2 macro_dag validate: 30 8 * * 1-5)
+    SeedJob(
+        id="job_worker.macro_validate_store",
+        owner="job_worker",
+        handler_key="macro_validate_store",
+        cron="30 8 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

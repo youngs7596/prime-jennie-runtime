@@ -120,15 +120,15 @@ Phase 1과의 경계:
 7. Telegram bot token 실계좌 + `TELEGRAM_DRY_RUN=false`.
 8. KIS paper account 토큰 발급 + smoke test. 실계좌 진입은 Phase 2 종료 조건 중 하나로 남김.
 
-## 4. 미결/확인 필요한 결정
+## 4. 결정 사항 (D1~D5 2026-04-17 확정)
 
-| # | 결정 | 주체 | 필요 시점 |
-|---|------|------|----------|
-| D1 | Qdrant 컬렉션 네이밍 (v2/v3 분리 vs 공유+태그) | 영석 | 1.6 착수 전 |
-| D2 | `stock_minute_prices` read-only 마운트 유지 vs v3 자체 daily_prices 테이블 | 영석 | 1.3 착수 전 |
-| D3 | `legacy_daily_prices` 마이그레이션 스크립트 필요 여부 (design §13 누락) | 영석 | 1.3 착수 전 |
-| D4 | Telegram `TELEGRAM_ALLOWED_CHAT_IDS` 기본값 (운영/스테이징 분리) | 영석 | 1.1 착수 전 |
-| D5 | KIS paper account 발급 일정 | 영석 | 운영 전환 직전 |
+| # | 결정 | 근거 |
+|---|------|------|
+| D1 | Qdrant 컬렉션 **분리** (`v2_news_sentiments` / `v3_news_sentiments`) | 공존기 쓰기 충돌 0, 권한 관리 단순, v2 은퇴 시 v2_* drop 만으로 완료. §13.1 "재임베딩 후 v3 append" 정신과 일치. |
+| D2 | v3 자체 `minute_prices` / `daily_prices` 테이블 신설 | KIS API 수신분을 실시간 누적하려면 쓰기 필요. v2 read-only 마운트 의존은 Phase 6 v2 은퇴 시 고통. v2 `stock_minute_prices` 는 historical backfill 1회만 사용. |
+| D3 | `legacy_daily_prices` 마이그레이션 **스크립트 불필요** | §13.1 "read-only 마운트, 마이그 없음" 정책 일관. 초기 backfill 은 운영 one-shot 스크립트로 처리 (migrations/ 에는 포함하지 않음). |
+| D4 | `TELEGRAM_ALLOWED_CHAT_IDS` 기본값 `[]` (빈 리스트) → **빈 리스트면 기동 거부** | fail-safe. 환경별 분리는 단일 변수 + `.env.prod` / `.env.staging` 파일로. |
+| D5 | KIS paper 토큰 발급은 영석 외부 작업 | 코드는 paper 가정으로 작성. smoke test 스크립트 사전 준비 (`scripts/kis_paper_smoke.py`). |
 
 ## 5. 종료 조건
 

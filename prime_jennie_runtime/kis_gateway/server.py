@@ -23,13 +23,16 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from minyoung_mah import Observer
 
 from prime_jennie_runtime.infra.config import KISConfig
 
 from .circuit_breaker import AsyncCircuitBreaker, CircuitBreakerError
+from .db_fallback import FallbackPriceService
 from .kis_api import KISApi, KISApiError
 from .market_hours import MarketCalendar
 from .poller import KISRestPoller
+from .price_repo import PriceRepo
 from .rate_limiter import AsyncRateLimiter
 from .schemas import (
     CancelRequest,
@@ -64,6 +67,8 @@ class GatewayState:
         kis_api: KISApi,
         streamer: Streamer | None = None,
         calendar: MarketCalendar | None = None,
+        price_repo: PriceRepo | None = None,
+        observer: Observer | None = None,
     ):
         self.config = config
         self.kis_api = kis_api
@@ -76,6 +81,14 @@ class GatewayState:
             reset_sec=config.circuit_reset_sec,
         )
         self.request_history: deque = deque(maxlen=100)
+        self.price_repo = price_repo
+        self.observer = observer
+        # Phase 2.3: price_repo 주입 시 fallback 서비스 활성화 (D2).
+        self.fallback: FallbackPriceService | None = (
+            FallbackPriceService(kis_api, self.circuit_breaker, price_repo, observer=observer)
+            if price_repo is not None
+            else None
+        )
 
     def record_request(self, endpoint: str, detail: str) -> None:
         self.request_history.append(
@@ -167,13 +180,14 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         gw.record_request("daily_prices", body.stock_code)
         await gw.market_limiter.acquire()
         try:
+            if gw.fallback is not None:
+                return await gw.fallback.get_daily_prices(body.stock_code, body.days)
             return await gw.circuit_breaker.call(
                 gw.kis_api.get_daily_prices, body.stock_code, body.days
             )
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err
         except KISApiError as e:
-            # Phase 2: DB 폴백. Phase 1 에선 502 반환.
             raise HTTPException(502, f"KIS API error: {e}") from e
 
     @app.post("/api/market/minute-prices", response_model=list[MinutePrice])
@@ -182,6 +196,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         gw.record_request("minute_prices", body.stock_code)
         await gw.market_limiter.acquire()
         try:
+            if gw.fallback is not None:
+                return await gw.fallback.get_minute_prices(body.stock_code)
             return await gw.circuit_breaker.call(gw.kis_api.get_minute_prices, body.stock_code)
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err

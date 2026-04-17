@@ -39,6 +39,11 @@ from .council_macro import (
     macro_validate_store,
 )
 from .disclosures import collect_dart_filings
+from .fundamentals import (
+    collect_consensus,
+    collect_naver_roe,
+    collect_quarterly_financials,
+)
 from .investor_data import collect_foreign_holding, collect_investor_trading
 from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
 from .market_data import (
@@ -108,6 +113,15 @@ def build_handlers(
     async def h_collect_dart_filings(days: int = 7) -> None:
         await collect_dart_filings(pool, http, api_key=dart_api_key, days=days)
 
+    async def h_collect_consensus() -> None:
+        await collect_consensus(pool, http)
+
+    async def h_collect_naver_roe() -> None:
+        await collect_naver_roe(pool, http)
+
+    async def h_collect_quarterly_financials() -> None:
+        await collect_quarterly_financials(pool, http)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -122,6 +136,9 @@ def build_handlers(
         "collect_investor_trading": h_collect_investor_trading,
         "collect_foreign_holding": h_collect_foreign_holding,
         "collect_dart_filings": h_collect_dart_filings,
+        "collect_consensus": h_collect_consensus,
+        "collect_naver_roe": h_collect_naver_roe,
+        "collect_quarterly_financials": h_collect_quarterly_financials,
     }
 
 

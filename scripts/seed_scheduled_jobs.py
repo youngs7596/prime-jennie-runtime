@@ -183,6 +183,30 @@ SEEDS: list[SeedJob] = [
         cron="45 18 * * 1-5",
         kwargs={"days": 7},
     ),
+    # Track B — collect_consensus (v2 utility_jobs_dag: 0 6 * * 1,4, 주간 월/목).
+    SeedJob(
+        id="job_worker.collect_consensus",
+        owner="job_worker",
+        handler_key="collect_consensus",
+        cron="0 6 * * 1,4",
+        kwargs={},
+    ),
+    # Track B — collect_naver_roe (v2 utility_jobs_dag: 0 3 1 * *, 월간 1일 03:00).
+    SeedJob(
+        id="job_worker.collect_naver_roe",
+        owner="job_worker",
+        handler_key="collect_naver_roe",
+        cron="0 3 1 * *",
+        kwargs={},
+    ),
+    # Track B — collect_quarterly_financials (v2 utility_jobs_dag: 0 4 15 1,4,7,10 *, 분기).
+    SeedJob(
+        id="job_worker.collect_quarterly_financials",
+        owner="job_worker",
+        handler_key="collect_quarterly_financials",
+        cron="0 4 15 1,4,7,10 *",
+        kwargs={},
+    ),
 ]
 
 

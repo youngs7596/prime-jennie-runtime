@@ -117,6 +117,16 @@ SEEDS: list[SeedJob] = [
         cron="40 7,11 * * 1-5",
         kwargs={},
     ),
+    # Track B — macro_quick (v2 enhanced_macro_quick DAG: */5 9-15 * * 1-5).
+    # v2 는 snapshot 수집 + intraday risk throttle 이지만 v3 는 아직 Context 모델이
+    # 없어 snapshot 만 갱신한다. throttle 레이어는 Context 포팅 이후 슬라이스.
+    SeedJob(
+        id="job_worker.macro_quick",
+        owner="job_worker",
+        handler_key="macro_quick",
+        cron="*/5 9-15 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

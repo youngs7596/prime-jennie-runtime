@@ -35,6 +35,7 @@ from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
 from .council_macro import (
     macro_collect_global,
     macro_collect_korea,
+    macro_quick,
     macro_validate_store,
 )
 from .maintenance import cleanup_old_data, contract_smoke_test
@@ -68,6 +69,9 @@ def build_handlers(
     async def h_macro_collect_korea() -> None:
         await macro_collect_korea(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
 
+    async def h_macro_quick() -> None:
+        await macro_quick(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
+
     async def h_contract_smoke_test() -> None:
         # 뉴스 크롤러는 Track E 의 공통 HTTP 클라이언트를 재사용하지 않고
         # 각자 client 를 열고 닫는다 (v2 에서도 분리). 핸들러 수명과 일치.
@@ -79,6 +83,7 @@ def build_handlers(
         "macro_validate_store": h_macro_validate_store,
         "macro_collect_global": h_macro_collect_global,
         "macro_collect_korea": h_macro_collect_korea,
+        "macro_quick": h_macro_quick,
         "contract_smoke_test": h_contract_smoke_test,
     }
 

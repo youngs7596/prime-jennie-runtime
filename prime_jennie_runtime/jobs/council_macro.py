@@ -272,6 +272,27 @@ async def macro_collect_global(
     return snapshot
 
 
+async def macro_quick(
+    redis_client: Any,
+    http: httpx.AsyncClient,
+    *,
+    bok_ecos_api_key: str | None = None,
+) -> dict[str, Any]:
+    """v2 `/jobs/macro-quick` 포팅 (app.py:1174-1180).
+
+    v2 는 `macro_collect_global()` 을 호출한 뒤 `_check_intraday_risk()` 로 5 단계
+    리스크 레벨(NORMAL/CAUTION/WARNING/DANGER/CRITICAL) 을 계산해 Context 에
+    반영한다. Context 모델 (scout/council 공유) 이 v3 에서 아직 포팅되지 않아
+    throttle 레이어는 다음 슬라이스로 미룸 — 현재는 snapshot 만 갱신한다.
+
+    v2 스케줄과 동일하게 장중 5분 간격 (`*/5 9-15 * * 1-5`) 으로 돌아야 한다.
+    """
+    logger.info("macro_quick: collecting snapshot (throttle layer TODO)")
+    return await macro_collect_global(
+        redis_client, http, bok_ecos_api_key=bok_ecos_api_key
+    )
+
+
 async def macro_collect_korea(
     redis_client: Any,
     http: httpx.AsyncClient,
@@ -299,5 +320,6 @@ __all__ = [
     "MacroValidationError",
     "macro_collect_global",
     "macro_collect_korea",
+    "macro_quick",
     "macro_validate_store",
 ]

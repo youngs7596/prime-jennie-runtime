@@ -10,7 +10,7 @@ COPY pyproject.toml README.md ./
 COPY prime_jennie_runtime ./prime_jennie_runtime
 
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system -e "."
+    uv pip install --system -e ".[dashboard]"
 
 EXPOSE 8090
 

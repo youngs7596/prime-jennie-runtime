@@ -51,6 +51,9 @@ news = [
 telegram = [
     "python-telegram-bot>=21.0",
 ]
+dashboard = [
+    "docker>=7.1",  # /api/system/health 의 daemon container state 조회
+]
 kis = [
     "pybreaker>=1.0",
     "slowapi>=0.1.9",

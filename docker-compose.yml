@@ -295,6 +295,9 @@ services:
       <<: *common-env
       DASHBOARD_CORS_ORIGINS: ${DASHBOARD_CORS_ORIGINS:-http://localhost:5173}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # /api/system/health 의 daemon container state 조회 (read-only docker socket)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "8090:8090"
     depends_on:

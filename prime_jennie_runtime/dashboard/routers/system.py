@@ -20,10 +20,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 logger = logging.getLogger(__name__)
 
-# v3 기본 서비스 목록. HTTP 엔드포인트가 있는 서비스만 probe.
-# slow-loop / fast-loop / news-pipeline / price-scheduler / job-worker 는 pure async daemon
-# (HTTP 없음) → scheduled_jobs 기반 별도 heartbeat 관측 (Phase 2.11).
-# docker-compose 네트워크 내부 호스트명:포트.
+# v3 HTTP 엔드포인트 서비스.
 _DEFAULT_TARGETS: list[tuple[str, str]] = [
     ("kis-gateway", "http://kis-gateway:8080/health"),
     ("dashboard", "http://dashboard:8090/health"),
@@ -31,6 +28,17 @@ _DEFAULT_TARGETS: list[tuple[str, str]] = [
     ("control-ui", "http://control-ui:80/"),
     ("telegram-bot", "http://telegram-bot:8000/healthz"),
 ]
+
+# v3 pure async daemon — HTTP 없음, docker container state 로 관측.
+# compose project = prime-jennie-runtime, 컨테이너 = {project}-{service}-1
+_DAEMON_CONTAINERS: list[str] = [
+    "slow-loop",
+    "fast-loop",
+    "news-pipeline",
+    "price-scheduler",
+    "job-worker",
+]
+_COMPOSE_PROJECT = "prime-jennie-runtime"
 
 
 def _load_targets() -> list[tuple[str, str]]:
@@ -86,11 +94,50 @@ async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatu
         return ServiceStatus(name=name, url=url, status="unreachable", message=str(e)[:120])
 
 
+def _check_daemon(name: str) -> ServiceStatus:
+    """Docker socket 으로 daemon 컨테이너 state 확인 (HTTP 없는 서비스용)."""
+    container_name = f"{_COMPOSE_PROJECT}-{name}-1"
+    url = f"docker://{container_name}"
+    try:
+        import docker  # type: ignore[import-not-found]
+
+        client = docker.from_env()
+        c = client.containers.get(container_name)
+        state = c.attrs.get("State", {})
+        running = state.get("Running", False)
+        restarting = state.get("Restarting", False)
+        started_at = state.get("StartedAt")
+        uptime = None
+        if started_at and running:
+            from datetime import datetime, timezone
+
+            try:
+                # ISO 8601 with nanoseconds — truncate to microseconds
+                ts = started_at.split(".")[0] + "+00:00" if "+" not in started_at else started_at
+                started = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                uptime = (datetime.now(timezone.utc) - started).total_seconds()
+            except Exception:
+                pass
+        if restarting:
+            return ServiceStatus(name=name, url=url, status="unhealthy", message="restarting")
+        if running:
+            return ServiceStatus(
+                name=name, url=url, status="healthy", uptime_seconds=uptime, message="container running"
+            )
+        return ServiceStatus(
+            name=name, url=url, status="unreachable", message=f"state={state.get('Status', 'unknown')}"
+        )
+    except Exception as e:
+        return ServiceStatus(name=name, url=url, status="unreachable", message=f"{type(e).__name__}: {str(e)[:100]}")
+
+
 @router.get("/health", response_model=list[ServiceStatus])
 async def get_all_health() -> list[ServiceStatus]:
-    """등록된 모든 서비스의 /health 상태."""
+    """등록된 모든 서비스의 /health 상태 + daemon 컨테이너 state."""
     results: list[ServiceStatus] = []
     async with httpx.AsyncClient(timeout=3.0) as client:
         for name, url in _load_targets():
             results.append(await _check(client, name, url))
+    for daemon_name in _DAEMON_CONTAINERS:
+        results.append(_check_daemon(daemon_name))
     return results

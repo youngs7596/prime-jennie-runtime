@@ -48,16 +48,17 @@
 
 ## Memory Sync
 
-사용자는 여러 머신에서 작업하므로, Claude의 장기 기억은 **별도 private GitHub repo**(`~/.claude/global-memory-youngs7596/`, GitHub: `youngs7596/claude-global-memory`)로 동기화됩니다.
+사용자는 여러 머신에서 작업하므로, Claude의 장기 기억은 **별도 private GitHub repo**(`~/.claude/global-memory-youngs7596/`, GitHub: `youngs7596/claude-global-memory`)로 동기화됩니다. 본 프로젝트(prime-jennie family)는 youngs7596 계정 메모리만 참조합니다. 사내 교육 프로젝트(apt-family 등)는 별도 `youngs75/claude-global-memory`에 분리 저장 — 교차 저장 금지.
 
 - **본 프로젝트가 참조할 글로벌 메모리 파일:**
   - `~/.claude/global-memory-youngs7596/prime-jennie-family.md` — 4 repo 구조, 핵심 설계 결정, v2 운영 상태
   - `~/.claude/global-memory-youngs7596/trading-domain.md` — 거래비용, KIS API, Exit Rules, Risk Throttle
   - `~/.claude/global-memory-youngs7596/minyoung-mah.md` — harness 라이브러리 궤적, gap feedback
-- **세션 시작 시:** 위 파일들을 읽고 (`cd ~/.claude/global-memory-youngs7596 && git pull --rebase -q` 선행) 적용
+- **세션 시작 시:** **`gh auth switch -u youngs7596`** → `cd ~/.claude/global-memory-youngs7596 && git pull --rebase -q` → 위 파일들 적용. (auth switch 누락 시 git이 youngs75 토큰을 써서 private repo가 404로 보임)
 - **장기 기억 승격:** 프로젝트 로컬 auto memory는 scratch 전용. 다른 머신에서도 필요한 지식은 위 파일로 승격
-- **세션 종료 또는 `sync memory` 지시 시:** `cd ~/.claude/global-memory-youngs7596 && git add -A && git commit -m "..." && git push`
+- **세션 종료 또는 `sync memory` 지시 시:** `gh auth switch -u youngs7596` → `cd ~/.claude/global-memory-youngs7596 && git add -A && git commit -m "..." && git push`
 - **금지:** 프로젝트 로컬 auto memory에만 중요한 장기 기억을 남기지 말 것
+- **금지:** 사내 교육 프로젝트(apt-family 등) 관련 메모리를 youngs7596 repo에 쓰지 말 것 (반대 방향도 동일)
 
 ## 서브폴더 AGENTS.md
 

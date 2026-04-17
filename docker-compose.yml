@@ -51,7 +51,7 @@ services:
   kis-gateway:
     build:
       context: .
-      dockerfile: Dockerfile.kis_gateway
+      dockerfile: infra/docker/Dockerfile.kis_gateway
     environment:
       <<: *common-env
       KIS_APP_KEY: ${KIS_APP_KEY:-}
@@ -78,7 +78,7 @@ services:
   fast-loop:
     build:
       context: .
-      dockerfile: Dockerfile.fast_loop
+      dockerfile: infra/docker/Dockerfile.fast_loop
     environment:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
@@ -100,7 +100,7 @@ services:
   slow-loop:
     build:
       context: .
-      dockerfile: Dockerfile.slow_loop
+      dockerfile: infra/docker/Dockerfile.slow_loop
     environment:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
@@ -124,7 +124,7 @@ services:
   price-scheduler:
     build:
       context: .
-      dockerfile: Dockerfile.price_scheduler
+      dockerfile: infra/docker/Dockerfile.price_scheduler
     environment:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
@@ -148,7 +148,7 @@ services:
   news-pipeline:
     build:
       context: .
-      dockerfile: Dockerfile.news_pipeline
+      dockerfile: infra/docker/Dockerfile.news_pipeline
     environment:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
@@ -174,7 +174,7 @@ services:
   telegram-bot:
     build:
       context: .
-      dockerfile: Dockerfile.telegram_bot
+      dockerfile: infra/docker/Dockerfile.telegram_bot
     environment:
       <<: *common-env
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
@@ -197,7 +197,7 @@ services:
   screening-executor:
     build:
       context: .
-      dockerfile: Dockerfile.screening
+      dockerfile: infra/docker/Dockerfile.screening
     image: screening-executor:latest
     profiles: ["build-only"]
     # 아래 설정은 직접 `docker run` 시 ScreeningToolAdapter._build_argv가 부여한다.
@@ -290,7 +290,7 @@ services:
   dashboard:
     build:
       context: .
-      dockerfile: Dockerfile.dashboard
+      dockerfile: infra/docker/Dockerfile.dashboard
     environment:
       <<: *common-env
       DASHBOARD_CORS_ORIGINS: ${DASHBOARD_CORS_ORIGINS:-http://localhost:5173}
@@ -315,7 +315,7 @@ services:
   monitor:
     build:
       context: .
-      dockerfile: Dockerfile.monitor
+      dockerfile: infra/docker/Dockerfile.monitor
     environment:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
@@ -347,7 +347,7 @@ services:
   job-worker:
     build:
       context: .
-      dockerfile: Dockerfile.job_worker
+      dockerfile: infra/docker/Dockerfile.job_worker
     environment:
       <<: *common-env
       # macro_collect_global/korea 는 BOK ECOS 키가 있을 때만 실제 호출.

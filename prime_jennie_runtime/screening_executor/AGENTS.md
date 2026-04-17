@@ -30,7 +30,7 @@ ToolAdapter (call/arg_schema) 프로토콜 conformance는 Phase 1 미충족 — 
 - `backend="subprocess"` (기본): 같은 Python 인터프리터로 executor 모듈을 별도 프로세스로 실행. dev/CI 격리 + 실제 timeout 동작 검증용.
 - `backend="docker"`: `docker run --rm -i --network=none --read-only --memory=4g --cpus=2 --cap-drop=ALL --security-opt=no-new-privileges:true ...`로 ephemeral 컨테이너 spawn. 운영용.
 
-이미지는 `Dockerfile.screening`이 정의. `docker compose --profile build-only build screening-executor`로 빌드.
+이미지는 `infra/docker/Dockerfile.screening`이 정의. `docker compose --profile build-only build screening-executor`로 빌드.
 
 ## 필수 테스트
 

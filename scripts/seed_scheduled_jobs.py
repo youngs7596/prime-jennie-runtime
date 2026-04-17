@@ -135,6 +135,14 @@ SEEDS: list[SeedJob] = [
         cron="0 20 * * 0",
         kwargs={},
     ),
+    # Track B — refresh_market_caps (v2 utility_jobs_dag: 50 15 * * 1-5, 장마감 후).
+    SeedJob(
+        id="job_worker.refresh_market_caps",
+        owner="job_worker",
+        handler_key="refresh_market_caps",
+        cron="50 15 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

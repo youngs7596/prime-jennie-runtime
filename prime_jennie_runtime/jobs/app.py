@@ -39,6 +39,7 @@ from .council_macro import (
     macro_validate_store,
 )
 from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
+from .market_data import refresh_market_caps
 
 OWNER = "job_worker"
 
@@ -50,6 +51,7 @@ def build_handlers(
     pool: asyncpg.Pool,
     http: httpx.AsyncClient,
     redis_client: aioredis.Redis,
+    kis_gateway_url: str,
 ) -> dict[str, Callable[..., Awaitable[Any]]]:
     """handler_key → async callable 매핑.
 
@@ -81,6 +83,9 @@ def build_handlers(
     async def h_update_naver_sectors() -> None:
         await update_naver_sectors(pool, http)
 
+    async def h_refresh_market_caps() -> None:
+        await refresh_market_caps(pool, http, kis_gateway_url)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -89,6 +94,7 @@ def build_handlers(
         "macro_quick": h_macro_quick,
         "contract_smoke_test": h_contract_smoke_test,
         "update_naver_sectors": h_update_naver_sectors,
+        "refresh_market_caps": h_refresh_market_caps,
     }
 
 
@@ -116,7 +122,16 @@ async def run() -> None:
         )
         stack.push_async_callback(pool.close)
 
-        handlers = build_handlers(pool=pool, http=http, redis_client=redis_client)
+        kis_gateway_url = os.environ.get(
+            "KIS_GATEWAY_URL", cfg.kis.gateway_url
+        ).rstrip("/")
+
+        handlers = build_handlers(
+            pool=pool,
+            http=http,
+            redis_client=redis_client,
+            kis_gateway_url=kis_gateway_url,
+        )
 
         engine = create_engine(cfg.postgres)
         stack.push_async_callback(engine.dispose)

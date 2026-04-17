@@ -270,6 +270,18 @@ services:
     restart: unless-stopped
     profiles: ["tunnel", "full"]
 
+  # --- Control UI (Phase 2.10 Track F — Nginx 서빙, 별 repo: prime-jennie-control-ui) ---
+
+  control-ui:
+    image: prime-jennie-control-ui:latest
+    ports:
+      - "80:80"
+    depends_on:
+      dashboard:
+        condition: service_started
+    restart: unless-stopped
+    profiles: ["full", "apps"]
+
   # --- Dashboard (Track C, Phase 2.10 #4) ---
   #
   # FastAPI 백엔드 8090. CORS allowlist 는 DASHBOARD_CORS_ORIGINS 로 주입.

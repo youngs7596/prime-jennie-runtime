@@ -34,6 +34,9 @@ data/
 postgres_data/
 redis_data/
 
+# Local-only compose overrides (로컬 subnet 강제 등)
+docker-compose.override.yml
+
 # Test / Coverage
 .coverage
 htmlcov/

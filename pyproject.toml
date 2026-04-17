@@ -57,6 +57,7 @@ kis = [
 ]
 slow_loop = [
     "langchain-openai>=0.2",
+    "langchain-anthropic>=0.2",
     "langchain-core>=0.3",
     "pyyaml>=6.0",
 ]

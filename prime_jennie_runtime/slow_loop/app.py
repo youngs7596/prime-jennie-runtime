@@ -3,7 +3,10 @@
 `scheduled_jobs` (owner='slow_loop') 에 등록된 cron 을 apscheduler 가 트리거하면
 `scout_daily` handler 가 `run_slow_loop()` 를 호출한다.
 
-실 LLM 은 vLLM EXAONE (OpenAI 호환) 을 `langchain_openai.ChatOpenAI` 로 감싸 주입.
+Role tier 매핑 (v2 설계 승계):
+  - Scout (strong)    → DeepSeek chat (DEEPSEEK_API_KEY)
+  - Macro (reasoning) → Claude Opus 4.7 (ANTHROPIC_API_KEY)
+
 Scout/Macro feeder 는 Phase 2 기준 Stub — Track E feeder 완성 시 교체 (AGENTS.md §위임 경계).
 
 실행:
@@ -11,8 +14,10 @@ Scout/Macro feeder 는 Phase 2 기준 Stub — Track E feeder 완성 시 교체 
 
 환경:
     POSTGRES_* / REDIS_* — 공통
-    VLLM_LLM_URL / VLLM_LLM_MODEL — chat model.
-      미설정 시 LLM 없음 → 스케줄은 돌지만 handler 는 skip 로그 후 즉시 리턴.
+    DEEPSEEK_API_KEY — Scout 호출용
+    ANTHROPIC_API_KEY — Macro 호출용
+    (선택) DEEPSEEK_MODEL, DEEPSEEK_BASE_URL, ANTHROPIC_MODEL 으로 모델 override
+    어느 하나 누락 시 스케줄은 기동하지만 handler 는 skip.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from minyoung_mah import (
     NullObserver,
     Orchestrator,
     RoleRegistry,
-    SingleModelRouter,
+    TieredModelRouter,
     ToolRegistry,
     default_resilience,
 )
@@ -71,36 +76,74 @@ OWNER = "slow_loop"
 logger = logging.getLogger(__name__)
 
 
-def _try_build_chat_model() -> Any | None:
-    """vLLM EXAONE 을 LangChain ChatOpenAI 로 감싸 반환. 미구성 시 None."""
-    url = os.environ.get("VLLM_LLM_URL")
-    model = os.environ.get("VLLM_LLM_MODEL")
-    if not (url and model):
+def _try_build_tiered_router() -> Any | None:
+    """Role tier → ChatModel 매핑 반환. 필수 키 누락 시 None.
+
+    tier 매핑 (v2 설계 승계):
+      - strong    → Scout      = DeepSeek chat  (DEEPSEEK_API_KEY)
+      - reasoning → Macro Gate = Claude Opus 4.7 (ANTHROPIC_API_KEY)
+      - fast      → 현재 slow_loop 에선 사용 X (news_pipeline 이 별도로 vLLM EXAONE 호출)
+
+    DeepSeek/Anthropic key 중 하나라도 없으면 slow_loop handler 는 skip.
+    """
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not (deepseek_key and anthropic_key):
+        logger.warning(
+            "DEEPSEEK_API_KEY/ANTHROPIC_API_KEY 누락 — slow_loop LLM 비활성."
+            " deepseek=%s anthropic=%s",
+            bool(deepseek_key),
+            bool(anthropic_key),
+        )
         return None
     try:
+        from langchain_anthropic import ChatAnthropic
         from langchain_openai import ChatOpenAI
     except ImportError:
-        logger.warning("langchain_openai 미설치 — LLM 호출 비활성. extras [slow_loop] 필요")
+        logger.warning(
+            "langchain_openai/langchain_anthropic 미설치 — LLM 호출 비활성. extras [slow_loop] 필요"
+        )
         return None
-    return ChatOpenAI(
-        model=model,
-        base_url=url,
-        api_key="not-needed",
+
+    deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    deepseek_base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+    anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+
+    # DeepSeek 은 OpenAI 의 json_schema response_format 을 지원하지 않고 function_calling
+    # 만 지원. minyoung-mah Orchestrator 가 `model.with_structured_output(schema)` 를
+    # 호출할 때 langchain-openai 기본값(json_schema)을 쓰면 HTTP 400 으로 실패하므로,
+    # ChatOpenAI subclass 에서 method 를 강제.
+    class _DeepSeekChatOpenAI(ChatOpenAI):
+        def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
+            return super().with_structured_output(
+                schema, method=method or "function_calling", **kwargs
+            )
+
+    strong = _DeepSeekChatOpenAI(
+        model=deepseek_model,
+        api_key=deepseek_key,
+        base_url=deepseek_base,
         temperature=0.1,
     )
+    # 주: claude-opus-4-7 은 temperature 파라미터 미지원 (API 400).
+    reasoning = ChatAnthropic(
+        model=anthropic_model,
+        api_key=anthropic_key,
+    )
+    return {"strong": strong, "reasoning": reasoning, "default": strong}
 
 
 def _build_slow_loop_components(redis_client: aioredis.Redis) -> SlowLoopComponents | None:
-    """SlowLoopComponents 조립. chat_model 없으면 None."""
-    chat_model = _try_build_chat_model()
-    if chat_model is None:
+    """SlowLoopComponents 조립. tier 라우터 구성 실패 시 None."""
+    tiers = _try_build_tiered_router()
+    if tiers is None:
         return None
 
     observer = NullObserver()
     orchestrator = Orchestrator(
         role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),
         tool_registry=ToolRegistry(),
-        model_router=SingleModelRouter(chat_model),
+        model_router=TieredModelRouter(tiers),
         memory=NullMemoryStore(),
         hitl=NullHITLChannel(),
         observer=observer,

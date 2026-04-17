@@ -12,15 +12,15 @@ def test_module_loads():
     assert callable(slow_app.run)
 
 
-def test_components_returns_none_without_vllm_env(monkeypatch):
-    monkeypatch.delenv("VLLM_LLM_URL", raising=False)
-    monkeypatch.delenv("VLLM_LLM_MODEL", raising=False)
-    assert slow_app._try_build_chat_model() is None
+def test_tiered_router_returns_none_without_api_keys(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert slow_app._try_build_tiered_router() is None
 
 
-def test_chat_model_none_triggers_none_components(monkeypatch):
-    monkeypatch.delenv("VLLM_LLM_URL", raising=False)
-    monkeypatch.delenv("VLLM_LLM_MODEL", raising=False)
+def test_tiered_router_none_triggers_none_components(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
     class _FakeRedis:
         pass

@@ -1,0 +1,171 @@
+"""position_sheet/schema.py 테스트 — POSITION_SHEET_SPEC v1.1 검증."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+import pytest
+
+from prime_jennie_runtime.position_sheet.schema import (
+    KST,
+    PositionSheet,
+)
+
+
+def _base_sheet(**overrides) -> dict:
+    """유효한 기본 시트 dict. overrides로 필드 덮어쓰기."""
+    now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)
+    defaults = {
+        "sheet_id": "ps_20260416_005930_a3f2",
+        "schema_version": "1.1",
+        "generated_at": now,
+        "valid_until": now + timedelta(hours=6),
+        "ticker": "005930",
+        "side": "long",
+        "strategy_tag": "GAP_UP_REBOUND",
+        "size": {
+            "base_pct": 0.05,
+            "macro_multiplier": 0.7,
+            "risk_multiplier": 1.0,
+            "final_pct": 0.035,
+            "max_notional_krw": 5_000_000,
+        },
+        "entry": {
+            "trigger": "limit",
+            "price": 71200,
+            "valid_until": now + timedelta(hours=1),
+            "conditions": [],
+        },
+        "exit": {
+            "rules": [
+                {"type": "trailing_tp", "activate_pct": 0.05, "drop_pct": 0.03},
+                {"type": "fixed_sl", "pct": 0.05},
+                {"type": "time_stop", "mode": "eod"},
+            ],
+            "priority": "first_match",
+        },
+        "provenance": {
+            "scout_run_id": "scout_20260416_0900",
+            "scout_code_hash": "sha256:abc123",
+            "scout_hypothesis": "반도체 섹터 모멘텀 재점화",
+            "macro_state_snapshot": {
+                "gate": "open",
+                "size_multiplier": 0.7,
+                "gate_run_id": "macro_20260416_0800",
+            },
+            "news_score_at_generation": 0.42,
+            "strategy_policy_version": "v3.0.1",
+            "generated_by": "prime-jennie-runtime@v3.0.1",
+        },
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+# T01: 정상 시트 발행
+def test_valid_sheet():
+    sheet = PositionSheet(**_base_sheet())
+    assert sheet.sheet_id == "ps_20260416_005930_a3f2"
+    assert sheet.schema_version == "1.1"
+
+
+# T02: fixed_sl 누락
+def test_missing_fixed_sl():
+    data = _base_sheet()
+    data["exit"]["rules"] = [
+        {"type": "trailing_tp", "activate_pct": 0.05, "drop_pct": 0.03},
+        {"type": "time_stop", "mode": "eod"},
+    ]
+    with pytest.raises(ValueError, match="fixed_sl"):
+        PositionSheet(**data)
+
+
+# T03: time_stop 누락
+def test_missing_time_stop():
+    data = _base_sheet()
+    data["exit"]["rules"] = [{"type": "fixed_sl", "pct": 0.05}]
+    with pytest.raises(ValueError, match="time_stop"):
+        PositionSheet(**data)
+
+
+# T04: final_pct != base*macro*risk
+def test_size_mismatch():
+    data = _base_sheet()
+    data["size"]["final_pct"] = 0.099  # 틀린 값
+    with pytest.raises(ValueError, match="final_pct"):
+        PositionSheet(**data)
+
+
+# T05: valid_until < generated_at
+def test_invalid_time_order():
+    now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)
+    data = _base_sheet(valid_until=now - timedelta(hours=1))
+    with pytest.raises(ValueError, match="before"):
+        PositionSheet(**data)
+
+
+# T07: strategy_tag RSI_REBOUND (폐기)
+def test_deprecated_strategy_tag():
+    data = _base_sheet(strategy_tag="RSI_REBOUND")
+    with pytest.raises(ValueError, match="deprecated"):
+        PositionSheet(**data)
+
+
+# T08: scale_out portion 합 초과
+def test_scale_out_portion_exceeded():
+    data = _base_sheet()
+    data["exit"]["rules"] = [
+        {"type": "scale_out", "levels": [[0.03, 0.6], [0.05, 0.6]]},  # 합 1.2
+        {"type": "fixed_sl", "pct": 0.05},
+        {"type": "time_stop", "mode": "eod"},
+    ]
+    with pytest.raises(ValueError, match="scale_out portion"):
+        PositionSheet(**data)
+
+
+# T11: entry.valid_until > sheet.valid_until
+def test_entry_valid_until_exceeds_sheet():
+    now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)
+    data = _base_sheet()
+    data["entry"]["valid_until"] = now + timedelta(hours=10)  # sheet는 +6h
+    with pytest.raises(ValueError, match="entry.valid_until"):
+        PositionSheet(**data)
+
+
+# T12: final_pct < MIN_POSITION_PCT
+def test_min_position_pct():
+    data = _base_sheet()
+    data["size"] = {
+        "base_pct": 0.01,
+        "macro_multiplier": 0.3,
+        "risk_multiplier": 1.0,
+        "final_pct": 0.003,
+        "max_notional_krw": 1_000_000,
+    }
+    with pytest.raises(ValueError, match="MIN"):
+        PositionSheet(**data)
+
+
+# sheet_id 포맷 불일치
+def test_invalid_sheet_id():
+    data = _base_sheet(sheet_id="bad_id")
+    with pytest.raises(ValueError, match="sheet_id"):
+        PositionSheet(**data)
+
+
+# market trigger with price
+def test_market_trigger_with_price():
+    data = _base_sheet()
+    data["entry"]["trigger"] = "market"
+    data["entry"]["price"] = 71200
+    with pytest.raises(ValueError, match="market trigger"):
+        PositionSheet(**data)
+
+
+# 직렬화/역직렬화 라운드트립
+def test_json_roundtrip():
+    sheet = PositionSheet(**_base_sheet())
+    json_str = sheet.model_dump_json()
+    restored = PositionSheet.model_validate_json(json_str)
+    assert restored.sheet_id == sheet.sheet_id
+    assert restored.size.final_pct == sheet.size.final_pct

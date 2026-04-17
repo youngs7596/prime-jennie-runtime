@@ -1,0 +1,72 @@
+name: prime-jennie-runtime
+
+x-common-env: &common-env
+  TZ: Asia/Seoul
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: pj_runtime
+  POSTGRES_PASSWORD: ${PJ_RUNTIME_PASSWORD:-dev_runtime}
+  POSTGRES_DB: prime_jennie_v3
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD:-dev_redis}
+
+services:
+  # --- Infrastructure ---
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pj_admin
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-dev_admin}
+      POSTGRES_DB: prime_jennie_v3
+    volumes:
+      - ${DOCKER_DATA_DIR:-./data}/postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_v3_schema.sql:/docker-entrypoint-initdb.d/001_v3_schema.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pj_admin -d prime_jennie_v3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-dev_redis}
+    volumes:
+      - ${DOCKER_DATA_DIR:-./data}/redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-dev_redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # --- Screening Executor placeholder (Track D) ---
+
+  screening-executor:
+    build:
+      context: .
+      dockerfile: Dockerfile.screening
+    entrypoint: ["echo", "screening-executor placeholder — Track D"]
+    profiles: ["full"]
+    security_opt:
+      - "no-new-privileges:true"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512M
+    mem_limit: 4g
+    cpus: 2
+    networks:
+      - screening-isolated
+
+networks:
+  default:
+    driver: bridge
+  screening-isolated:
+    driver: bridge
+    internal: true

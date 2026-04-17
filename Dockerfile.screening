@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+RUN useradd -m -u 1000 screener
+WORKDIR /app
+
+# 최소 의존성만
+RUN pip install --no-cache-dir \
+    pandas==2.2.* \
+    numpy==1.26.* \
+    scipy==1.13.* \
+    scikit-learn==1.5.* \
+    pydantic==2.*
+
+USER screener
+
+CMD ["echo", "screening-executor placeholder"]

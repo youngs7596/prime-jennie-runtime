@@ -38,6 +38,7 @@ from .council_macro import (
     macro_quick,
     macro_validate_store,
 )
+from .disclosures import collect_dart_filings
 from .investor_data import collect_foreign_holding, collect_investor_trading
 from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
 from .market_data import (
@@ -69,6 +70,7 @@ def build_handlers(
         await macro_validate_store(redis_client)
 
     bok_ecos_api_key = os.environ.get("BOK_ECOS_API_KEY") or None
+    dart_api_key = os.environ.get("DART_API_KEY") or ""
 
     async def h_macro_collect_global() -> None:
         await macro_collect_global(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
@@ -103,6 +105,9 @@ def build_handlers(
     async def h_collect_foreign_holding() -> None:
         await collect_foreign_holding(pool, http)
 
+    async def h_collect_dart_filings(days: int = 7) -> None:
+        await collect_dart_filings(pool, http, api_key=dart_api_key, days=days)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -116,6 +121,7 @@ def build_handlers(
         "collect_us_market": h_collect_us_market,
         "collect_investor_trading": h_collect_investor_trading,
         "collect_foreign_holding": h_collect_foreign_holding,
+        "collect_dart_filings": h_collect_dart_filings,
     }
 
 

@@ -175,6 +175,14 @@ SEEDS: list[SeedJob] = [
         cron="0 19 * * 1-5",
         kwargs={},
     ),
+    # Track B — collect_dart_filings (v2 utility_jobs_dag: 45 18 * * 1-5, DART 정기공시).
+    SeedJob(
+        id="job_worker.collect_dart_filings",
+        owner="job_worker",
+        handler_key="collect_dart_filings",
+        cron="45 18 * * 1-5",
+        kwargs={"days": 7},
+    ),
 ]
 
 

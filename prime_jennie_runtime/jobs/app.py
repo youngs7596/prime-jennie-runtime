@@ -38,7 +38,7 @@ from .council_macro import (
     macro_quick,
     macro_validate_store,
 )
-from .maintenance import cleanup_old_data, contract_smoke_test
+from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
 
 OWNER = "job_worker"
 
@@ -78,6 +78,9 @@ def build_handlers(
         news_crawler = NaverNewsCrawler(max_pages=1)
         await contract_smoke_test(http, news_crawler)
 
+    async def h_update_naver_sectors() -> None:
+        await update_naver_sectors(pool, http)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -85,6 +88,7 @@ def build_handlers(
         "macro_collect_korea": h_macro_collect_korea,
         "macro_quick": h_macro_quick,
         "contract_smoke_test": h_contract_smoke_test,
+        "update_naver_sectors": h_update_naver_sectors,
     }
 
 

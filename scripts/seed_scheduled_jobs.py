@@ -127,6 +127,14 @@ SEEDS: list[SeedJob] = [
         cron="*/5 9-15 * * 1-5",
         kwargs={},
     ),
+    # Track B — update_naver_sectors (v2 utility_jobs_dag: 0 20 * * 0, 주간).
+    SeedJob(
+        id="job_worker.update_naver_sectors",
+        owner="job_worker",
+        handler_key="update_naver_sectors",
+        cron="0 20 * * 0",
+        kwargs={},
+    ),
 ]
 
 

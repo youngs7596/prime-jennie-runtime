@@ -25,6 +25,7 @@ from .crawlers.naver import (
     crawl_naver_roe,
 )
 from .crawlers.naver_market import fetch_investor_flows
+from .sector_taxonomy import get_sector_group
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,47 @@ async def cleanup_old_data(
         except (IndexError, ValueError):
             deleted = 0
     logger.info("cleanup_old_data: cutoff=%s deleted=%d", cutoff.isoformat(), deleted)
+
+
+async def update_naver_sectors(
+    pool: Any,
+    http: httpx.AsyncClient,
+) -> None:
+    """v2 `/jobs/update-naver-sectors` 포팅 (app.py:2353-2373).
+
+    네이버 업종 분류 mapping 을 크롤링해 `stock_masters.sector_naver`/`sector_group`
+    컬럼을 갱신. v2 는 SQLModel row 단위로 update 하지만 asyncpg 로 포팅하면서
+    단일 UPDATE 쿼리로 묶었다 (stock_code → sector 매핑만 보내면 되므로 로직
+    동일). `sector_group` 은 `get_sector_group` 으로 계산 (override 우선).
+
+    v2 스케줄: `0 20 * * 0` (일요일 20:00). timeout 15분.
+    """
+    mapping = await build_naver_sector_mapping(http)
+    if not mapping:
+        logger.warning("update_naver_sectors: empty mapping — skip")
+        return
+
+    updated = 0
+    async with pool.acquire() as conn, conn.transaction():
+        for code, sector in mapping.items():
+            sector_group = get_sector_group(sector, stock_code=code).value
+            result = await conn.execute(
+                "UPDATE stock_masters SET sector_naver=$1, sector_group=$2, "
+                "updated_at=NOW() WHERE stock_code=$3",
+                sector,
+                sector_group,
+                code,
+            )
+            if isinstance(result, str) and result.startswith("UPDATE "):
+                try:
+                    updated += int(result.split(" ", 1)[1])
+                except (IndexError, ValueError):
+                    pass
+    logger.info(
+        "update_naver_sectors: mapping=%d, updated=%d rows",
+        len(mapping),
+        updated,
+    )
 
 
 async def contract_smoke_test(
@@ -230,4 +272,5 @@ __all__ = [
     "ContractSmokeError",
     "cleanup_old_data",
     "contract_smoke_test",
+    "update_naver_sectors",
 ]

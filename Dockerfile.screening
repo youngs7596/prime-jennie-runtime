@@ -3,7 +3,7 @@ FROM python:3.12-slim
 RUN useradd -m -u 1000 screener
 WORKDIR /app
 
-# 최소 의존성만
+# 격리 컨테이너 내부에서 Scout 코드가 사용 가능한 의존성 (SCOUT §6.1)
 RUN pip install --no-cache-dir \
     pandas==2.2.* \
     numpy==1.26.* \
@@ -11,6 +11,17 @@ RUN pip install --no-cache-dir \
     scikit-learn==1.5.* \
     pydantic==2.*
 
+# 실행에 필요한 모듈 (slow_loop.scout.schemas — ScreeningCandidate 의존)
+COPY pyproject.toml /app/pyproject.toml
+COPY prime_jennie_runtime/__init__.py /app/prime_jennie_runtime/__init__.py
+COPY prime_jennie_runtime/slow_loop/__init__.py /app/prime_jennie_runtime/slow_loop/__init__.py
+COPY prime_jennie_runtime/slow_loop/scout/__init__.py /app/prime_jennie_runtime/slow_loop/scout/__init__.py
+COPY prime_jennie_runtime/slow_loop/scout/schemas.py /app/prime_jennie_runtime/slow_loop/scout/schemas.py
+COPY prime_jennie_runtime/screening_executor /app/prime_jennie_runtime/screening_executor
+
+ENV PYTHONPATH=/app
+
 USER screener
 
-CMD ["echo", "screening-executor placeholder"]
+# stdin → stdout JSON 프로토콜 (executor.py의 _stdio_main)
+ENTRYPOINT ["python", "-u", "-m", "prime_jennie_runtime.screening_executor.executor"]

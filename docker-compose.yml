@@ -109,21 +109,32 @@ services:
     restart: unless-stopped
     profiles: ["full"]
 
-  # --- Screening Executor placeholder (Track D) ---
+  # --- Screening Executor (Track D) ---
+  #
+  # 컴포즈 서비스로 띄우지 않고 이미지만 빌드한다. 실제 실행은 ScreeningToolAdapter
+  # (호스트 측)가 매번 `docker run --rm -i ...`로 spawn하는 ephemeral 컨테이너.
+  # 그래서 entrypoint는 stdin → stdout JSON 프로토콜이고, profiles로 일반 up에서 제외.
+  #
+  # 빌드만: `docker compose --profile build-only build screening-executor`
 
   screening-executor:
     build:
       context: .
       dockerfile: Dockerfile.screening
-    entrypoint: ["echo", "screening-executor placeholder — Track D"]
-    profiles: ["full"]
+    image: screening-executor:latest
+    profiles: ["build-only"]
+    # 아래 설정은 직접 `docker run` 시 ScreeningToolAdapter._build_argv가 부여한다.
+    # compose에는 참고용으로만 남김.
     security_opt:
       - "no-new-privileges:true"
     read_only: true
     tmpfs:
-      - /tmp:size=512M
+      - /tmp:size=256M
     mem_limit: 4g
     cpus: 2
+    cap_drop:
+      - ALL
+    user: "1000:1000"
     networks:
       - screening-isolated
 

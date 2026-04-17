@@ -11,4 +11,4 @@ COPY prime_jennie_runtime ./prime_jennie_runtime
 RUN pip install --no-cache-dir uv && \
     uv pip install --system -e "."
 
-CMD ["python", "-m", "prime_jennie_runtime.telegram_bot.app"]
+CMD ["uvicorn", "prime_jennie_runtime.telegram_bot.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]

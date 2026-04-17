@@ -165,9 +165,10 @@ def build_insert_sql(
     """
     placeholders = ", ".join(f"${i + 1}" for i in range(len(columns)))
     col_list = ", ".join(columns)
+    pk_clause = on_conflict_pk if on_conflict_pk.startswith("(") else f"({on_conflict_pk})"
     return (
         f"INSERT INTO {table} ({col_list}) VALUES ({placeholders}) "
-        f"ON CONFLICT ({on_conflict_pk}) DO NOTHING"
+        f"ON CONFLICT {pk_clause} DO NOTHING"
     )
 
 

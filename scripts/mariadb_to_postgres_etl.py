@@ -607,6 +607,14 @@ async def cmd_run(args: argparse.Namespace) -> int:
         charset="utf8mb4",
     )
     v3_conn = await asyncpg.connect(args.v3_dsn)
+    # v2 TINYINT(1) → Python int(0/1) → Postgres BOOLEAN 변환 허용 (ETL cutover 한정)
+    await v3_conn.set_type_codec(
+        "bool",
+        encoder=lambda v: "true" if v else "false",
+        decoder=lambda v: v == "true",
+        schema="pg_catalog",
+        format="text",
+    )
 
     results: list[TableResult] = []
     try:
@@ -636,6 +644,14 @@ async def cmd_verify(args: argparse.Namespace) -> int:
         charset="utf8mb4",
     )
     v3_conn = await asyncpg.connect(args.v3_dsn)
+    # v2 TINYINT(1) → Python int(0/1) → Postgres BOOLEAN 변환 허용 (ETL cutover 한정)
+    await v3_conn.set_type_codec(
+        "bool",
+        encoder=lambda v: "true" if v else "false",
+        decoder=lambda v: v == "true",
+        schema="pg_catalog",
+        format="text",
+    )
 
     results: list[TableResult] = []
     try:
@@ -680,6 +696,11 @@ def _print_report(results: list[TableResult]) -> None:
         status = r.error or ("ok" if r.sample_match else "sample_mismatch")
         sample = "y" if r.sample_match else "n"
         print(f"{r.spec.v2_table:<32} {r.v3_count:>10} {r.v2_count:>10} {sample:>8} {status}")
+    for r in results:
+        if r.stats and r.stats.errors:
+            print(f"\n--- {r.spec.v2_table} batch errors ({len(r.stats.errors)}) ---")
+            for e in r.stats.errors[:5]:
+                print(f"  {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────

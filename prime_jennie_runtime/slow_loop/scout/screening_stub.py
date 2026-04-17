@@ -10,8 +10,19 @@ Track D가 완성되면 이 모듈을 `ScreeningToolAdapter`(실 구현)로 교�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
 from .schemas import EntryHint, ScreeningCandidate
+
+
+@runtime_checkable
+class ScreeningInvoker(Protocol):
+    """Scout 생성 코드를 실행해 후보 리스트를 돌려주는 인터페이스.
+
+    Stub/Real(Track D) 둘 다 이 시그니처만 지키면 slow_loop.pipeline이 swap 가능.
+    """
+
+    async def invoke(self, code: str, context: dict) -> list[ScreeningCandidate]: ...
 
 
 @dataclass

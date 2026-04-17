@@ -44,7 +44,7 @@ from .scout.schemas import (
     ScoutRunSummary,
     ScreeningCandidate,
 )
-from .scout.screening_stub import ScreeningToolAdapterStub
+from .scout.screening_stub import ScreeningInvoker
 from .scout.validators import ScoutValidationResult, validate_candidates
 from .strategy.engine import StrategyEngine, StrategyEngineInputs
 from .strategy.publisher import PositionSheetPublisher
@@ -133,7 +133,7 @@ class SlowLoopComponents:
     orchestrator: Orchestrator
     scout_builder: ScoutContextBuilder
     macro_builder: MacroContextBuilder
-    screening: ScreeningToolAdapterStub
+    screening: ScreeningInvoker
     engine: StrategyEngine
     publisher: PositionSheetPublisher
     state_store: MacroStateStore
@@ -280,10 +280,12 @@ async def run_slow_loop(
     )
 
     # --- 3. Screening 실행 (Track D stub) ---
+    # JSON 직렬화 가능해야 subprocess/docker backend이 stdin으로 넘길 수 있다.
+    # (Stub은 무시하므로 어느 모드든 무해)
     screening_context = {
-        "as_of": as_of_date,
+        "as_of": as_of_date.isoformat(),
         "universe": scout_ctx.universe,
-        "news_scores": {t: e.model_dump() for t, e in scout_ctx.news_scores.items()},
+        "news_scores": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_scores.items()},
         "sector_momentum": scout_ctx.sector_momentum,
         "macro_size_multiplier": post.output.size_multiplier,
     }

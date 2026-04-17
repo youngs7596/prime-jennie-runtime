@@ -1,0 +1,187 @@
+"""네이버 크롤러 adapter 테스트 — fixture HTML + respx.
+
+실제 네트워크 호출은 하지 않는다. 파싱 / 노이즈 필터 / 에러 복구 를 단위 검증.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+import respx
+
+from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
+    NaverNewsCrawler,
+    _parse_news_page,
+)
+from prime_jennie_runtime.news_pipeline_kor.crawler import NewsCrawler
+
+# 네이버 금융 종목 뉴스 페이지의 핵심 마크업 (2024 기준, table.type5 tr 구조).
+# euc-kr 실제 인코딩 대신 utf-8 로 저장 후 파서의 ``errors="replace"`` 로 처리.
+_SAMPLE_HTML = """
+<html><body>
+<table class="type5">
+<tr>
+  <td class="title"><a href="/item/news_read.naver?id=1">삼성전자 분기 실적 서프라이즈</a></td>
+  <td class="info">연합뉴스</td>
+  <td class="date">2026.04.16 09:30</td>
+</tr>
+<tr>
+  <td class="title"><a href="https://example.com/external">외부 기사</a></td>
+  <td class="info">블룸버그</td>
+  <td class="date">2026.04.16 10:00</td>
+</tr>
+<tr>
+  <td class="title"><a href="/item/x">특징주 삼성전자 상승</a></td>
+  <td class="info">이데일리</td>
+  <td class="date">2026.04.16 10:15</td>
+</tr>
+<tr>
+  <td class="title"><a href="/item/y"></a></td>
+  <td class="info">공백제목</td>
+  <td class="date">2026.04.16 10:20</td>
+</tr>
+</table>
+</body></html>
+""".encode()
+
+
+def test_parse_news_page_extracts_valid_articles():
+    articles = _parse_news_page(_SAMPLE_HTML, "005930")
+    # 빈 제목 행 스킵. 노이즈 필터는 크롤러 레벨이라 여기선 3건.
+    assert len(articles) == 3
+    titles = [a.title for a in articles]
+    assert "삼성전자 분기 실적 서프라이즈" in titles
+    assert "외부 기사" in titles
+    assert "특징주 삼성전자 상승" in titles
+
+
+def test_parse_news_page_absolute_url_for_relative_href():
+    articles = _parse_news_page(_SAMPLE_HTML, "005930")
+    first = next(a for a in articles if a.title.startswith("삼성"))
+    assert str(first.source_url).startswith("https://finance.naver.com/item/news_read.naver")
+
+
+def test_parse_news_page_keeps_external_url():
+    articles = _parse_news_page(_SAMPLE_HTML, "005930")
+    ext = next(a for a in articles if a.title == "외부 기사")
+    assert str(ext.source_url).startswith("https://example.com/")
+
+
+def test_parse_news_page_missing_table_returns_empty():
+    assert _parse_news_page(b"<html><body>no table</body></html>", "005930") == []
+
+
+def test_parse_news_page_bad_date_falls_back_to_now():
+    html = (
+        b'<table class="type5"><tr>'
+        b'<td class="title"><a href="/x">hi</a></td>'
+        b'<td class="date">invalid</td></tr></table>'
+    )
+    [article] = _parse_news_page(html, "005930")
+    assert article.published_at is not None  # now fallback
+
+
+# ---------- crawler 단위: respx 로 네이버 엔드포인트 mock ----------
+
+
+@pytest.mark.asyncio
+async def test_crawler_implements_protocol():
+    crawler = NaverNewsCrawler(client=httpx.AsyncClient())
+    assert isinstance(crawler, NewsCrawler)
+    await crawler.client.aclose()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_crawler_filters_noise_titles():
+    async with respx.mock(base_url="https://finance.naver.com") as mock:
+        mock.get("/item/news_news.naver").mock(
+            return_value=httpx.Response(200, content=_SAMPLE_HTML)
+        )
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client, max_pages=1, request_delay_s=0.0)
+        articles = await crawler.crawl(["005930"])
+        await client.aclose()
+
+    # "특징주" 는 노이즈 필터로 제거 → 2 건 (비-빈 제목 2개 중 노이즈 1개 제외)
+    assert len(articles) == 2
+    assert all("특징주" not in a.title for a in articles)
+
+
+@pytest.mark.asyncio
+async def test_crawler_multi_page_fetches_each():
+    async with respx.mock(base_url="https://finance.naver.com") as mock:
+        route = mock.get("/item/news_news.naver").mock(
+            return_value=httpx.Response(200, content=_SAMPLE_HTML)
+        )
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client, max_pages=3, request_delay_s=0.0)
+        await crawler.crawl(["005930"])
+        await client.aclose()
+
+    # 3 페이지 호출
+    assert route.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_crawler_http_error_returns_partial():
+    call_count = {"n": 0}
+
+    def _side_effect(request):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return httpx.Response(200, content=_SAMPLE_HTML)
+        return httpx.Response(502, text="bad gateway")
+
+    async with respx.mock(base_url="https://finance.naver.com") as mock:
+        mock.get("/item/news_news.naver").mock(side_effect=_side_effect)
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client, max_pages=3, request_delay_s=0.0)
+        articles = await crawler.crawl(["005930"])
+        await client.aclose()
+
+    # 1 페이지 정상 수집, 2 페이지 502 로 break → 1 페이지 분 (노이즈 제거 후 2건)
+    assert len(articles) == 2
+
+
+@pytest.mark.asyncio
+async def test_crawler_timeout_error_moves_to_next_ticker():
+    async with respx.mock(base_url="https://finance.naver.com") as mock:
+        mock.get("/item/news_news.naver", params={"code": "005930"}).mock(
+            side_effect=httpx.ConnectTimeout("timeout")
+        )
+        mock.get("/item/news_news.naver", params={"code": "000660"}).mock(
+            return_value=httpx.Response(200, content=_SAMPLE_HTML)
+        )
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client, max_pages=1, request_delay_s=0.0)
+        articles = await crawler.crawl(["005930", "000660"])
+        await client.aclose()
+
+    # 005930 은 timeout 으로 0건, 000660 은 2건
+    tickers = [a.ticker for a in articles]
+    assert "005930" not in tickers
+    assert tickers.count("000660") == 2
+
+
+@pytest.mark.asyncio
+async def test_crawler_article_id_is_deterministic_by_url():
+    from prime_jennie_runtime.news_pipeline_kor.dedup import article_fingerprint
+
+    html = (
+        b'<table class="type5"><tr><td class="title"><a href="/item/x">Same</a></td></tr></table>'
+    )
+    [article] = _parse_news_page(html, "005930")
+    expected = article_fingerprint("https://finance.naver.com/item/x")
+    assert article.article_id == expected
+
+
+@pytest.mark.asyncio
+async def test_crawler_no_client_creates_and_closes_own():
+    """client=None 이면 자체 AsyncClient 를 열고 닫는다. respx 가 mock 하므로 누수 X."""
+    async with respx.mock(base_url="https://finance.naver.com") as mock:
+        mock.get("/item/news_news.naver").mock(
+            return_value=httpx.Response(200, content=_SAMPLE_HTML)
+        )
+        crawler = NaverNewsCrawler(max_pages=1, request_delay_s=0.0)
+        articles = await crawler.crawl(["005930"])
+    assert len(articles) >= 2

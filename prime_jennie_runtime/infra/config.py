@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -101,6 +101,27 @@ class TelegramConfig(BaseSettings):
     api_base: str = "https://api.telegram.org"
     parse_mode: str = "HTML"
     dry_run: bool = False  # True면 실제 전송 없이 로그만
+
+    # 양방향 명령 allowlist — 빈 리스트면 기동 거부 (fail-safe, Phase 2 D4).
+    # 환경변수 형식: "TELEGRAM_ALLOWED_CHAT_IDS=123456,7891011"
+    allowed_chat_ids: list[str] = Field(default_factory=list)
+    # long-poll 간격 (getUpdates timeout)
+    long_poll_timeout_s: int = 30
+    # 동일 chat 명령 최소 간격
+    command_min_interval_s: int = 5
+
+    @field_validator("allowed_chat_ids", mode="before")
+    @classmethod
+    def _parse_allowed_chat_ids(cls, v: object) -> object:
+        """환경변수에서는 콤마 구분 문자열도 허용 (JSON 리스트 포맷 병행)."""
+        if isinstance(v, str):
+            stripped = v.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                return v  # JSON 은 기본 파서가 처리
+            return [s.strip() for s in stripped.split(",") if s.strip()]
+        return v
 
 
 class AppConfig(BaseSettings):

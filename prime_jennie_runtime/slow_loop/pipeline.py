@@ -265,7 +265,7 @@ async def run_slow_loop(
                 try:
                     from .persistence import _estimate_cost, _tier_model
 
-                    shadow_model_name = _tier_model("strong")  # DeepSeek
+                    shadow_model_name = _tier_model("shadow_reasoning")  # DeepSeek R1 (reasoner)
                     shadow_cost_est = _estimate_cost(
                         shadow_model_name,
                         macro_prompt_chars,

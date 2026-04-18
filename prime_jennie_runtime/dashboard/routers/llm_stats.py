@@ -79,7 +79,8 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
         model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
         return model, "Anthropic"
     if service == "macro_shadow":
-        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        # Shadow 는 Opus 와 reasoning 동급 비교. R1 계열 reasoner 기본.
+        model = os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-reasoner")
         return model, "DeepSeek"
     if service == "briefing":
         model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")

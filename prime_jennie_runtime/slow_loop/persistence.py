@@ -42,11 +42,13 @@ _PRICING: dict[str, tuple[float, float]] = {
 
 
 def _tier_model(tier: str) -> str | None:
-    """tier → 설정된 모델명 (ANTHROPIC_MODEL / DEEPSEEK_MODEL)."""
+    """tier → 설정된 모델명 (ANTHROPIC_MODEL / DEEPSEEK_MODEL / DEEPSEEK_SHADOW_MODEL)."""
     if tier == "reasoning":
         return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
     if tier == "strong":
         return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    if tier == "shadow_reasoning":
+        return os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-reasoner")
     return None
 
 

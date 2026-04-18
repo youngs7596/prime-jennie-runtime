@@ -108,6 +108,9 @@ def _try_build_tiered_router() -> Any | None:
     deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     deepseek_base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+    # Shadow 는 Opus 와 reasoning 동급 비교가 목적이므로 R1 계열 (deepseek-reasoner) 기본.
+    # DeepSeek 의 Scout 용 chat tier 와 별도.
+    deepseek_shadow_model = os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-reasoner")
 
     # DeepSeek 은 OpenAI 의 json_schema response_format 을 지원하지 않고 function_calling
     # 만 지원. minyoung-mah Orchestrator 가 `model.with_structured_output(schema)` 를
@@ -130,12 +133,20 @@ def _try_build_tiered_router() -> Any | None:
         model=anthropic_model,
         api_key=anthropic_key,
     )
+    # Shadow = DeepSeek R1 계열 (reasoner). Opus 와 reasoning 동급 비교.
+    # deepseek-reasoner 도 temperature 파라미터를 공식 문서상 무시하지만, 설정해도 오류 없음.
+    shadow_reasoning = _DeepSeekChatOpenAI(
+        model=deepseek_shadow_model,
+        api_key=deepseek_key,
+        base_url=deepseek_base,
+        temperature=0.1,
+    )
     return {
         "strong": strong,
         "reasoning": reasoning,
         "default": strong,
-        # shadow tier — reasoning 자리에 DeepSeek 을 꽂은 거울 구성
-        "shadow_reasoning": strong,
+        # shadow tier — reasoning 자리에 DeepSeek reasoner(R1) 를 꽂은 거울 구성
+        "shadow_reasoning": shadow_reasoning,
     }
 
 

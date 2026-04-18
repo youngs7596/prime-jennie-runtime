@@ -292,3 +292,53 @@ async def test_start_and_stop_lifecycle():
     await runner.stop()
     assert runner._poll_task is not None
     assert runner._poll_task.cancelled() or runner._poll_task.done()
+
+
+# -----------------------------------------------------------------------------
+# cron dow 치환 — cron 표준(0/7=Sun,1=Mon) → apscheduler(0=Mon,6=Sun)
+# -----------------------------------------------------------------------------
+
+
+def test_cron_dow_translation_range_mon_fri():
+    from prime_jennie_runtime.infra.scheduler import _normalize_cron_for_apscheduler
+
+    # cron "1-5" (Mon-Fri) → apscheduler "0-4"
+    assert _normalize_cron_for_apscheduler("*/5 9-15 * * 1-5") == "*/5 9-15 * * 0-4"
+
+
+def test_cron_dow_translation_sunday_both_forms():
+    from prime_jennie_runtime.infra.scheduler import _normalize_cron_for_apscheduler
+
+    # cron "0" = Sun → apscheduler "6"
+    assert _normalize_cron_for_apscheduler("0 20 * * 0") == "0 20 * * 6"
+    # cron "7" 도 Sun → apscheduler "6"
+    assert _normalize_cron_for_apscheduler("0 20 * * 7") == "0 20 * * 6"
+
+
+def test_cron_dow_translation_list_and_named():
+    from prime_jennie_runtime.infra.scheduler import _normalize_cron_for_apscheduler
+
+    # 리스트: cron "1,4" (Mon,Thu) → apscheduler "0,3"
+    assert _normalize_cron_for_apscheduler("0 6 * * 1,4") == "0 6 * * 0,3"
+    # 이름: cron "mon-fri" → apscheduler "0-4"
+    assert _normalize_cron_for_apscheduler("0 9 * * mon-fri") == "0 9 * * 0-4"
+
+
+def test_cron_dow_translation_tue_sat_for_us_market():
+    from prime_jennie_runtime.infra.scheduler import _normalize_cron_for_apscheduler
+
+    # cron "2-6" (Tue-Sat) → apscheduler "1-5"
+    assert _normalize_cron_for_apscheduler("0 7 * * 2-6") == "0 7 * * 1-5"
+
+
+def test_cron_dow_translation_wildcard_unchanged():
+    from prime_jennie_runtime.infra.scheduler import _normalize_cron_for_apscheduler
+
+    assert _normalize_cron_for_apscheduler("0 3 * * *") == "0 3 * * *"
+
+
+def test_cron_non_5_fields_untouched():
+    from prime_jennie_runtime.infra.scheduler import _normalize_cron_for_apscheduler
+
+    # 4 필드짜리 (형식 오류) 는 그대로 전달 → apscheduler 가 ValueError 처리
+    assert _normalize_cron_for_apscheduler("0 3 * *") == "0 3 * *"

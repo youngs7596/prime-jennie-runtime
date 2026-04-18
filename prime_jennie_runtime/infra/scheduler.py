@@ -33,6 +33,70 @@ Handler = Callable[..., Awaitable[Any]]
 RELOAD_CHANNEL_PREFIX = "scheduler.reload"
 
 
+# apscheduler 의 CronTrigger.from_crontab 는 day-of-week 를 cron 표준(0/7=Sun, 1=Mon)
+# 대신 apscheduler 고유 규약(0=Mon ... 6=Sun) 으로 해석한다. 그대로 두면 "1-5" 가
+# 월~금 대신 화~토로 실행되어 월요일 장중 스케줄이 전량 누락된다.
+# DB 에는 cron 표준을 그대로 두고 여기서 dow 필드만 apscheduler 규약으로 치환한다.
+_CRON_WEEKDAY_NAMES = {
+    "sun": 0,
+    "mon": 1,
+    "tue": 2,
+    "wed": 3,
+    "thu": 4,
+    "fri": 5,
+    "sat": 6,
+}
+
+
+def _cron_dow_to_apscheduler(token: str) -> str:
+    """cron dow 단일 토큰을 apscheduler dow 로 변환. (0/7=Sun,1=Mon) → (0=Mon,6=Sun)."""
+
+    token = token.strip()
+    if not token or token in {"*", "?"}:
+        return token
+    lower = token.lower()
+    if lower in _CRON_WEEKDAY_NAMES:
+        n = _CRON_WEEKDAY_NAMES[lower]
+    else:
+        n = int(token)
+        if n == 7:
+            n = 0
+        if not 0 <= n <= 6:
+            raise ValueError(f"dow out of range: {token}")
+    # cron n → apscheduler (n + 6) % 7
+    return str((n + 6) % 7)
+
+
+def _translate_cron_dow_field(field: str) -> str:
+    """cron dow 필드 전체(`1-5`, `0,6`, `2/2` 등) 를 apscheduler 규약으로 치환."""
+
+    pieces: list[str] = []
+    for comma_piece in field.split(","):
+        if "/" in comma_piece:
+            base, step = comma_piece.split("/", 1)
+            if "-" in base:
+                a, b = base.split("-", 1)
+                pieces.append(f"{_cron_dow_to_apscheduler(a)}-{_cron_dow_to_apscheduler(b)}/{step}")
+            else:
+                pieces.append(f"{_cron_dow_to_apscheduler(base)}/{step}")
+        elif "-" in comma_piece:
+            a, b = comma_piece.split("-", 1)
+            pieces.append(f"{_cron_dow_to_apscheduler(a)}-{_cron_dow_to_apscheduler(b)}")
+        else:
+            pieces.append(_cron_dow_to_apscheduler(comma_piece))
+    return ",".join(pieces)
+
+
+def _normalize_cron_for_apscheduler(expr: str) -> str:
+    """cron 표현식 전체의 dow 필드만 apscheduler 규약으로 치환한다."""
+
+    parts = expr.split()
+    if len(parts) != 5:
+        return expr  # 5 필드가 아니면 apscheduler 가 알아서 ValueError 를 낸다
+    parts[4] = _translate_cron_dow_field(parts[4])
+    return " ".join(parts)
+
+
 @dataclass(frozen=True)
 class JobSpec:
     """scheduled_jobs 한 행의 스케줄러 관련 필드."""
@@ -312,7 +376,8 @@ class SchedulerRunner:
             )
             return
         try:
-            trigger = CronTrigger.from_crontab(spec.cron, timezone=self._timezone)
+            normalized = _normalize_cron_for_apscheduler(spec.cron)
+            trigger = CronTrigger.from_crontab(normalized, timezone=self._timezone)
         except ValueError:
             logger.exception("invalid cron expression: id=%s cron=%r", spec.id, spec.cron)
             return

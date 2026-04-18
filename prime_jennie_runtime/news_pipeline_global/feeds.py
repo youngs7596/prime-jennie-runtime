@@ -26,8 +26,13 @@ class RssFeed:
 
 
 DEFAULT_FEEDS: tuple[RssFeed, ...] = (
-    RssFeed("wsj", "wsj-markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
-    RssFeed("wsj", "wsj-world", "https://feeds.a.dj.com/rss/RSSWorldNews.xml"),
+    # WSJ 공식 RSS (feeds.a.dj.com) 는 2025-01-27 이후 업데이트 중단됨 — retired.
+    # 실전 검증 (2026-04-18): Google News site-filter 가 최근 24h 헤드라인을 안정 공급.
+    RssFeed(
+        "wsj",
+        "wsj-via-gnews",
+        "https://news.google.com/rss/search?q=site:wsj.com+when:1d&hl=en-US&gl=US&ceid=US:en",
+    ),
     RssFeed("bloomberg", "bloomberg-markets", "https://feeds.bloomberg.com/markets/news.rss"),
     RssFeed("bloomberg", "bloomberg-economics", "https://feeds.bloomberg.com/economics/news.rss"),
     # Reuters 공식 RSS 는 폐지 → Google News 검색 RSS 로 대체. 24h 창.

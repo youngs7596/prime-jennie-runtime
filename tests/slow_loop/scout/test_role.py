@@ -57,7 +57,7 @@ def test_scout_role_system_prompt_contains_allowed_imports():
     # 허용 import 리스트가 system prompt에 들어가 있어야
     assert "pandas" in role.system_prompt
     assert "numpy" in role.system_prompt
-    assert "sklearn.cluster" in role.system_prompt
+    assert "scipy" in role.system_prompt
 
 
 def test_scout_role_system_prompt_contains_forbidden_patterns():

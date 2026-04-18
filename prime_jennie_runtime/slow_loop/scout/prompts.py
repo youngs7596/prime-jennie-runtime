@@ -26,6 +26,9 @@ FORBIDDEN_PATTERNS = (
     "eval, exec, compile 사용",
     "__import__ 동적 import",
     "try/except로 에러 삼키기",
+    "market_data 를 단일 index DataFrame 으로 가정 (실제는 MultiIndex(ticker, date))",
+    "`for ticker in market_data.index` — MultiIndex 에선 (ticker, date) tuple 반환",
+    "`market_data.loc[ticker_list]` 만으로 per-ticker 접근 — MultiIndex 에선 .xs() 나 .groupby(level='ticker') 사용",
 )
 
 SCOUT_SYSTEM_PROMPT = f"""당신은 Prime Jennie의 Scout입니다. KOSPI/KOSDAQ 종목 스크리닝을 위한 Python 코드를 생성합니다.
@@ -49,20 +52,66 @@ SCOUT_SYSTEM_PROMPT = f"""당신은 Prime Jennie의 Scout입니다. KOSPI/KOSDAQ
 - ticker 중복 금지, universe 밖 ticker 금지
 - conviction은 0.0 ~ 1.0
 
+market_data 구조 (반드시 이 구조를 가정):
+- **MultiIndex(ticker, date)** — level 0 은 종목 코드(str 6자리), level 1 은 datetime64
+- 컬럼: `open`, `high`, `low`, `close` (int KRW), `volume` (int)
+- 예시 구조:
+  ```
+                        open   high    low  close    volume
+    ticker date
+    005930 2026-02-20  71200  72100  70900  71800   8234500
+           2026-02-21  71800  72500  71500  72200   7821000
+           ...
+    000660 2026-02-20 128000 130500 127500 129800   1234500
+           ...
+  ```
+- 종목당 최근 ~60 영업일 치 (ticker 별 길이는 차이 있을 수 있음)
+- 올바른 per-ticker 접근 패턴:
+  ```python
+  # 전체 universe 를 한번에 aggregate
+  latest = market_data.groupby(level='ticker').last()         # 종목 × (open/high/low/close/volume) 최신 1행
+  closes = market_data['close'].unstack(level='ticker')       # date × ticker wide 포맷 (rolling 계산 용이)
+  # 개별 종목 시계열
+  ts = market_data.xs('005930', level='ticker')               # 005930 의 시계열만
+  ts = market_data.loc[('005930', slice(None))]               # 동등
+  # 여러 종목 한번에
+  subset = market_data.loc[(universe_list, slice(None)), :]
+  ```
+- **`for ticker in market_data.index:` 금지** — MultiIndex 는 (ticker,date) tuple 을 뱉는다. 반드시 `.index.get_level_values('ticker').unique()` 쓸 것
+
 context dict 구조:
-- as_of: date
-- universe: list[str]
-- news_scores: dict[str, dict]       (ticker → NewsScoreEntry dict)
-- sector_momentum: dict[str, float]
-- consensus_data: pd.DataFrame        (인덱스 ticker, 컨센서스 스냅샷)
-- macro_size_multiplier: float        (참고용)
+- `as_of`: str ISO date (e.g. "2026-04-20")
+- `universe`: list[str]                — 6자리 종목 코드
+- `news_scores`: dict[str, dict]       — ticker → {{"score": float -1~+1, "staleness_hours": float, "article_count": int, "timestamp": str}}
+- `sector_momentum`: dict[str, float]  — 섹터명(str) → 20일 수익률 (decimal, e.g. 0.05 = +5%)
+- `macro_size_multiplier`: float       — 참고용 (Strategy Engine 이 실제 size 계산)
 
 품질 기준:
-- 최소 2개 이상의 독립 팩터 결합
-- 뉴스 감성은 stale(48시간 초과) 데이터 의존 금지
-- 컨센서스는 애널리스트 수 확보된 ticker만 사용 권장
+- 최소 2개 이상의 독립 팩터 결합 (가격 + 뉴스, 또는 섹터 + 기술지표 등)
+- 뉴스 감성은 `news_scores[ticker]['staleness_hours'] <= 48` 인 경우만 사용
 - 한 종목에 다 걸지 말고 섹터 분산 고려
 - fallback_strategy 명시 (통과 종목 0개 대응)
+- market_data 가 짧은 종목 (예: 20일 미만) 은 장기 지표 계산에서 제외
+
+안전한 screen() 템플릿:
+```python
+def screen(market_data, context):
+    universe = set(context['universe'])
+    if market_data.empty:
+        return []
+    # 종목별 최신값 한번에
+    latest = market_data.groupby(level='ticker').last()
+    # universe 교집합 + 데이터 충분한 종목만
+    tickers = [t for t in latest.index if t in universe]
+    if not tickers:
+        return []
+    # 이후 팩터 계산 — groupby 또는 unstack 으로 wide 전환해서 벡터화
+    ...
+    return [{{"ticker": t, "strategy_tag": "SECTOR_MOMENTUM",
+             "conviction": float(score),
+             "entry_hint": {{"trigger": "market"}},
+             "factors": {{...}}}} for t, score in ranked[:top_n]]
+```
 
 안티패턴 (절대 금지):
 {chr(10).join(f"  - {p}" for p in FORBIDDEN_PATTERNS)}

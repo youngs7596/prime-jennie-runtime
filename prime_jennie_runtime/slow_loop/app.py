@@ -108,9 +108,11 @@ def _try_build_tiered_router() -> Any | None:
     deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     deepseek_base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-    # Shadow 는 Opus 와 reasoning 동급 비교가 목적이므로 R1 계열 (deepseek-reasoner) 기본.
-    # DeepSeek 의 Scout 용 chat tier 와 별도.
-    deepseek_shadow_model = os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-reasoner")
+    # Shadow = Opus 와 reasoning 동급 비교. DeepSeek 계보 업데이트:
+    #   - deepseek-chat: V3.2 (최신 플래그십, hybrid thinking/non-thinking) ← Opus 대응
+    #   - deepseek-reasoner: R1 (구세대 reasoning 전용, 스키마 literal 위반 관찰됨)
+    # Scout 용 strong tier 와 같은 identifier 지만 "chat tier" 가 아니라 실상 V3.2 flagship.
+    deepseek_shadow_model = os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-chat")
 
     # DeepSeek chat: function_calling 만 지원 (json_schema response_format 미지원).
     class _DeepSeekChatOpenAI(ChatOpenAI):
@@ -138,12 +140,16 @@ def _try_build_tiered_router() -> Any | None:
         model=anthropic_model,
         api_key=anthropic_key,
     )
-    # Shadow = DeepSeek R1 계열 (reasoner). Opus 와 reasoning 동급 비교.
-    # reasoner 는 temperature 설정 무시하지만 오류는 없음.
-    shadow_reasoning = _DeepSeekReasonerOpenAI(
+    # Shadow = 기본 deepseek-chat (V3.2 flagship, hybrid). reasoner 로 override 하면
+    # json_mode 로 자동 전환되도록 모델 ID 로 wrapper 선택.
+    shadow_cls = (
+        _DeepSeekReasonerOpenAI if "reasoner" in deepseek_shadow_model else _DeepSeekChatOpenAI
+    )
+    shadow_reasoning = shadow_cls(
         model=deepseek_shadow_model,
         api_key=deepseek_key,
         base_url=deepseek_base,
+        temperature=0.1,
     )
     return {
         "strong": strong,

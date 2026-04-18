@@ -48,7 +48,7 @@ def _tier_model(tier: str) -> str | None:
     if tier == "strong":
         return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     if tier == "shadow_reasoning":
-        return os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-reasoner")
+        return os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-chat")
     return None
 
 

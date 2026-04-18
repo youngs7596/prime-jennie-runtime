@@ -32,6 +32,8 @@ _DEFAULT_TARGETS: list[tuple[str, str]] = [
     ("monitor", "http://monitor:8091/health"),
     ("control-ui", "http://control-ui:80/"),
     ("telegram-bot", "http://telegram-bot:8000/healthz"),
+    # Phase 2.13-6: cloudflared --metrics :2000 활성화 후 /ready 엔드포인트 탐색.
+    ("cloudflared", "http://cloudflared:2000/ready"),
 ]
 
 # v3 pure async daemon — HTTP 없음, heartbeat 우선 관측 + docker container state fallback.

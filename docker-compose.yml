@@ -271,7 +271,12 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    # `--metrics :2000` 로 Prometheus metrics + /ready 를 호스트 네트워크로 노출.
+    # Phase 2.13-6: 기존에 metrics 플래그가 없어 smoke probe 가 항상 연결 실패했다.
+    # 포트 2000 을 127.0.0.1 바인드로만 노출 (외부 노출은 불필요).
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    ports:
+      - "127.0.0.1:2000:2000"
     restart: unless-stopped
     profiles: ["tunnel", "full"]
 

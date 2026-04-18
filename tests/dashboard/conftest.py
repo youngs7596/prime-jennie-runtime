@@ -112,6 +112,19 @@ _SCHEMA_STATEMENTS = [
         PRIMARY KEY (scout_run_id, rank)
     )
     """,
+    # stock_masters — /scout/candidates 가 ticker → 종목명 LEFT JOIN
+    """
+    CREATE TABLE IF NOT EXISTS stock_masters (
+        stock_code TEXT PRIMARY KEY,
+        stock_name TEXT NOT NULL,
+        market TEXT,
+        market_cap NUMERIC,
+        sector_naver TEXT,
+        sector_group TEXT,
+        is_active BOOLEAN DEFAULT 1,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     # scheduled_jobs
     """
     CREATE TABLE IF NOT EXISTS scheduled_jobs (

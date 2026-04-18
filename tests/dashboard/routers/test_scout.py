@@ -119,9 +119,25 @@ async def _seed_candidates(session_factory) -> None:
         await session.commit()
 
 
+async def _seed_stock_masters(session_factory) -> None:
+    """candidates JOIN 검증용 — 일부는 의도적으로 누락 (stock_name NULL 케이스)."""
+    stmt = text("INSERT INTO stock_masters (stock_code, stock_name) VALUES (:c, :n)")
+    async with session_factory() as session:
+        await session.execute(
+            stmt,
+            [
+                {"c": "005930", "n": "삼성전자"},
+                {"c": "000660", "n": "SK하이닉스"},
+                # 035420 (NAVER) 는 의도적 누락 — stock_name None 확인
+            ],
+        )
+        await session.commit()
+
+
 async def test_candidates_found(app, session_factory):
     await _seed(session_factory)
     await _seed_candidates(session_factory)
+    await _seed_stock_masters(session_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/scout/runs/scout_20260418_0830/candidates")
         assert resp.status_code == 200, resp.text
@@ -131,14 +147,18 @@ async def test_candidates_found(app, session_factory):
         assert [r["rank"] for r in rows] == [0, 1, 2]
         # promoted
         assert rows[0]["ticker"] == "005930"
+        assert rows[0]["stock_name"] == "삼성전자"
         assert rows[0]["promoted_to_sheet_id"] == "sheet_abc123"
         assert rows[0]["rejection_reason"] is None
         assert rows[0]["entry_hint"] == {"trigger": "break_20d_high"}
         assert rows[0]["conviction"] == 0.82
         # rejected
+        assert rows[1]["stock_name"] == "SK하이닉스"
         assert rows[1]["promoted_to_sheet_id"] is None
         assert rows[1]["rejection_reason"] == "macro_closed"
-        # pending (둘 다 NULL)
+        # pending + stock_masters 에 누락 → stock_name None
+        assert rows[2]["ticker"] == "035420"
+        assert rows[2]["stock_name"] is None
         assert rows[2]["promoted_to_sheet_id"] is None
         assert rows[2]["rejection_reason"] is None
 

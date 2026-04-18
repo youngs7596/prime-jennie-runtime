@@ -54,6 +54,7 @@ class ScreeningCandidateRow(BaseModel):
 
     rank: int
     ticker: str
+    stock_name: str | None = None
     strategy_tag: str
     conviction: float | None = None
     promoted_to_sheet_id: str | None = None
@@ -142,9 +143,12 @@ async def list_candidates(
     """
     result = await session.execute(
         text(
-            "SELECT rank, ticker, strategy_tag, conviction, promoted_to_sheet_id, "
-            "rejection_reason, entry_hint_json, exit_hint_json, factors_json, notes "
-            "FROM screening_candidates WHERE scout_run_id = :id ORDER BY rank"
+            "SELECT sc.rank, sc.ticker, sm.stock_name, sc.strategy_tag, sc.conviction, "
+            "sc.promoted_to_sheet_id, sc.rejection_reason, sc.entry_hint_json, "
+            "sc.exit_hint_json, sc.factors_json, sc.notes "
+            "FROM screening_candidates sc "
+            "LEFT JOIN stock_masters sm ON sm.stock_code = sc.ticker "
+            "WHERE sc.scout_run_id = :id ORDER BY sc.rank"
         ),
         {"id": scout_run_id},
     )
@@ -152,6 +156,7 @@ async def list_candidates(
         ScreeningCandidateRow(
             rank=row["rank"],
             ticker=row["ticker"],
+            stock_name=row["stock_name"],
             strategy_tag=row["strategy_tag"],
             conviction=float(row["conviction"]) if row["conviction"] is not None else None,
             promoted_to_sheet_id=row["promoted_to_sheet_id"],

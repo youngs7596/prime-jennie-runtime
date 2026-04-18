@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -31,6 +32,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_S = 300.0  # SCOUT §4.2 #6
 DEFAULT_IMAGE = "screening-executor:latest"
 EXECUTOR_MODULE = "prime_jennie_runtime.screening_executor.executor"
+
+# 호스트 절대경로로 seccomp profile 을 주입하면 docker run 시 --security-opt=seccomp 추가.
+# slow-loop 컨테이너가 docker-in-docker 구조로 호스트 데몬에 명령하므로 파일 경로는
+# **호스트 기준**이어야 한다 (slow-loop 컨테이너 내부 경로 ❌).
+SECCOMP_ENV_KEY = "SCREENING_SECCOMP_PROFILE"
 
 
 @dataclass
@@ -106,7 +112,7 @@ class ScreeningToolAdapter:
 
     def _build_argv(self) -> list[str]:
         if self.backend == "docker":
-            return [
+            argv: list[str] = [
                 "docker",
                 "run",
                 "--rm",
@@ -119,9 +125,13 @@ class ScreeningToolAdapter:
                 "--cap-drop=ALL",
                 "--user=1000:1000",
                 "--tmpfs=/tmp:size=256m",
-                *self.docker_extra_args,
-                self.image,
             ]
+            seccomp_profile = os.environ.get(SECCOMP_ENV_KEY, "").strip()
+            if seccomp_profile:
+                argv.append(f"--security-opt=seccomp={seccomp_profile}")
+            argv.extend(self.docker_extra_args)
+            argv.append(self.image)
+            return argv
         # subprocess: same interpreter, executor module
         return [sys.executable, "-m", EXECUTOR_MODULE]
 

@@ -80,7 +80,8 @@ async def test_subprocess_timeout_kills_child():
 # ---------- argv 구성 ----------
 
 
-def test_docker_argv_includes_isolation_flags():
+def test_docker_argv_includes_isolation_flags(monkeypatch):
+    monkeypatch.delenv("SCREENING_SECCOMP_PROFILE", raising=False)
     adapter = ScreeningToolAdapter(backend="docker", image="screening-executor:test")
     argv = adapter._build_argv()
     assert argv[0] == "docker"
@@ -91,6 +92,26 @@ def test_docker_argv_includes_isolation_flags():
     assert "--cap-drop=ALL" in argv
     assert "--security-opt=no-new-privileges:true" in argv
     assert "screening-executor:test" in argv
+    # env 없을 때는 seccomp 옵션 미포함
+    assert not any(a.startswith("--security-opt=seccomp") for a in argv)
+
+
+def test_docker_argv_includes_seccomp_when_env_set(monkeypatch):
+    """SCREENING_SECCOMP_PROFILE env 가 호스트 절대경로로 주입되면 argv 에 추가."""
+    monkeypatch.setenv("SCREENING_SECCOMP_PROFILE", "/opt/prime-jennie/seccomp.json")
+    adapter = ScreeningToolAdapter(backend="docker", image="screening-executor:test")
+    argv = adapter._build_argv()
+    assert "--security-opt=seccomp=/opt/prime-jennie/seccomp.json" in argv
+    # image 가 argv 끝에 오는 순서 유지
+    assert argv[-1] == "screening-executor:test"
+
+
+def test_docker_argv_ignores_empty_seccomp_env(monkeypatch):
+    """env 가 빈 문자열이면 seccomp 옵션 붙이지 않음 (compose placeholder 와 호환)."""
+    monkeypatch.setenv("SCREENING_SECCOMP_PROFILE", "")
+    adapter = ScreeningToolAdapter(backend="docker", image="screening-executor:test")
+    argv = adapter._build_argv()
+    assert not any(a.startswith("--security-opt=seccomp") for a in argv)
 
 
 def test_subprocess_argv_uses_python_module():

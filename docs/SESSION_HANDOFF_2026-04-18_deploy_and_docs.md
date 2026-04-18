@@ -160,6 +160,45 @@ control-ui 3ca32cd  docs: ARCHITECTURE.md 신규 — 9 페이지 + API 계약 + 
 minyoung-mah 167fb1f docs: CONSUMER_SETUP_FAQ.md — 10 Q 실제 소비자 경험 기반
 ```
 
+## Addendum — UI 공백 재발 (세션 직후 23:xx)
+
+세션 커밋 직후 사용자가 UI 공백을 다시 신고. `curl http://localhost/api/*` 전부 502. **오늘 3번째 UI 공백**이지만 근본 원인은 또 다름.
+
+### 증상
+- control-ui root (`GET /`) 200, `/api/*` 전부 502
+- nginx 로그: `"dashboard could not be resolved (2: Server failure)"` — Docker DNS SERVFAIL
+- (recovery 세션의 "cached old IP" 와는 완전히 다른 에러)
+
+### 진단
+```bash
+docker inspect prime-jennie-runtime-dashboard-1 \
+  --format "{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}"
+# 결과: (빈 문자열)
+```
+
+dashboard 와 kis-gateway 2개가 **`running` 상태인데 어느 네트워크에도 붙어있지 않음**. 다른 3개 (fast-loop/monitor/price-scheduler) 는 정상 `prime-jennie-runtime_default`.
+
+### 근본 원인
+
+세션 초반 배포 실패 (port 8080 v2 legacy 충돌) 로 5 서비스 (dashboard/kis-gateway/monitor/fast-loop/price-scheduler) 가 `Created` 상태로 남음. v2 legacy 정리 후 `docker compose --profile full up -d` 로 수동 start 했는데, **일부 Created 컨테이너는 network alias 설정 없이 start 됨**.
+
+Docker compose 가 start 시 네트워크 attach 를 보장하지 않는 edge case. recreate 없이 start 만 하면 컨테이너명 alias 는 있지만 **서비스명 alias (`dashboard`) 가 누락**. nginx 는 `dashboard:8090` 을 쓰므로 resolve 불가.
+
+### 시도 & 결과
+
+1. `docker network connect prime-jennie-runtime_default <container>` — 컨테이너를 네트워크에 붙임. 하지만 **서비스명 alias 는 안 붙음** (container name 만). 여전히 nginx SERVFAIL
+2. `docker compose up -d --force-recreate dashboard kis-gateway` — compose 가 네트워크 + 서비스 alias 전부 재설정. **즉시 해결**. 4 endpoint `/api/{system/health,macro/regime,scout/runs,portfolio/summary}` 200 복구
+
+### 교훈
+
+- 배포 실패 후 `Created` 상태 컨테이너를 복구할 때 `docker compose up -d` 만 쓰면 불완전 — **`--force-recreate` 필수**
+- 진단 시 `docker inspect ... --format "{{range .NetworkSettings.Networks}}..."` 가 빈 값이면 네트워크 미부착 의심 (state=running 이어도)
+- `docker network connect` 는 긴급 복구용으로 불충분. `--alias <service>` 옵션 필수. 한 번 연결한 이후엔 alias 추가 불가 (disconnect → reconnect 해야)
+- 오늘 UI 공백 3번의 다른 원인들:
+  1. nginx startup DNS 영구 캐시 (recovery 세션) → `resolver + set $upstream + proxy_pass $var` 로 해결
+  2. promtail 폭주로 v3 stream 간접 영향 (logs_and_vllm_fp8) → docker_sd filter
+  3. 배포 실패 후 Created 컨테이너 networkless start (본 세션) → force-recreate
+
 ## 다음 세션 시작 시 체크
 
 ```bash
@@ -183,6 +222,12 @@ ssh prime-jennie 'docker ps -a --format "{{.Names}}" | grep -E "^prime-jennie-" 
 ssh prime-jennie 'docker exec prime-jennie-runtime-job-worker-1 python3 -c "import httpx; r=httpx.get(\"http://promtail:9080/metrics\"); print([l for l in r.text.splitlines() if \"dropped_entries\" in l and \"ingester_error\" in l])"'
 # 기대: 값이 고정 (증가하지 않음)
 
-# 6. 최신 커밋
+# 6. UI API 502 검증 (오늘 3번 재발 — 패턴 고정 체크)
+ssh prime-jennie 'for p in /api/system/health /api/macro/regime /api/scout/runs?limit=5; do echo -n "$p: "; curl -s -o /dev/null -w "%{http_code}\n" "http://localhost$p"; done'
+# 기대: 200 × 3. 502 나오면 네트워크 검증:
+# ssh prime-jennie 'docker inspect prime-jennie-runtime-dashboard-1 --format "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}} {{end}}"'
+# 빈 값 = networkless → `docker compose up -d --force-recreate dashboard kis-gateway`
+
+# 7. 최신 커밋
 cd ~/projects/prime-jennie-runtime && git log --oneline -5
 ```

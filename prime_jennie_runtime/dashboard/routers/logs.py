@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 LOKI_URL = os.getenv("LOKI_URL", "http://loki:3100")
 
-# promtail 설정의 app 라벨 기준 v3 서비스 목록
+# promtail 이 붙이는 `service` 라벨 (compose `com.docker.compose.service`) 기준 v3 서비스 목록.
+# v2 스타일의 `app` 라벨은 compose 에 수동 labels 가 없어 비어 있으므로 사용하지 않는다.
 _SERVICES = [
     "kis-gateway",
     "slow-loop",
@@ -45,7 +46,7 @@ async def get_logs(
     if not end:
         end = int(time.time() * 1e9)
 
-    query = f'{{app="{service}"}}'
+    query = f'{{service="{service}"}}'
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(

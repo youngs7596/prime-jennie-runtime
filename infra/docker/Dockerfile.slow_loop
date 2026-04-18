@@ -8,8 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
 COPY pyproject.toml README.md ./
 COPY prime_jennie_runtime ./prime_jennie_runtime
 
-# slow_loop extras = langchain-openai (vLLM OpenAI-호환 엔드포인트 호출)
+# slow_loop = langchain-openai (vLLM / OpenAI-호환 엔드포인트)
+# screening = pandas 등 — Scout 가 생성한 코드의 subprocess 실행에 필요
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system -e ".[slow_loop]"
+    uv pip install --system -e ".[slow_loop,screening]"
 
 CMD ["python", "-m", "prime_jennie_runtime.slow_loop.app"]

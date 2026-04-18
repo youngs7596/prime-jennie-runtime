@@ -115,7 +115,7 @@ class LivePositionsPoller:
             self._client = httpx.AsyncClient(timeout=5.0)
             self._owned_client = True
         try:
-            resp = await self._client.get(f"{self._gateway_url}/balance")
+            resp = await self._client.get(f"{self._gateway_url}/api/balance")
             resp.raise_for_status()
             payload = resp.json()
         except Exception:

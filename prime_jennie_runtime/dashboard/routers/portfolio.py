@@ -76,10 +76,10 @@ def _kis_gateway_url() -> str:
 
 
 async def _fetch_kis_balance() -> dict[str, Any] | None:
-    """v3 KIS Gateway REST `/balance` 호출. 실패 시 None."""
+    """v3 KIS Gateway REST `/api/balance` 호출. 실패 시 None."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{_kis_gateway_url()}/balance")
+            resp = await client.get(f"{_kis_gateway_url()}/api/balance")
             resp.raise_for_status()
             return resp.json()
     except Exception:

@@ -22,7 +22,7 @@ async def test_tick_once_writes_snapshot():
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     try:
         with respx.mock(assert_all_called=False) as mock:
-            mock.get("http://kis-gateway:8080/balance").mock(
+            mock.get("http://kis-gateway:8080/api/balance").mock(
                 return_value=Response(
                     200,
                     json={
@@ -66,7 +66,9 @@ async def test_tick_once_handles_gateway_failure():
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     try:
         with respx.mock(assert_all_called=False) as mock:
-            mock.get("http://kis-gateway:8080/balance").mock(side_effect=httpx.ConnectError("boom"))
+            mock.get("http://kis-gateway:8080/api/balance").mock(
+                side_effect=httpx.ConnectError("boom")
+            )
             async with httpx.AsyncClient(timeout=5.0) as client:
                 poller = LivePositionsPoller(
                     redis_client=redis,

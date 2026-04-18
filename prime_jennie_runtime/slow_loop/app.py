@@ -164,11 +164,25 @@ def _build_slow_loop_components(
         sector=StubSectorMomentumFeeder(),
         market=StubMarketSummaryFeeder(),
     )
-    macro_builder = MacroContextBuilder(
-        wsj=StubWsjDigestFeeder(),
-        market=StubMarketSnapshotFeeder(),
-        kor=StubKorMacroNewsFeeder(),
-    )
+    # Real feeders (Phase 2.12 B1~B3). DB engine 없을 때는 stub 으로 fallback.
+    if db_engine is not None:
+        from prime_jennie_runtime.slow_loop.macro.feeders.real import (
+            RealKorMacroNewsFeeder,
+            RealMarketSnapshotFeeder,
+            RealWsjDigestFeeder,
+        )
+
+        macro_builder = MacroContextBuilder(
+            wsj=RealWsjDigestFeeder(engine=db_engine, redis_client=redis_client),
+            market=RealMarketSnapshotFeeder(engine=db_engine, redis_client=redis_client),
+            kor=RealKorMacroNewsFeeder(engine=db_engine),
+        )
+    else:
+        macro_builder = MacroContextBuilder(
+            wsj=StubWsjDigestFeeder(),
+            market=StubMarketSnapshotFeeder(),
+            kor=StubKorMacroNewsFeeder(),
+        )
 
     policy = load_policy()
     engine = StrategyEngine(policy=policy, risk_throttle=NoOpRiskThrottle())

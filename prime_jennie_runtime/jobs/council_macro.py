@@ -237,6 +237,26 @@ async def macro_collect_global(
         snapshot["nvda_close"] = nvda_data["close"]
         snapshot["nvda_change_pct"] = nvda_data["change_pct"]
 
+    # Phase 2.13-2 — 아시아 지수 / 환율 / 원자재. Yahoo chart API 공통.
+    # 미장(SOX/NVDA/VIX) 은 기존. 여기 추가 지표는 MarketSnapshotFeeder 가 참조.
+    for yahoo_ticker, key_prefix in (
+        ("^N225", "nikkei"),
+        ("^HSI", "hsi"),
+        ("JPY=X", "usd_jpy"),
+        ("CL=F", "crude_oil"),
+        ("GC=F", "gold"),
+    ):
+        data = await _fetch_us_latest(http, yahoo_ticker, yahoo_ticker)
+        if not data:
+            continue
+        if key_prefix in ("nikkei", "hsi"):
+            snapshot[f"{key_prefix}_close"] = data["close"]
+            snapshot[f"{key_prefix}_change_pct"] = data["change_pct"]
+        else:
+            # usd_jpy/crude_oil/gold 은 schema 상 단일 필드 + _change_pct
+            snapshot[key_prefix] = data["close"]
+            snapshot[f"{key_prefix}_change_pct"] = data["change_pct"]
+
     usd_krw: float | None = None
     if bok_ecos_api_key:
         usd_krw = await _fetch_usd_krw(http, bok_ecos_api_key)
@@ -288,9 +308,7 @@ async def macro_quick(
     v2 스케줄과 동일하게 장중 5분 간격 (`*/5 9-15 * * 1-5`) 으로 돌아야 한다.
     """
     logger.info("macro_quick: collecting snapshot (throttle layer TODO)")
-    return await macro_collect_global(
-        redis_client, http, bok_ecos_api_key=bok_ecos_api_key
-    )
+    return await macro_collect_global(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
 
 
 async def macro_collect_korea(
@@ -304,9 +322,7 @@ async def macro_collect_korea(
     v2 는 global 에 위임했다. v3 도 동일한 구현을 재사용 — 별도 크롤링 없음.
     """
     logger.info("macro_collect_korea: delegating to macro_collect_global")
-    return await macro_collect_global(
-        redis_client, http, bok_ecos_api_key=bok_ecos_api_key
-    )
+    return await macro_collect_global(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
 
 
 __all__ = [

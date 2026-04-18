@@ -161,20 +161,28 @@ class RealMarketSnapshotFeeder:
             change_pct=_as_float(snap.get("kosdaq_change_pct")) / 100.0,
         )
 
-        # 해외 (us_market_daily — SP500/NASDAQ 는 있음; Nikkei/HSI 는 현재 수집 안 됨)
+        # 해외 (SP500/NASDAQ 는 us_market_daily, Nikkei/HSI 는 Redis snapshot — Phase 2.13-2)
         sp500 = await _fetch_us_index(self._engine, "SP500")
         nasdaq = await _fetch_us_index(self._engine, "NASDAQ")
-        # 수집 안 된 지수는 0 으로 — Macro prompt 의 closed 조건은 한국 기준이라 치명적 영향 없음
-        nikkei = DEFAULT_INDEX_POINT.model_copy()
-        hsi = DEFAULT_INDEX_POINT.model_copy()
+        nikkei = IndexPoint(
+            close=_as_float(snap.get("nikkei_close")),
+            change_pct=_as_float(snap.get("nikkei_change_pct")) / 100.0,
+        )
+        hsi = IndexPoint(
+            close=_as_float(snap.get("hsi_close")),
+            change_pct=_as_float(snap.get("hsi_change_pct")) / 100.0,
+        )
 
-        # 환율 (USD/KRW 은 Redis 에 있지만 종종 None — default fallback)
+        # 환율 — USD/KRW 은 BOK ECOS, USD/JPY 는 Yahoo (Phase 2.13-2)
+        # schema 는 usd_jpy_change_pct 를 갖고 있지 않음 — 단일 값만.
         usd_krw = _as_float(snap.get("usd_krw"), 1350.0)
         usd_jpy = _as_float(snap.get("usd_jpy"), 150.0)
 
-        # 원자재 (미수집 — neutral placeholder)
-        crude = 80.0
-        gold = 2300.0
+        # 원자재 — crude/gold Yahoo CL=F/GC=F (Phase 2.13-2)
+        crude = _as_float(snap.get("crude_oil"), 80.0)
+        crude_change_pct = _as_float(snap.get("crude_oil_change_pct")) / 100.0
+        gold = _as_float(snap.get("gold"), 2300.0)
+        gold_change_pct = _as_float(snap.get("gold_change_pct")) / 100.0
 
         # VIX
         vix = _as_float(snap.get("vix"), 20.0)
@@ -194,12 +202,12 @@ class RealMarketSnapshotFeeder:
             nikkei=nikkei,
             hsi=hsi,
             usd_krw=usd_krw,
-            usd_krw_change_pct=0.0,  # 전일 대비 계산은 후속
+            usd_krw_change_pct=0.0,  # 전일 대비 계산은 후속 (BOK 단일 값만 저장)
             usd_jpy=usd_jpy,
             crude_oil=crude,
-            crude_oil_change_pct=0.0,
+            crude_oil_change_pct=crude_change_pct,
             gold=gold,
-            gold_change_pct=0.0,
+            gold_change_pct=gold_change_pct,
             vix=vix,
             vix_prev=None,
             vkospi=None,

@@ -214,3 +214,74 @@ async def test_all_sheets_have_fixed_sl_and_time_stop():
 def test_active_checker_is_protocol():
     """ActiveSheetChecker는 Protocol — duck typing."""
     assert isinstance(_StubChecker(), ActiveSheetChecker)
+
+
+# =====================================================================
+# macro_run_id provenance (migration 012)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_provenance_exposes_macro_run_id_at_top_level():
+    """provenance.macro_run_id == macro_state_snapshot.gate_run_id — SQL 조인 단순화."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet = await engine.build_sheet(_candidate(), _inputs())
+    assert sheet is not None
+    assert sheet.provenance.macro_run_id == "macro_20260416_0800"
+    assert sheet.provenance.macro_state_snapshot.gate_run_id == "macro_20260416_0800"
+
+
+# =====================================================================
+# build_sheet_with_reason — 거부 사유 코드화 (migration 012)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_success_returns_none_reason():
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
+    assert sheet is not None
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_macro_closed():
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet, reason = await engine.build_sheet_with_reason(
+        _candidate(), _inputs(gate="closed", size_mult=0.0)
+    )
+    assert sheet is None
+    assert reason == "macro_closed"
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_deprecated_tag():
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(tag="RSI_REBOUND"), _inputs())
+    assert sheet is None
+    assert reason == "deprecated_tag"
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_unknown_tag():
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(tag="CUSTOM_TAG"), _inputs())
+    assert sheet is None
+    assert reason == "unknown_tag"
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_size_below_min():
+    engine = StrategyEngine(load_policy(), FixedRiskThrottle(0.25))
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs(size_mult=0.25))
+    assert sheet is None
+    assert reason == "size_below_min"
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_duplicate_today():
+    checker = _StubChecker(active=True)
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), active_checker=checker)
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
+    assert sheet is None
+    assert reason == "duplicate_today"

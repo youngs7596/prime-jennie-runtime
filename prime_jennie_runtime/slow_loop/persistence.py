@@ -24,7 +24,7 @@ from prime_jennie_runtime.council_logging import (
     save_council_run,
 )
 from prime_jennie_runtime.slow_loop.macro.post_processor import MacroPostResult
-from prime_jennie_runtime.slow_loop.scout.schemas import ScoutOutput
+from prime_jennie_runtime.slow_loop.scout.schemas import ScoutOutput, ScreeningCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -206,8 +206,15 @@ async def persist_scout_run(
     scout_step_result: Any,
     candidates_count: int | None = None,
     prompt_chars: int | None = None,
+    context_snapshot: dict[str, Any] | None = None,
 ) -> None:
-    """Scout 결과 1건을 scout_runs 에 upsert."""
+    """Scout 결과 1건을 scout_runs 에 upsert.
+
+    context_snapshot 은 Scout 코드 실행 입력(news_scores, sector_momentum,
+    macro_size_multiplier, universe_hash 등)의 생성 시점 스냅샷이다. 백테스트
+    재현 시 같은 코드 × 같은 입력을 복원하는 primary key — migration 012 의
+    scout_runs.context_snapshot_json 컬럼.
+    """
     if engine is None:
         return
     meta = _role_metadata(scout_step_result)
@@ -228,10 +235,12 @@ async def persist_scout_run(
         """
         INSERT INTO scout_runs (
             scout_run_id, generated_at, code_hash, code_text, hypothesis,
-            candidates_count, model_used, prompt_version, cost_usd, metadata_json
+            candidates_count, model_used, prompt_version, cost_usd, metadata_json,
+            context_snapshot_json
         ) VALUES (
             :id, :at, :hash, :code, :hyp,
-            :cnt, :model, :pv, :cost, CAST(:meta AS JSONB)
+            :cnt, :model, :pv, :cost, CAST(:meta AS JSONB),
+            CAST(:ctx AS JSONB)
         )
         ON CONFLICT (scout_run_id) DO UPDATE SET
             generated_at = EXCLUDED.generated_at,
@@ -242,7 +251,8 @@ async def persist_scout_run(
             model_used = EXCLUDED.model_used,
             prompt_version = EXCLUDED.prompt_version,
             cost_usd = EXCLUDED.cost_usd,
-            metadata_json = EXCLUDED.metadata_json
+            metadata_json = EXCLUDED.metadata_json,
+            context_snapshot_json = EXCLUDED.context_snapshot_json
         """
     )
     params = {
@@ -256,9 +266,111 @@ async def persist_scout_run(
         "pv": meta.get("prompt_version") or "v1",
         "cost": cost,
         "meta": json.dumps(metadata_json, ensure_ascii=False, default=str),
+        "ctx": json.dumps(context_snapshot or {}, ensure_ascii=False, default=str),
     }
     try:
         async with engine.begin() as conn:
             await conn.execute(sql, params)
     except Exception:
         logger.exception("persist_scout_run failed: id=%s", scout_run_id)
+
+
+async def persist_screening_candidates(
+    engine: AsyncEngine | None,
+    *,
+    scout_run_id: str,
+    candidates: list[ScreeningCandidate],
+) -> None:
+    """Scout 코드가 반환한 raw 후보 전수를 screening_candidates 에 일괄 INSERT.
+
+    promoted_to_sheet_id / rejection_reason 은 이후 Strategy Engine 결정 시점에
+    update_candidate_promotion 이 채운다 — 여기선 NULL. rank 는 반환 순서
+    (0-indexed). 동일 scout_run_id 로 재실행되면 기존 row 는 DELETE 후 재삽입.
+    """
+    if engine is None:
+        return
+    if not candidates:
+        return
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("DELETE FROM screening_candidates WHERE scout_run_id = :id"),
+                {"id": scout_run_id},
+            )
+            for rank, cand in enumerate(candidates):
+                await conn.execute(
+                    text(
+                        """
+                        INSERT INTO screening_candidates (
+                            scout_run_id, rank, ticker, strategy_tag, conviction,
+                            entry_hint_json, exit_hint_json, factors_json, notes
+                        ) VALUES (
+                            :sid, :rank, :ticker, :tag, :conv,
+                            CAST(:entry AS JSONB),
+                            CAST(:exit AS JSONB),
+                            CAST(:factors AS JSONB),
+                            :notes
+                        )
+                        """
+                    ),
+                    {
+                        "sid": scout_run_id,
+                        "rank": rank,
+                        "ticker": cand.ticker,
+                        "tag": cand.strategy_tag,
+                        "conv": float(cand.conviction),
+                        "entry": json.dumps(
+                            cand.entry_hint.model_dump(), ensure_ascii=False, default=str
+                        ),
+                        "exit": (
+                            json.dumps(cand.exit_hint.model_dump(), ensure_ascii=False, default=str)
+                            if cand.exit_hint is not None
+                            else None
+                        ),
+                        "factors": json.dumps(cand.factors, ensure_ascii=False, default=str),
+                        "notes": cand.notes or "",
+                    },
+                )
+    except Exception:
+        logger.exception("persist_screening_candidates failed: id=%s", scout_run_id)
+
+
+async def update_candidate_promotion(
+    engine: AsyncEngine | None,
+    *,
+    scout_run_id: str,
+    ticker: str,
+    sheet_id: str | None = None,
+    rejection_reason: str | None = None,
+) -> None:
+    """Strategy Engine 결정 반영. sheet_id 또는 rejection_reason 둘 중 하나.
+
+    같은 scout_run 내에서 동일 ticker 가 여러 rank 로 등장하는 경우 전부 업데이트
+    한다 (거의 없지만 LLM 출력이 우회적으로 중복할 수 있음).
+    """
+    if engine is None:
+        return
+    if sheet_id is None and rejection_reason is None:
+        return
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    UPDATE screening_candidates
+                    SET promoted_to_sheet_id = :sid,
+                        rejection_reason = :reason
+                    WHERE scout_run_id = :run AND ticker = :ticker
+                    """
+                ),
+                {
+                    "run": scout_run_id,
+                    "ticker": ticker,
+                    "sid": sheet_id,
+                    "reason": rejection_reason,
+                },
+            )
+    except Exception:
+        logger.exception(
+            "update_candidate_promotion failed: run=%s ticker=%s", scout_run_id, ticker
+        )

@@ -36,7 +36,12 @@ from .macro.context_builder import MacroContextBuilder
 from .macro.post_processor import MacroPostResult, run_post_processing
 from .macro.schemas import MacroGateOutput, RecentMacroRun
 from .macro.state_store import MacroCurrentState, MacroStateStore
-from .persistence import persist_macro_run, persist_scout_run
+from .persistence import (
+    persist_macro_run,
+    persist_scout_run,
+    persist_screening_candidates,
+    update_candidate_promotion,
+)
 from .scout.code_hasher import compute_code_hash
 from .scout.context_builder import ScoutContextBuilder
 from .scout.schemas import (
@@ -375,6 +380,25 @@ async def run_slow_loop(
     from .scout.prompts import build_user_prompt as _build_scout_user
 
     scout_prompt_chars = len(SCOUT_SYSTEM_PROMPT) + len(_build_scout_user(scout_ctx))
+
+    # context snapshot — 백테스트 재현용. Scout 코드 입력을 그대로 pickle-friendly
+    # 형태로 scout_runs.context_snapshot_json 에 저장. universe 는 해시와 size 만
+    # 남기고 full list 는 universe_hash 가 일치하는 외부 테이블(stock_masters 등)
+    # 에서 복원 — full list 는 크고 변동 주기가 길어 매 run 중복 저장할 가치 낮음.
+    import hashlib as _hashlib
+
+    _universe_raw = ",".join(sorted(scout_ctx.universe))
+    scout_context_snapshot = {
+        "as_of": as_of_date.isoformat(),
+        "trigger_reason": scout_trigger,
+        "universe_size": len(scout_ctx.universe),
+        "universe_hash": _hashlib.sha256(_universe_raw.encode("utf-8")).hexdigest(),
+        "news_scores": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_scores.items()},
+        "sector_momentum": dict(scout_ctx.sector_momentum),
+        "macro_size_multiplier": float(post.output.size_multiplier),
+        "macro_gate": post.output.gate,
+        "macro_run_id": macro_run_id,
+    }
     await persist_scout_run(
         comp.db_engine,
         scout_run_id=scout_run_id,
@@ -382,6 +406,7 @@ async def run_slow_loop(
         scout_out=scout_out,
         scout_step_result=scout_result.state["scout"],
         prompt_chars=scout_prompt_chars,
+        context_snapshot=scout_context_snapshot,
     )
 
     await observer.emit(
@@ -408,8 +433,27 @@ async def run_slow_loop(
         scout_out.screening_code, screening_context
     )
 
+    # raw 후보 전수를 screening_candidates 에 기록 (백테스트 재현용).
+    # 이후 validation / engine 결정에 따라 promoted_to_sheet_id 또는
+    # rejection_reason 이 채워진다.
+    await persist_screening_candidates(
+        comp.db_engine,
+        scout_run_id=scout_run_id,
+        candidates=raw_candidates,
+    )
+
     # --- 4. 검증 ---
     validation = validate_candidates(raw_candidates, scout_ctx.universe)
+
+    # validation 에서 탈락 (universe 밖 = hallucination) 한 ticker 기록
+    if validation.hallucinated_tickers:
+        for _t in validation.hallucinated_tickers:
+            await update_candidate_promotion(
+                comp.db_engine,
+                scout_run_id=scout_run_id,
+                ticker=_t,
+                rejection_reason="validator_hallucination",
+            )
 
     if validation.hallucination_fail:
         await observer.emit(
@@ -472,10 +516,16 @@ async def run_slow_loop(
     rejected: list[str] = []
     for cand in validation.candidates:
         try:
-            sheet = await comp.engine.build_sheet(cand, inputs)
+            sheet, reject_reason = await comp.engine.build_sheet_with_reason(cand, inputs)
         except Exception:
             logger.exception("engine.build_sheet raised for %s", cand.ticker)
             rejected.append(cand.ticker)
+            await update_candidate_promotion(
+                comp.db_engine,
+                scout_run_id=scout_run_id,
+                ticker=cand.ticker,
+                rejection_reason="engine_error",
+            )
             await observer.emit(
                 pj_event(
                     "pj.strategy.sheet_error",
@@ -488,6 +538,12 @@ async def run_slow_loop(
 
         if sheet is None:
             rejected.append(cand.ticker)
+            await update_candidate_promotion(
+                comp.db_engine,
+                scout_run_id=scout_run_id,
+                ticker=cand.ticker,
+                rejection_reason=reject_reason or "engine_rejected",
+            )
             await observer.emit(
                 pj_event(
                     "pj.strategy.sheet_rejected",
@@ -503,9 +559,21 @@ async def run_slow_loop(
         except Exception:
             logger.exception("publisher.publish failed for %s", sheet.sheet_id)
             rejected.append(cand.ticker)
+            await update_candidate_promotion(
+                comp.db_engine,
+                scout_run_id=scout_run_id,
+                ticker=cand.ticker,
+                rejection_reason="publisher_error",
+            )
             continue
 
         published.append(sheet.sheet_id)
+        await update_candidate_promotion(
+            comp.db_engine,
+            scout_run_id=scout_run_id,
+            ticker=cand.ticker,
+            sheet_id=sheet.sheet_id,
+        )
         await observer.emit(
             pj_event(
                 "pj.strategy.sheet_published",

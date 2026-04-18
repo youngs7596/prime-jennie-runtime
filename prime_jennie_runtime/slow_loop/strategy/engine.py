@@ -117,20 +117,35 @@ class StrategyEngine:
     ) -> PositionSheet | None:
         """단일 candidate에서 시트를 조립. 거부 사유가 있으면 None.
 
-        거부 사유는 logger.info로 남긴다 (테스트가 검증).
+        거부 사유는 logger.info로 남긴다 (테스트가 검증). 구조화된 사유가
+        필요하면 build_sheet_with_reason 사용.
+        """
+        sheet, _ = await self.build_sheet_with_reason(candidate, inputs)
+        return sheet
+
+    async def build_sheet_with_reason(
+        self,
+        candidate: ScreeningCandidate,
+        inputs: StrategyEngineInputs,
+    ) -> tuple[PositionSheet | None, str | None]:
+        """build_sheet 의 상세 버전 — (sheet, rejection_reason) 반환.
+
+        rejection_reason 은 screening_candidates.rejection_reason 컬럼에 직접
+        저장되는 코드: deprecated_tag | unknown_tag | no_policy | macro_closed |
+        duplicate_today | size_below_min. 시트가 성공적으로 생성되면 None.
         """
         tag = candidate.strategy_tag
 
         # 1. strategy_tag 유효성
         if tag in DEPRECATED_STRATEGY_TAGS:
             logger.info("sheet_rejected: deprecated tag ticker=%s tag=%s", candidate.ticker, tag)
-            return None
+            return None, "deprecated_tag"
         if tag not in ALLOWED_STRATEGY_TAGS:
             logger.info("sheet_rejected: unknown tag ticker=%s tag=%s", candidate.ticker, tag)
-            return None
+            return None, "unknown_tag"
         if not self._policy.has(tag):
             logger.info("sheet_rejected: no policy ticker=%s tag=%s", candidate.ticker, tag)
-            return None
+            return None, "no_policy"
 
         # 2. Macro gate == "closed"면 발행 안 함
         if inputs.macro_state.gate == "closed":
@@ -139,7 +154,7 @@ class StrategyEngine:
                 candidate.ticker,
                 inputs.macro_state.gate,
             )
-            return None
+            return None, "macro_closed"
 
         # 3. 중복 체크 (같은 날 같은 ticker 이미 활성)
         if await self._active_checker.has_active_sheet_today(candidate.ticker, inputs.generated_at):
@@ -148,7 +163,7 @@ class StrategyEngine:
                 candidate.ticker,
                 inputs.generated_at.date(),
             )
-            return None
+            return None, "duplicate_today"
 
         # 4. size 계산
         entry = self._policy.get(tag)
@@ -162,7 +177,7 @@ class StrategyEngine:
                 candidate.ticker,
                 final_pct,
             )
-            return None
+            return None, "size_below_min"
 
         size = SizeSection(
             base_pct=entry.base_pct,
@@ -195,6 +210,7 @@ class StrategyEngine:
             scout_code_hash=inputs.scout_code_hash,
             scout_hypothesis=inputs.scout_hypothesis,
             macro_state_snapshot=inputs.macro_state,
+            macro_run_id=inputs.macro_state.gate_run_id,
             news_score_at_generation=inputs.news_score,
             strategy_policy_version=self._policy.version,
             generated_by=self._generated_by,
@@ -222,7 +238,7 @@ class StrategyEngine:
             final_pct,
             sheet_id,
         )
-        return sheet
+        return sheet, None
 
 
 # =====================================================================

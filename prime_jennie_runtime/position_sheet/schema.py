@@ -190,6 +190,10 @@ class ProvenanceSection(BaseModel):
     scout_code_hash: str
     scout_hypothesis: str
     macro_state_snapshot: MacroStateSnapshot
+    # macro_state_snapshot.gate_run_id 와 동일 값이지만 top-level 에 박아 두면
+    # position_sheets × macro_runs JOIN 이 `provenance_json->>'macro_run_id'`
+    # 단일 인덱스로 끝남. 기존 row 와의 호환을 위해 optional.
+    macro_run_id: str | None = None
     news_score_at_generation: float | None = None
     strategy_policy_version: str
     generated_by: str

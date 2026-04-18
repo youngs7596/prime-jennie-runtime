@@ -17,6 +17,7 @@ StaticPipeline이 LLM 두 번만 호출한다 (Scout, Macro). 나머지는 파�
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
@@ -422,12 +423,24 @@ async def run_slow_loop(
     # --- 3. Screening 실행 (Track D stub) ---
     # JSON 직렬화 가능해야 subprocess/docker backend이 stdin으로 넘길 수 있다.
     # (Stub은 무시하므로 어느 모드든 무해)
+    market_data_records: list[dict] = []
+    if comp.db_engine is not None and scout_ctx.universe:
+        from .scout.market_data_loader import load_market_data_records
+
+        market_data_records = await load_market_data_records(
+            comp.db_engine,
+            universe=scout_ctx.universe,
+            as_of=as_of_date,
+            lookback_days=int(os.environ.get("SCOUT_MARKET_DATA_LOOKBACK_DAYS", "60")),
+        )
+
     screening_context = {
         "as_of": as_of_date.isoformat(),
         "universe": scout_ctx.universe,
         "news_scores": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_scores.items()},
         "sector_momentum": scout_ctx.sector_momentum,
         "macro_size_multiplier": post.output.size_multiplier,
+        "market_data_records": market_data_records,
     }
     raw_candidates: list[ScreeningCandidate] = await comp.screening.invoke(
         scout_out.screening_code, screening_context

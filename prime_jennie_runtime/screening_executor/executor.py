@@ -155,8 +155,28 @@ def _ms(start: float) -> int:
 # ---------------------------------------------------------------------
 # 컨테이너 내부 진입점: stdin payload → stdout result (json)
 #   payload = {"code": str, "context": dict, "market_data": <pickled?>}
-#   Phase 1: market_data는 None 또는 dict (간단 직렬화 가능한 형태) 만 지원.
+#   Phase 2.12 Track D: context.market_data_records (list[dict]) 가 있으면
+#   pandas.DataFrame 으로 복원해서 screen() 첫 인자로 넘긴다 — MultiIndex
+#   (ticker, date) 로 set_index 하여 Scout 코드가 xs/groupby 를 쓸 수 있게.
+#   pandas 미설치 환경 (extras=[screening] 안 깐 dev) 에서는 raw records 를
+#   그대로 market_data 에 넣어 screen() 내부에서 dict 기반으로 처리하게 한다.
 # ---------------------------------------------------------------------
+
+
+def _restore_market_data(records: list[dict[str, Any]] | None) -> Any | None:
+    """records → pandas.DataFrame (pandas 있으면) / 원본 records (없으면)."""
+    if not records:
+        return None
+    try:
+        import pandas as pd
+    except ImportError:
+        return records
+    df = pd.DataFrame.from_records(records)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+    if {"ticker", "date"}.issubset(df.columns):
+        df = df.set_index(["ticker", "date"]).sort_index()
+    return df
 
 
 def _stdio_main() -> int:
@@ -170,6 +190,12 @@ def _stdio_main() -> int:
     code = payload.get("code", "")
     context = payload.get("context", {}) or {}
     market_data = payload.get("market_data")  # 호출자 책임
+
+    # context.market_data_records → DataFrame 복원 (host 가 DB records 로 직렬화).
+    # explicit market_data 인자가 우선권을 갖는다.
+    records = context.pop("market_data_records", None)
+    if market_data is None:
+        market_data = _restore_market_data(records)
 
     executor = ScreeningExecutor()
     result = executor.run(code, context, market_data=market_data)

@@ -47,6 +47,7 @@ from prime_jennie_runtime.infra.config import AppConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 from prime_jennie_runtime.position_sheet.schema import KST
+from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
 
 from .macro.context_builder import MacroContextBuilder
 from .macro.feeders.stub import (
@@ -65,7 +66,6 @@ from .scout.feeders.stub import (
     StubUniverseFeeder,
 )
 from .scout.role import ScoutRole
-from .scout.screening_stub import ScreeningToolAdapterStub
 from .strategy.engine import StrategyEngine
 from .strategy.policy import load_policy
 from .strategy.publisher import PositionSheetPublisher
@@ -251,7 +251,10 @@ def _build_slow_loop_components(
         orchestrator=orchestrator,
         scout_builder=scout_builder,
         macro_builder=macro_builder,
-        screening=ScreeningToolAdapterStub(),
+        screening=ScreeningToolAdapter(
+            backend=os.environ.get("SCREENING_BACKEND", "subprocess"),
+            timeout_s=float(os.environ.get("SCREENING_TIMEOUT_S", "300")),
+        ),
         engine=engine,
         publisher=publisher,
         state_store=state_store,

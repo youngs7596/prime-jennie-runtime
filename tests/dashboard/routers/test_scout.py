@@ -60,3 +60,101 @@ async def test_run_not_found(app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/scout/runs/scout_nonexistent")
         assert resp.status_code == 404
+
+
+async def _seed_candidates(session_factory) -> None:
+    """3건: promoted / rejected / pending 커버."""
+    stmt = text(
+        "INSERT INTO screening_candidates "
+        "(scout_run_id, rank, ticker, strategy_tag, conviction, "
+        "entry_hint_json, exit_hint_json, factors_json, notes, "
+        "promoted_to_sheet_id, rejection_reason) VALUES "
+        "(:run, :rank, :ticker, :tag, :conv, :eh, :xh, :fx, :notes, :sid, :rej)"
+    )
+    async with session_factory() as session:
+        await session.execute(
+            stmt,
+            [
+                {
+                    "run": "scout_20260418_0830",
+                    "rank": 0,
+                    "ticker": "005930",
+                    "tag": "momentum_breakout",
+                    "conv": 0.82,
+                    "eh": '{"trigger":"break_20d_high"}',
+                    "xh": '{"stop":"-5%"}',
+                    "fx": '{"rs_rank":92}',
+                    "notes": "top pick",
+                    "sid": "sheet_abc123",
+                    "rej": None,
+                },
+                {
+                    "run": "scout_20260418_0830",
+                    "rank": 1,
+                    "ticker": "000660",
+                    "tag": "mean_reversion",
+                    "conv": 0.55,
+                    "eh": None,
+                    "xh": None,
+                    "fx": '{"zscore":-2.1}',
+                    "notes": None,
+                    "sid": None,
+                    "rej": "macro_closed",
+                },
+                {
+                    "run": "scout_20260418_0830",
+                    "rank": 2,
+                    "ticker": "035420",
+                    "tag": "earnings_drift",
+                    "conv": 0.71,
+                    "eh": None,
+                    "xh": None,
+                    "fx": "{}",
+                    "notes": None,
+                    "sid": None,
+                    "rej": None,
+                },
+            ],
+        )
+        await session.commit()
+
+
+async def test_candidates_found(app, session_factory):
+    await _seed(session_factory)
+    await _seed_candidates(session_factory)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/scout/runs/scout_20260418_0830/candidates")
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        assert len(rows) == 3
+        # rank 순
+        assert [r["rank"] for r in rows] == [0, 1, 2]
+        # promoted
+        assert rows[0]["ticker"] == "005930"
+        assert rows[0]["promoted_to_sheet_id"] == "sheet_abc123"
+        assert rows[0]["rejection_reason"] is None
+        assert rows[0]["entry_hint"] == {"trigger": "break_20d_high"}
+        assert rows[0]["conviction"] == 0.82
+        # rejected
+        assert rows[1]["promoted_to_sheet_id"] is None
+        assert rows[1]["rejection_reason"] == "macro_closed"
+        # pending (둘 다 NULL)
+        assert rows[2]["promoted_to_sheet_id"] is None
+        assert rows[2]["rejection_reason"] is None
+
+
+async def test_candidates_empty_for_existing_run(app, session_factory):
+    """run 은 있지만 후보 0건 — 200 + [] 반환 (404 아님)."""
+    await _seed(session_factory)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/scout/runs/scout_20260418_0830/candidates")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+async def test_candidates_unknown_run(app):
+    """없는 run 도 200 + [] — 엔드포인트는 screening_candidates 만 본다."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/scout/runs/scout_nonexistent/candidates")
+        assert resp.status_code == 200
+        assert resp.json() == []

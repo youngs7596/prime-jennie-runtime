@@ -94,6 +94,24 @@ _SCHEMA_STATEMENTS = [
         metadata_json TEXT DEFAULT '{}'
     )
     """,
+    # screening_candidates (migration 012) — raw 후보 전수
+    """
+    CREATE TABLE IF NOT EXISTS screening_candidates (
+        scout_run_id TEXT NOT NULL,
+        rank INT NOT NULL,
+        ticker TEXT NOT NULL,
+        strategy_tag TEXT NOT NULL,
+        conviction NUMERIC,
+        entry_hint_json TEXT,
+        exit_hint_json TEXT,
+        factors_json TEXT,
+        notes TEXT,
+        promoted_to_sheet_id TEXT,
+        rejection_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (scout_run_id, rank)
+    )
+    """,
     # scheduled_jobs
     """
     CREATE TABLE IF NOT EXISTS scheduled_jobs (

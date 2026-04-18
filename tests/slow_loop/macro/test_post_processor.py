@@ -182,6 +182,32 @@ async def test_smooth_no_abrupt_event():
 
 
 # =====================================================================
+# bypass: MACRO_AUTO_OVERRIDE_DISABLED=1 → triggers 무시, 원본 gate 유지
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_auto_override_bypass_env_keeps_open(monkeypatch):
+    monkeypatch.setenv("MACRO_AUTO_OVERRIDE_DISABLED", "1")
+    obs = CollectingObserver()
+    snap = _normal_snapshot().model_copy(update={"usd_krw_change_pct": 0.035})
+    assert "fx_shock" in check_closed_conditions(snap)
+
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(raw, snap, [], obs)
+
+    assert result.auto_override_applied is False
+    assert result.output.gate == "open"
+    assert result.output.size_multiplier == 0.75
+    assert result.closed_triggers == ()
+    assert _find_events(obs, "pj.macro.auto_override") == []
+    assert _find_events(obs, "pj.macro.gate_closed") == []
+    bypassed = _find_events(obs, "pj.macro.auto_override_bypassed")
+    assert bypassed
+    assert "fx_shock" in bypassed[0].metadata["triggers"]
+
+
+# =====================================================================
 # 결합: sector_contagion + auto_override
 # =====================================================================
 

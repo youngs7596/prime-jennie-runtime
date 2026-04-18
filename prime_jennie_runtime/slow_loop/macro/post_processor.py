@@ -13,6 +13,7 @@ MACRO_GATE_SPEC §5. 순서:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from minyoung_mah import Observer
@@ -47,6 +48,17 @@ async def run_post_processing(
     auto_override_applied = False
 
     current = raw
+
+    if triggers and os.environ.get("MACRO_AUTO_OVERRIDE_DISABLED") == "1":
+        await observer.emit(
+            pj_event(
+                "pj.macro.auto_override_bypassed",
+                role="macro_gate",
+                ok=True,
+                triggers=list(triggers),
+            )
+        )
+        triggers = ()
 
     # 1. auto-override
     if triggers and current.gate == "open":

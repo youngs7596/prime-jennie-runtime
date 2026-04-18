@@ -81,6 +81,119 @@ class TestStaticAstViolations:
         assert v2 == ["call:compile"]
 
 
+class TestAttributeBypass:
+    """M13~M17: getattr / dunder / pickle / globals 우회 차단.
+
+    LLM 환각으로 생성될 수 있는 전형적 sandbox-escape 패턴을 AST 레벨에서 블록.
+    """
+
+    def test_m13_getattr_builtins_import(self):
+        """M13: `getattr(__builtins__, '__import__', None)` 체인.
+
+        `'__import__'` 는 str literal 이라 ast.Attribute 로 잡히지는 않지만,
+        `getattr` name + `__builtins__` name 둘이 이미 차단되어 체인 자체가 reject.
+        """
+        code = (
+            "def screen(market_data, context):\n"
+            "    _imp = getattr(__builtins__, '__import__', None)\n"
+            "    return []\n"
+        )
+        v = check_imports(code)
+        assert "call:getattr" in v
+        assert "call:__builtins__" in v
+
+    def test_m14_pandas_read_pickle(self):
+        """M14: `pd.read_pickle(...)` — pickle 경로 차단."""
+        code = (
+            "import pandas as pd\n"
+            "def screen(market_data, context):\n"
+            "    return pd.read_pickle('/tmp/payload.pkl').to_dict('records')\n"
+        )
+        v = check_imports(code)
+        assert "call:read_pickle" in v
+
+    def test_m15_numpy_load_allow_pickle(self):
+        """M15: `np.load(..., allow_pickle=True)` — pickle kwarg 차단."""
+        code = (
+            "import numpy as np\n"
+            "def screen(market_data, context):\n"
+            "    arr = np.load('/tmp/x.npy', allow_pickle=True)\n"
+            "    return []\n"
+        )
+        v = check_imports(code)
+        assert "call:load(allow_pickle=True)" in v
+
+    def test_m15_numpy_load_without_allow_pickle_ok(self):
+        """M15 네거티브: allow_pickle 생략/False면 통과."""
+        code_default = (
+            "import numpy as np\n"
+            "def screen(market_data, context):\n"
+            "    arr = np.load('/tmp/x.npy')\n"
+            "    return []\n"
+        )
+        code_false = (
+            "import numpy as np\n"
+            "def screen(market_data, context):\n"
+            "    arr = np.load('/tmp/x.npy', allow_pickle=False)\n"
+            "    return []\n"
+        )
+        assert check_imports(code_default) == []
+        assert check_imports(code_false) == []
+
+    def test_m16_globals_access(self):
+        """M16: `globals()` 참조 차단."""
+        code = "def screen(market_data, context):\n    g = globals()\n    return []\n"
+        v = check_imports(code)
+        assert "call:globals" in v
+
+    def test_dunder_class_mro(self):
+        """`object.__class__.__mro__` 체인 — introspection escape."""
+        code = "def screen(market_data, context):\n    return list(object.__class__.__mro__)\n"
+        v = check_imports(code)
+        assert "attr:__class__" in v
+        assert "attr:__mro__" in v
+
+    def test_dunder_subclasses_escape(self):
+        """`type.__subclasses__()` 클래식 escape."""
+        code = (
+            "def screen(market_data, context):\n"
+            "    for cls in type.__subclasses__(object):\n"
+            "        pass\n"
+            "    return []\n"
+        )
+        v = check_imports(code)
+        assert "attr:__subclasses__" in v
+
+    def test_dict_globals_chain(self):
+        """func.__globals__ 접근."""
+        code = "def screen(market_data, context):\n    return screen.__globals__\n"
+        v = check_imports(code)
+        assert "attr:__globals__" in v
+
+    def test_user_defined_getattr_allowed(self):
+        """`def getattr(x): ...` user 정의는 Store 컨텍스트라 통과.
+
+        (FORBIDDEN_NAMES 검사는 Load 컨텍스트 한정)
+        """
+        code = (
+            "def screen(market_data, context):\n"
+            "    def getattr_safe(x):\n"
+            "        return x\n"
+            "    return []\n"
+        )
+        # getattr_safe 이름 자체는 다른 식별자. FORBIDDEN_NAMES 검사는 id 정확 매치.
+        assert check_imports(code) == []
+
+    def test_setattr_blocked(self):
+        code = (
+            "def screen(market_data, context):\n"
+            "    setattr(context, 'hacked', True)\n"
+            "    return []\n"
+        )
+        v = check_imports(code)
+        assert "call:setattr" in v
+
+
 class TestAllowedSamples:
     """화이트리스트 모듈은 통과해야 함."""
 

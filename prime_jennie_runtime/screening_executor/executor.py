@@ -54,7 +54,7 @@ class ScreeningExecutor:
         violations = check_imports(code)
         if violations:
             error: str
-            if any(v.startswith("call:") for v in violations):
+            if any(v.startswith(("call:", "attr:")) for v in violations):
                 error = "forbidden_call"
             else:
                 error = "import_violation"

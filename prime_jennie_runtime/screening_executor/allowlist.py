@@ -11,11 +11,13 @@ from __future__ import annotations
 import ast
 
 # SCOUT §6.3 — 정확히 이 모듈만 허용. 하위 모듈은 prefix match.
+# scipy 전체를 허용 — LLM 이 `import scipy` 또는 `from scipy import stats` 자유롭게
+# 쓸 수 있도록. 실 격리는 subprocess/docker 샌드박스가 담당.
 ALLOWED_MODULES: frozenset[str] = frozenset(
     {
         "pandas",
         "numpy",
-        "scipy.stats",
+        "scipy",
         "talib",
         "sklearn.cluster",
         "sklearn.linear_model",

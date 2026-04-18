@@ -17,6 +17,47 @@ KIS paper → real 전환 시 **반드시** 이 문서를 Top-down 으로 실행
 
 ---
 
+## 0.1 Blocking Pre-check Gates (stop 해제 직전 마지막 관문)
+
+> 2026-04-19 리뷰(`../.ai/sessions/session-2026-04-19-0001.md` 참조) 산출. 아래 중 **하나라도 미충족이면 stop 해제 금지**.
+> 정기 체크리스트의 나머지 항목은 위에서부터 점검해도, 이 게이트는 섹션 5 (stop 해제) 직전에 **재확인**한다.
+
+```bash
+# G1. MACRO_AUTO_OVERRIDE_DISABLED 가 slow-loop 컨테이너에서 제거/0 인지 검증.
+#     bypass 가 켜진 채 stop 을 풀면 고변동성 장세(20d vol >= 35%)에 자동 closed 방어가 무력화된다.
+ssh prime-jennie 'docker exec prime-jennie-runtime-slow-loop-1 env | grep MACRO_AUTO_OVERRIDE_DISABLED'
+# 기대: 비어있거나 `MACRO_AUTO_OVERRIDE_DISABLED=0`
+
+# G2. 최근 1시간 macro_runs 에서 auto_override 가 실제로 동작하는지 샘플 확인.
+ssh prime-jennie '
+  docker exec prime-jennie-runtime-postgres-1 psql -U pj_admin -d prime_jennie_v3 -c "
+    SELECT gate, auto_override, trigger_reason, generated_at
+    FROM macro_runs
+    WHERE generated_at > NOW() - INTERVAL '"'"'1 hour'"'"'
+    ORDER BY generated_at DESC LIMIT 5;"'
+# 기대: trigger_reason='"'"'scheduled:scout_daily'"'"' 샘플에서 bypass 이벤트가 있으면
+#       `pj.macro.auto_override_bypassed` 가 loki 에 나오지 않아야 함
+
+# G3. screening-executor 샌드박스 argv 에 seccomp 가 붙는지 (F4 배포 이후).
+#     SCREENING_SECCOMP_PROFILE env 가 호스트 절대경로로 지정되어야 적용된다.
+ssh prime-jennie 'docker exec prime-jennie-runtime-slow-loop-1 env | grep SCREENING_SECCOMP_PROFILE'
+ssh prime-jennie 'test -f $(docker exec prime-jennie-runtime-slow-loop-1 env | grep SCREENING_SECCOMP_PROFILE | cut -d= -f2) && echo ok'
+# 기대: 절대경로 출력 + `ok`
+
+# G4. allowlist M13~M17 우회 테스트 green 확인 (F5 배포 이후 regression 가드).
+cd ~/projects/prime-jennie-runtime && pytest tests/screening_executor/test_allowlist.py::TestAttributeBypass -q
+# 기대: 전부 pass
+```
+
+- [ ] **G1 통과** — `MACRO_AUTO_OVERRIDE_DISABLED` 가 컨테이너 env 에 없거나 `0`
+- [ ] **G2 통과** — 최근 1시간 정기 macro_runs 의 bypass 흔적 없음
+- [ ] **G3 통과** — seccomp 프로파일 파일이 호스트에 실재하고 env 로 주입됨 (F4 배포 완료 후)
+- [ ] **G4 통과** — allowlist 우회 테스트 10건 전부 green (F5 배포 완료 후)
+
+**미충족 시 조치**: stop 유지 + 해당 게이트의 F 작업을 먼저 닫는다. G1 만 통과시키면 이후 섹션 5 절차 진행 가능하지만 **G3/G4 는 defense-in-depth 권장**이며 비상시 G1 만으로도 운영 가능하다.
+
+---
+
 ## 1. 선결 차단 — STOP 먼저 (실매매 방지)
 
 실매매 전환 직전에 stop flag 를 세팅해서 **모든 진입을 차단**. 이 단계 생략 시 전환 직후 fast-loop 가 즉시 주문 전송.

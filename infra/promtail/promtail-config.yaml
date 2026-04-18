@@ -17,13 +17,18 @@ scrape_configs:
     docker_sd_configs:
       - host: unix:///var/run/docker.sock
         refresh_interval: 5s
+        # v2 잔존 컨테이너(prime-jennie 프로젝트)는 Docker SD 단에서 필터링.
+        # relabel `keep` 만 쓰면 promtail 3.3.2 에서 v2 컨테이너가 계속 tail 되어
+        # label 없는 stream 이 Loki 로 push → 400 "at least one label pair required"
+        # → drop_entries 초당 46 건 발생 (2026-04-18 22:xx 재진단).
+        filters:
+          - name: label
+            values: ['com.docker.compose.project=prime-jennie-runtime']
     relabel_configs:
-      # v2 잔존 공유 컨테이너(vllm/qdrant)는 제외. 그들 로그 파일에는 3월 말부터 누적된
-      # old timestamp 가 있어 Loki reject_old_samples 에 걸려 400 을 뱉으면 같은 batch 의
-      # v3 신규 로그까지 전량 drop 되어 promtail 이 멈춘다 (2026-04-18 장애).
+      # belt-and-suspenders: docker filter 가 우회된 타깃이 생겨도 relabel 에서 다시 차단.
       - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
         action: keep
-        regex: 'prime-jennie-runtime'
+        regex: '^prime-jennie-runtime$'
       - source_labels: ['__meta_docker_container_name']
         regex: '/(.*)'
         target_label: 'container'

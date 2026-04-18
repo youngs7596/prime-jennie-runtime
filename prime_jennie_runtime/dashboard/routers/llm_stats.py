@@ -10,6 +10,7 @@ Tier 매핑은 v3 `LLMConfig` (infra/config.py) 를 읽어 표시.
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 from typing import Any
 
@@ -26,33 +27,64 @@ router = APIRouter(prefix="/llm", tags=["llm"])
 # 추적 대상 서비스 목록 (v3 기준 — news_analysis/scout/macro/briefing)
 _SERVICES = ["scout", "macro", "news_analysis", "briefing", "unknown"]
 
-# 기능별 LLM 매핑 (정적 정보, v3 tier 매핑과 맞춘 최소 집합)
+# 기능별 LLM 매핑. tier 는 참고용, 실제 model/provider 는 각 서비스가 쓰는 env 에서 해석.
+# - news_analysis: vLLM EXAONE (VLLM_LLM_MODEL)
+# - scout: DeepSeek chat (DEEPSEEK_MODEL) — langchain-openai 직접
+# - macro: Claude Opus (ANTHROPIC_MODEL) — langchain-anthropic 직접 + DeepSeek shadow 병렬
+# - briefing: Claude Opus (ANTHROPIC_MODEL) — langchain-anthropic 직접
 _FEATURE_MAP = [
     {
         "service": "news_analysis",
         "name": "뉴스 감성 분석",
         "tier": "fast",
-        "frequency": "실시간 (배치)",
+        "frequency": "실시간 (배치, */10min)",
     },
     {
         "service": "scout",
         "name": "Scout 종목 분석",
         "tier": "strong",
-        "frequency": "장중 매 시간",
+        "frequency": "평일 08:30~14:30 매시 30분 (7회/일)",
     },
     {
         "service": "macro",
         "name": "Macro Gate",
         "tier": "reasoning",
-        "frequency": "장 시작 전",
+        "frequency": "평일 08:30~14:30 매시 30분 (7회/일)",
+    },
+    {
+        "service": "macro_shadow",
+        "name": "Macro Gate (shadow 비교)",
+        "tier": "strong",
+        "frequency": "평일 08:30~14:30 매시 30분 (Macro 와 병렬)",
     },
     {
         "service": "briefing",
         "name": "데일리 브리핑",
         "tier": "reasoning",
-        "frequency": "1일 1회",
+        "frequency": "1일 1회 (평일 17:00)",
     },
 ]
+
+
+def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
+    """service → (model_id, provider_label). slow_loop/briefing 은 env 직독, 나머지는 LLMConfig."""
+    if service == "news_analysis":
+        # v3: news_pipeline 은 vLLM EXAONE 4.0 AWQ. compose 기본값과 동기화.
+        model = os.environ.get("VLLM_LLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
+        return model, "vLLM (EXAONE)"
+    if service == "scout":
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        return model, "DeepSeek"
+    if service == "macro":
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+        return model, "Anthropic"
+    if service == "macro_shadow":
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        return model, "DeepSeek"
+    if service == "briefing":
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+        return model, "Anthropic"
+    return "unknown", "unknown"
 
 
 def _llm_config(request: Request) -> LLMConfig:
@@ -122,15 +154,15 @@ async def _build_monthly_stats(target_month: str, r: aioredis.Redis) -> dict:
 
 @router.get("/features")
 def get_features(request: Request) -> list[dict[str, Any]]:
-    """기능별 LLM 매핑 — tier → v3 config 모델."""
+    """기능별 LLM 매핑 — 각 서비스의 실제 env (VLLM_LLM_MODEL / DEEPSEEK_MODEL / ANTHROPIC_MODEL)
+    를 source-of-truth 로 해석. LLMConfig (LITELLM_MODEL_*) 은 fast 티어 fallback 용도로만 남김.
+    """
     cfg = _llm_config(request)
-    tier_model = {
-        "fast": cfg.fast,
-        "default": cfg.default,
-        "strong": cfg.strong,
-        "reasoning": cfg.reasoning,
-    }
-    return [{**feat, "model": tier_model.get(feat["tier"], "unknown")} for feat in _FEATURE_MAP]
+    result = []
+    for feat in _FEATURE_MAP:
+        model, provider = _service_model(feat["service"], cfg)
+        result.append({**feat, "model": model, "provider": provider})
+    return result
 
 
 @router.get("/stats/monthly/{target_month}")

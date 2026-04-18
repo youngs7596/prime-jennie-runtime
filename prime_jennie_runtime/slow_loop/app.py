@@ -3,9 +3,15 @@
 `scheduled_jobs` (owner='slow_loop') 에 등록된 cron 을 apscheduler 가 트리거하면
 `scout_daily` handler 가 `run_slow_loop()` 를 호출한다.
 
-Role tier 매핑 (v2 설계 승계):
-  - Scout (strong)    → DeepSeek chat (DEEPSEEK_API_KEY)
+Role tier 매핑 (2026-04-19 개정 — Scout 도 코드 생성 품질 우선):
+  - Scout (strong)    → Claude Opus 4.7 (ANTHROPIC_API_KEY)
   - Macro (reasoning) → Claude Opus 4.7 (ANTHROPIC_API_KEY)
+  - Scout shadow      → DeepSeek chat   (DEEPSEEK_API_KEY, 비교 평가 데이터 축적)
+  - Macro shadow      → DeepSeek (chat 기본, reasoner override 가능)
+
+Scout 는 하루 수회 cron 에 한 번씩 Python 코드를 생성만 하므로 per-ticker 비용이
+없고, 코드 품질이 screening 후보 분포 전체를 결정한다. 저렴한 모델보다 Opus
+품질이 더 중요해서 primary 를 Opus 로 바꾸고 DeepSeek 는 shadow 로 병렬 축적.
 
 Scout/Macro feeder 는 Phase 2 기준 Stub — Track E feeder 완성 시 교체 (AGENTS.md §위임 경계).
 
@@ -79,11 +85,14 @@ logger = logging.getLogger(__name__)
 def _try_build_tiered_router() -> Any | None:
     """Role tier → ChatModel 매핑 반환. 필수 키 누락 시 None.
 
-    tier 매핑 (v2 설계 승계):
-      - strong    → Scout      = DeepSeek chat  (DEEPSEEK_API_KEY)
+    tier 매핑 (2026-04-19 개정):
+      - strong    → Scout      = Claude Opus 4.7 (ANTHROPIC_API_KEY)
       - reasoning → Macro Gate = Claude Opus 4.7 (ANTHROPIC_API_KEY)
+      - shadow_strong    → Scout shadow = DeepSeek chat (DEEPSEEK_API_KEY)
+      - shadow_reasoning → Macro shadow = DeepSeek (chat/reasoner)
       - fast      → 현재 slow_loop 에선 사용 X (news_pipeline 이 별도로 vLLM EXAONE 호출)
 
+    Opus 하나는 Scout + Macro 둘 다 같은 인스턴스로 재사용 (stateless API 라 무해).
     DeepSeek/Anthropic key 중 하나라도 없으면 slow_loop handler 는 skip.
     """
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -127,18 +136,24 @@ def _try_build_tiered_router() -> Any | None:
         def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
             return super().with_structured_output(schema, method=method or "json_mode", **kwargs)
 
-    strong = _DeepSeekChatOpenAI(
+    # 주: claude-opus-4-7 은 temperature 파라미터 미지원 (API 400).
+    opus = ChatAnthropic(
+        model=anthropic_model,
+        api_key=anthropic_key,
+    )
+    # Primary Scout + Macro 둘 다 Opus (stateless API 라 인스턴스 재사용 무해).
+    strong = opus
+    reasoning = opus
+
+    # Scout shadow = DeepSeek chat (저비용 거울, 비교 평가용 데이터 축적)
+    scout_shadow = _DeepSeekChatOpenAI(
         model=deepseek_model,
         api_key=deepseek_key,
         base_url=deepseek_base,
         temperature=0.1,
     )
-    # 주: claude-opus-4-7 은 temperature 파라미터 미지원 (API 400).
-    reasoning = ChatAnthropic(
-        model=anthropic_model,
-        api_key=anthropic_key,
-    )
-    # Shadow = 기본 deepseek-chat (V3.2 flagship, hybrid). reasoner 로 override 하면
+
+    # Macro shadow = 기본 deepseek-chat (V3.2 flagship, hybrid). reasoner 로 override 하면
     # json_mode 로 자동 전환되도록 모델 ID 로 wrapper 선택.
     shadow_cls = (
         _DeepSeekReasonerOpenAI if "reasoner" in deepseek_shadow_model else _DeepSeekChatOpenAI
@@ -153,7 +168,8 @@ def _try_build_tiered_router() -> Any | None:
         "strong": strong,
         "reasoning": reasoning,
         "default": strong,
-        # shadow tier — reasoning 자리에 DeepSeek reasoner(R1) 를 꽂은 거울 구성
+        # shadow tier — primary orchestrator 와 동일 role 이 다른 모델로 병렬 평가
+        "shadow_strong": scout_shadow,
         "shadow_reasoning": shadow_reasoning,
     }
 
@@ -181,14 +197,21 @@ def _build_slow_loop_components(
         resilience=default_resilience(),
     )
 
-    # Shadow orchestrator — Macro 를 DeepSeek 로도 병렬 평가. Opus 결정이 primary.
-    # MACRO_SHADOW_ENABLED=0 으로 비활성화 가능.
+    # Shadow orchestrator — Macro + Scout 을 DeepSeek 로 병렬 평가. Opus 결정이 primary.
+    # MACRO_SHADOW_ENABLED=0 / SCOUT_SHADOW_ENABLED=0 으로 개별 비활성화 가능.
+    # shadow_orchestrator 자체는 shadow_* 태그 중 하나라도 활성이면 구성됨.
     shadow_orchestrator: Orchestrator | None = None
-    if os.environ.get("MACRO_SHADOW_ENABLED", "1") == "1" and "shadow_reasoning" in tiers:
+    macro_shadow_on = os.environ.get("MACRO_SHADOW_ENABLED", "1") == "1"
+    scout_shadow_on = os.environ.get("SCOUT_SHADOW_ENABLED", "1") == "1"
+    if (macro_shadow_on or scout_shadow_on) and (
+        "shadow_reasoning" in tiers or "shadow_strong" in tiers
+    ):
         shadow_tiers = {
-            "strong": tiers["strong"],
-            "reasoning": tiers["shadow_reasoning"],  # DeepSeek 을 reasoning 자리에
-            "default": tiers["default"],
+            # shadow 가 꺼진 role 은 primary 모델 그대로 재사용 (shadow 호출 자체를
+            # pipeline 단에서 skip 하므로 실사용 안 됨 — fallback 안전치)
+            "strong": tiers["shadow_strong"] if scout_shadow_on else tiers["strong"],
+            "reasoning": tiers["shadow_reasoning"] if macro_shadow_on else tiers["reasoning"],
+            "default": tiers["shadow_strong"] if scout_shadow_on else tiers["default"],
         }
         shadow_orchestrator = Orchestrator(
             role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),

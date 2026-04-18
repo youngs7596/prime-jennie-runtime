@@ -45,13 +45,19 @@ _PRICING: dict[str, tuple[float, float]] = {
 
 
 def _tier_model(tier: str) -> str | None:
-    """tier → 설정된 모델명 (ANTHROPIC_MODEL / DEEPSEEK_MODEL / DEEPSEEK_SHADOW_MODEL)."""
+    """tier → 설정된 모델명 (ANTHROPIC_MODEL / DEEPSEEK_MODEL / DEEPSEEK_SHADOW_MODEL).
+
+    2026-04-19: Scout primary 도 Opus 로 전환. "strong" tier 는 이제 Anthropic.
+    Scout shadow 는 DeepSeek chat 재사용.
+    """
     if tier == "reasoning":
         return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
     if tier == "strong":
-        return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
     if tier == "shadow_reasoning":
         return os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-chat")
+    if tier == "shadow_strong":
+        return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     return None
 
 
@@ -272,6 +278,7 @@ async def persist_scout_run(
     candidates_count: int | None = None,
     prompt_chars: int | None = None,
     context_snapshot: dict[str, Any] | None = None,
+    shadow_result: dict[str, Any] | None = None,
     redis_client: Any = None,
 ) -> None:
     """Scout 결과 1건을 scout_runs 에 upsert.
@@ -349,6 +356,27 @@ async def persist_scout_run(
             await conn.execute(sql, params)
     except Exception:
         logger.exception("persist_scout_run failed: id=%s", scout_run_id)
+        return
+
+    # Shadow result merge into metadata_json.shadow (macro 와 동일 패턴)
+    if shadow_result is not None:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE scout_runs SET metadata_json = "
+                        "COALESCE(metadata_json, '{}'::jsonb) || CAST(:shadow AS JSONB) "
+                        "WHERE scout_run_id = :id"
+                    ),
+                    {
+                        "id": scout_run_id,
+                        "shadow": json.dumps(
+                            {"shadow": shadow_result}, ensure_ascii=False, default=str
+                        ),
+                    },
+                )
+        except Exception:
+            logger.exception("persist_scout_run shadow merge failed: id=%s", scout_run_id)
 
     if redis_client is not None:
         in_tok, out_tok = _usage_tokens(meta, prompt_chars, out_chars)
@@ -360,6 +388,22 @@ async def persist_scout_run(
             cost_usd=cost,
             timestamp=generated_at,
         )
+        # Shadow llm_stats 누적 (macro_shadow 와 대칭)
+        if shadow_result is not None and "error" not in shadow_result:
+            shadow_cost = shadow_result.get("cost_usd_estimated")
+            shadow_in = shadow_result.get("tokens_in")
+            shadow_out = shadow_result.get("tokens_out")
+            if not isinstance(shadow_in, int) or not isinstance(shadow_out, int):
+                # Shadow pipeline 은 별도 usage metadata 를 payload 에 싣지 않아 primary 기준 추정.
+                shadow_in, shadow_out = in_tok, out_tok
+            await record_llm_call(
+                redis_client,
+                service="scout_shadow",
+                input_tokens=shadow_in,
+                output_tokens=shadow_out,
+                cost_usd=shadow_cost,
+                timestamp=generated_at,
+            )
 
 
 async def persist_screening_candidates(

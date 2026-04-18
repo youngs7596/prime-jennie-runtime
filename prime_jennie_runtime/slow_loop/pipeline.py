@@ -365,12 +365,53 @@ async def run_slow_loop(
         previous_runs=previous_scout_runs,
         trigger_reason=scout_trigger,
     )
-    scout_result = await _run_pipeline_with_retry(
-        comp.orchestrator,
-        _scout_pipeline(scout_ctx),
-        observer,
-        role_name="scout",
-        user_request="daily scout run",
+
+    async def _primary_scout():
+        return await _run_pipeline_with_retry(
+            comp.orchestrator,
+            _scout_pipeline(scout_ctx),
+            observer,
+            role_name="scout",
+            user_request="daily scout run",
+        )
+
+    async def _shadow_scout():
+        """Scout shadow — DeepSeek chat 으로 같은 pipeline 을 병렬 평가.
+
+        Macro shadow 와 동일 패턴. 실패해도 primary 결정을 방해하지 않고 None 반환.
+        duration_ms + metadata (usage) 를 payload 에 실어 cost 추정에 활용.
+        """
+        if comp.shadow_orchestrator is None:
+            return None
+        import time as _t
+
+        t0 = _t.monotonic()
+        try:
+            res = await _run_pipeline_with_retry(
+                comp.shadow_orchestrator,
+                _scout_pipeline(scout_ctx),
+                observer,
+                role_name="scout_shadow",
+                user_request="daily scout run (shadow)",
+            )
+            shadow_meta: dict[str, Any] = {}
+            try:
+                step = res.state["scout"]
+                if step.outputs:
+                    shadow_meta = dict(step.outputs[0].metadata or {})
+            except Exception:
+                shadow_meta = {}
+            return {
+                "result": res,
+                "duration_ms": int((_t.monotonic() - t0) * 1000),
+                "metadata": shadow_meta,
+            }
+        except Exception as e:
+            logger.warning("scout shadow failed: %s", e)
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    scout_result, scout_shadow_payload = await asyncio.gather(
+        _primary_scout(), _shadow_scout(), return_exceptions=False
     )
     scout_out: ScoutOutput | None = scout_result.state["scout"].payload_as(ScoutOutput)
     if scout_out is None:
@@ -402,6 +443,43 @@ async def run_slow_loop(
         "macro_gate": post.output.gate,
         "macro_run_id": macro_run_id,
     }
+
+    # Scout shadow 결과 구성 — DeepSeek 가 낸 동일 스키마 출력을 그대로 기록
+    scout_shadow_for_db: dict[str, Any] | None = None
+    if scout_shadow_payload is not None and "error" not in scout_shadow_payload:
+        try:
+            shadow_res = scout_shadow_payload["result"]
+            shadow_scout_out: ScoutOutput | None = shadow_res.state["scout"].payload_as(ScoutOutput)
+            if shadow_scout_out is not None:
+                try:
+                    from .persistence import _resolve_cost, _tier_model
+
+                    shadow_model_name = _tier_model("shadow_strong")  # DeepSeek chat
+                    shadow_meta = scout_shadow_payload.get("metadata") or {}
+                    shadow_out_chars = len(shadow_scout_out.screening_code or "") + len(
+                        shadow_scout_out.hypothesis or ""
+                    )
+                    shadow_cost_est = _resolve_cost(
+                        shadow_meta, shadow_model_name, scout_prompt_chars, shadow_out_chars
+                    )
+                    scout_shadow_for_db = {
+                        "model_used": shadow_model_name,
+                        "hypothesis": shadow_scout_out.hypothesis,
+                        "code_hash": _hashlib.sha256(
+                            (shadow_scout_out.screening_code or "").encode("utf-8")
+                        ).hexdigest(),
+                        "expected_candidates": shadow_scout_out.expected_candidates,
+                        "strategy_tags_used": list(shadow_scout_out.strategy_tags_used or []),
+                        "latency_ms": scout_shadow_payload.get("duration_ms"),
+                        "cost_usd_estimated": shadow_cost_est,
+                    }
+                except Exception:
+                    logger.exception("scout shadow payload build failed")
+        except Exception:
+            logger.exception("scout shadow result extract failed")
+    elif scout_shadow_payload and "error" in scout_shadow_payload:
+        scout_shadow_for_db = {"error": scout_shadow_payload["error"]}
+
     await persist_scout_run(
         comp.db_engine,
         scout_run_id=scout_run_id,
@@ -410,6 +488,7 @@ async def run_slow_loop(
         scout_step_result=scout_result.state["scout"],
         prompt_chars=scout_prompt_chars,
         context_snapshot=scout_context_snapshot,
+        shadow_result=scout_shadow_for_db,
         redis_client=comp.redis_client,
     )
 

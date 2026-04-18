@@ -3,10 +3,11 @@
 v3 `scout_runs` 테이블 (migrations/001) 을 대상으로 한다.
 
 엔드포인트:
-- GET /scout/runs            — 최근 runs 요약 (code_text 제외, 용량 큼)
-- GET /scout/runs/{id}       — 단일 run 상세 (code_text 포함)
-- GET /scout/dates           — scout_runs 가 있는 날짜 목록
-- GET /scout/latest          — 최신 run 요약 (control-ui Overview 대응)
+- GET /scout/runs                        — 최근 runs 요약 (code_text 제외, 용량 큼)
+- GET /scout/runs/{id}                   — 단일 run 상세 (code_text 포함)
+- GET /scout/runs/{id}/candidates        — raw 후보 전수 (screening_candidates, rank 순)
+- GET /scout/dates                       — scout_runs 가 있는 날짜 목록
+- GET /scout/latest                      — 최신 run 요약 (control-ui Overview 대응)
 """
 
 from __future__ import annotations
@@ -42,6 +43,25 @@ class ScoutRunDetail(ScoutRunSummary):
     """단일 조회 — code_text 포함."""
 
     code_text: str
+
+
+class ScreeningCandidateRow(BaseModel):
+    """migration 012 screening_candidates — scout_run 당 raw 후보 1건.
+
+    promoted_to_sheet_id 와 rejection_reason 중 하나만 채워짐. 둘 다 NULL 이면
+    Strategy Engine 가 아직 처리 중인 transient 상태.
+    """
+
+    rank: int
+    ticker: str
+    strategy_tag: str
+    conviction: float | None = None
+    promoted_to_sheet_id: str | None = None
+    rejection_reason: str | None = None
+    entry_hint: dict[str, Any] | None = None
+    exit_hint: dict[str, Any] | None = None
+    factors: dict[str, Any] = {}
+    notes: str | None = None
 
 
 def _as_dict(v: Any) -> Any:
@@ -107,6 +127,42 @@ async def get_run(
     if row is None:
         raise HTTPException(status_code=404, detail=f"scout run not found: {scout_run_id}")
     return _row_to_detail(row)
+
+
+@router.get("/runs/{scout_run_id}/candidates", response_model=list[ScreeningCandidateRow])
+async def list_candidates(
+    scout_run_id: str,
+    session: AsyncSession = Depends(get_session),
+) -> list[ScreeningCandidateRow]:
+    """특정 scout_run 의 raw 후보 전수 (rank 순).
+
+    0건이면 빈 리스트 — 404 를 내지 않는다. "run 은 있지만 screen() 이 빈
+    리스트를 반환" 과 "run 자체가 없음" 을 UI 단에서 구분하려면 상위 `/runs/{id}`
+    를 먼저 조회해야 한다.
+    """
+    result = await session.execute(
+        text(
+            "SELECT rank, ticker, strategy_tag, conviction, promoted_to_sheet_id, "
+            "rejection_reason, entry_hint_json, exit_hint_json, factors_json, notes "
+            "FROM screening_candidates WHERE scout_run_id = :id ORDER BY rank"
+        ),
+        {"id": scout_run_id},
+    )
+    return [
+        ScreeningCandidateRow(
+            rank=row["rank"],
+            ticker=row["ticker"],
+            strategy_tag=row["strategy_tag"],
+            conviction=float(row["conviction"]) if row["conviction"] is not None else None,
+            promoted_to_sheet_id=row["promoted_to_sheet_id"],
+            rejection_reason=row["rejection_reason"],
+            entry_hint=_as_dict(row["entry_hint_json"]),
+            exit_hint=_as_dict(row["exit_hint_json"]),
+            factors=_as_dict(row["factors_json"]) or {},
+            notes=row["notes"],
+        )
+        for row in result.mappings().all()
+    ]
 
 
 @router.get("/dates", response_model=list[str])

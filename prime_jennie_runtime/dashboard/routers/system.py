@@ -11,10 +11,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import UTC
 
 import httpx
+import redis.asyncio as aioredis
 from fastapi import APIRouter
 from pydantic import BaseModel
+
+from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.heartbeat import DEFAULT_TTL_S, read_heartbeat
 
 router = APIRouter(prefix="/system", tags=["system"])
 
@@ -29,16 +34,21 @@ _DEFAULT_TARGETS: list[tuple[str, str]] = [
     ("telegram-bot", "http://telegram-bot:8000/healthz"),
 ]
 
-# v3 pure async daemon — HTTP 없음, docker container state 로 관측.
-# compose project = prime-jennie-runtime, 컨테이너 = {project}-{service}-1
-_DAEMON_CONTAINERS: list[str] = [
-    "slow-loop",
-    "fast-loop",
-    "news-pipeline",
-    "price-scheduler",
-    "job-worker",
-]
+# v3 pure async daemon — HTTP 없음, heartbeat 우선 관측 + docker container state fallback.
+# compose project = prime-jennie-runtime, 컨테이너 = {project}-{service}-1.
+# env `DASHBOARD_DAEMONS` (CSV) 로 override. 빈 문자열이면 daemon 체크 건너뜀 (tests 용).
+_DEFAULT_DAEMONS = ["slow-loop", "fast-loop", "news-pipeline", "price-scheduler", "job-worker"]
 _COMPOSE_PROJECT = "prime-jennie-runtime"
+
+
+def _load_daemons() -> list[str]:
+    raw = os.getenv("DASHBOARD_DAEMONS")
+    if raw is None:
+        return _DEFAULT_DAEMONS
+    raw = raw.strip()
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 def _load_targets() -> list[tuple[str, str]]:
@@ -94,8 +104,47 @@ async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatu
         return ServiceStatus(name=name, url=url, status="unreachable", message=str(e)[:120])
 
 
-def _check_daemon(name: str) -> ServiceStatus:
-    """Docker socket 으로 daemon 컨테이너 state 확인 (HTTP 없는 서비스용)."""
+async def _check_daemon_heartbeat(
+    redis_client: aioredis.Redis | None, name: str
+) -> ServiceStatus | None:
+    """Application heartbeat 가 TTL 내면 healthy. 없으면 None (docker state 로 fallback)."""
+    if redis_client is None:
+        return None
+    try:
+        hb = await read_heartbeat(redis_client, name)
+    except Exception as e:
+        logger.warning("heartbeat read error service=%s err=%s", name, e)
+        return None
+    if hb is None:
+        return None
+    age = float(hb["age_seconds"])
+    if age > DEFAULT_TTL_S:
+        # TTL 지났는데도 키가 남아있는 경우 (예: Redis clock skew) → stale 로 취급
+        return None
+    # started_at 기반 uptime
+    from datetime import datetime
+
+    uptime: float | None = None
+    try:
+        started_iso = hb.get("started_at")
+        if isinstance(started_iso, str) and started_iso:
+            started = datetime.fromisoformat(started_iso)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            uptime = (datetime.now(tz=UTC) - started).total_seconds()
+    except (ValueError, TypeError):
+        pass
+    return ServiceStatus(
+        name=name,
+        url=f"redis://heartbeat:{name}",
+        status="healthy",
+        uptime_seconds=uptime,
+        message=f"heartbeat {age:.0f}s ago (pid={hb.get('pid')})",
+    )
+
+
+def _check_daemon_container(name: str) -> ServiceStatus:
+    """Docker socket fallback — heartbeat 없을 때 프로세스가 떠있긴 한지 확인."""
     container_name = f"{_COMPOSE_PROJECT}-{name}-1"
     url = f"docker://{container_name}"
     try:
@@ -109,35 +158,74 @@ def _check_daemon(name: str) -> ServiceStatus:
         started_at = state.get("StartedAt")
         uptime = None
         if started_at and running:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
             try:
-                # ISO 8601 with nanoseconds — truncate to microseconds
                 ts = started_at.split(".")[0] + "+00:00" if "+" not in started_at else started_at
                 started = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                uptime = (datetime.now(timezone.utc) - started).total_seconds()
+                uptime = (datetime.now(tz=UTC) - started).total_seconds()
             except Exception:
                 pass
         if restarting:
             return ServiceStatus(name=name, url=url, status="unhealthy", message="restarting")
         if running:
+            # 컨테이너는 running 인데 heartbeat 가 없음 → degraded (loop deadlock 의심)
             return ServiceStatus(
-                name=name, url=url, status="healthy", uptime_seconds=uptime, message="container running"
+                name=name,
+                url=url,
+                status="unhealthy",
+                uptime_seconds=uptime,
+                message="container running but no heartbeat",
             )
         return ServiceStatus(
-            name=name, url=url, status="unreachable", message=f"state={state.get('Status', 'unknown')}"
+            name=name,
+            url=url,
+            status="unreachable",
+            message=f"state={state.get('Status', 'unknown')}",
         )
     except Exception as e:
-        return ServiceStatus(name=name, url=url, status="unreachable", message=f"{type(e).__name__}: {str(e)[:100]}")
+        return ServiceStatus(
+            name=name,
+            url=url,
+            status="unreachable",
+            message=f"{type(e).__name__}: {str(e)[:100]}",
+        )
+
+
+async def _check_daemon(redis_client: aioredis.Redis | None, name: str) -> ServiceStatus:
+    hb_status = await _check_daemon_heartbeat(redis_client, name)
+    if hb_status is not None:
+        return hb_status
+    return _check_daemon_container(name)
+
+
+async def _get_redis_client() -> aioredis.Redis | None:
+    """dashboard process lifespan 동안 연결 하나 공유 — 첫 호출에 lazy init."""
+    global _REDIS_CLIENT
+    if _REDIS_CLIENT is not None:
+        return _REDIS_CLIENT
+    try:
+        cfg = AppConfig()
+        _REDIS_CLIENT = aioredis.from_url(cfg.redis.url, decode_responses=False)
+        return _REDIS_CLIENT
+    except Exception as e:
+        logger.warning("dashboard heartbeat redis init failed: %s", e)
+        return None
+
+
+_REDIS_CLIENT: aioredis.Redis | None = None
 
 
 @router.get("/health", response_model=list[ServiceStatus])
 async def get_all_health() -> list[ServiceStatus]:
-    """등록된 모든 서비스의 /health 상태 + daemon 컨테이너 state."""
+    """등록된 모든 서비스의 /health 상태 + daemon heartbeat (+ docker fallback)."""
     results: list[ServiceStatus] = []
     async with httpx.AsyncClient(timeout=3.0) as client:
         for name, url in _load_targets():
             results.append(await _check(client, name, url))
-    for daemon_name in _DAEMON_CONTAINERS:
-        results.append(_check_daemon(daemon_name))
+    daemons = _load_daemons()
+    if daemons:
+        redis_client = await _get_redis_client()
+        for daemon_name in daemons:
+            results.append(await _check_daemon(redis_client, daemon_name))
     return results

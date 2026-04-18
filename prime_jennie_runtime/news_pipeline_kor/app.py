@@ -138,6 +138,12 @@ async def run() -> None:
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=True)
         stack.push_async_callback(redis_client.aclose)
 
+        from prime_jennie_runtime.infra.heartbeat import HeartbeatPublisher
+
+        heartbeat = HeartbeatPublisher(redis_client, service="news-pipeline")
+        await heartbeat.start()
+        stack.push_async_callback(heartbeat.stop)
+
         scheduler = SchedulerRunner(
             owner=OWNER,
             handlers=handlers,

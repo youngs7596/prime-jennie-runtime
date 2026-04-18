@@ -120,6 +120,12 @@ async def run() -> None:
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=False)
         stack.push_async_callback(redis_client.aclose)
 
+        from prime_jennie_runtime.infra.heartbeat import HeartbeatPublisher
+
+        heartbeat = HeartbeatPublisher(redis_client, service="fast-loop")
+        await heartbeat.start()
+        stack.push_async_callback(heartbeat.stop)
+
         pool = await asyncpg.create_pool(
             host=cfg.postgres.host,
             port=cfg.postgres.port,

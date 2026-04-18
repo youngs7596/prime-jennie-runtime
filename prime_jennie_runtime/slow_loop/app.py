@@ -125,9 +125,7 @@ def _try_build_tiered_router() -> Any | None:
     # 프롬프트에 JSON 스키마가 이미 명시되어 있어야 함 (Macro 프롬프트는 그렇게 구성됨).
     class _DeepSeekReasonerOpenAI(ChatOpenAI):
         def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
-            return super().with_structured_output(
-                schema, method=method or "json_mode", **kwargs
-            )
+            return super().with_structured_output(schema, method=method or "json_mode", **kwargs)
 
     strong = _DeepSeekChatOpenAI(
         model=deepseek_model,
@@ -259,6 +257,12 @@ async def run() -> None:
     async with AsyncExitStack() as stack:
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=False)
         stack.push_async_callback(redis_client.aclose)
+
+        from prime_jennie_runtime.infra.heartbeat import HeartbeatPublisher
+
+        heartbeat = HeartbeatPublisher(redis_client, service="slow-loop")
+        await heartbeat.start()
+        stack.push_async_callback(heartbeat.stop)
 
         # DB engine 은 SchedulerStore + slow_loop persistence 양쪽이 공유
         engine = create_engine(cfg.postgres)

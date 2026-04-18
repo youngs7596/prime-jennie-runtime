@@ -20,6 +20,8 @@ def targets_env(monkeypatch):
             ]
         ),
     )
+    # daemon heartbeat 체크를 끔 (별도 테스트에서 커버).
+    monkeypatch.setenv("DASHBOARD_DAEMONS", "")
 
 
 async def test_health_mixed(app, targets_env):

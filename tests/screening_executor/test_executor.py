@@ -5,7 +5,12 @@ executor는 in-process. timeout/OOM은 adapter 컨테이너 책임이라 여기�
 
 from __future__ import annotations
 
-from prime_jennie_runtime.screening_executor.executor import ScreeningExecutor
+import pytest
+
+from prime_jennie_runtime.screening_executor.executor import (
+    ScreeningExecutor,
+    _restore_market_data,
+)
 
 UNIVERSE = ["005930", "000660", "207940"]
 CONTEXT = {"as_of": "2026-04-17", "universe": UNIVERSE}
@@ -230,3 +235,154 @@ def test_executor_accepts_candidate_instance_via_namespace_injection():
     # NOTE: scout 코드에서 ScreeningCandidate 직접 import 불가 (allowlist) →
     # 운영 시엔 항상 dict 반환. Pydantic instance 통과는 호스트 in-process 호출
     # (테스트 코드가 직접 namespace 주입)으로만 검증되며 별도 테스트 불필요.
+
+
+# ---------- market_data records → DataFrame round-trip ----------
+
+
+def _make_records() -> list[dict]:
+    """3 days × 2 tickers OHLCV records."""
+    return [
+        {
+            "ticker": "005930",
+            "date": "2026-04-16",
+            "open": 71000,
+            "high": 71500,
+            "low": 70800,
+            "close": 71200,
+            "volume": 1_200_000,
+        },
+        {
+            "ticker": "005930",
+            "date": "2026-04-17",
+            "open": 71200,
+            "high": 72000,
+            "low": 71100,
+            "close": 71800,
+            "volume": 1_500_000,
+        },
+        {
+            "ticker": "005930",
+            "date": "2026-04-18",
+            "open": 71800,
+            "high": 72500,
+            "low": 71700,
+            "close": 72300,
+            "volume": 1_400_000,
+        },
+        {
+            "ticker": "000660",
+            "date": "2026-04-16",
+            "open": 135000,
+            "high": 136000,
+            "low": 134500,
+            "close": 135500,
+            "volume": 800_000,
+        },
+        {
+            "ticker": "000660",
+            "date": "2026-04-17",
+            "open": 135500,
+            "high": 137000,
+            "low": 135200,
+            "close": 136800,
+            "volume": 900_000,
+        },
+        {
+            "ticker": "000660",
+            "date": "2026-04-18",
+            "open": 136800,
+            "high": 138000,
+            "low": 136500,
+            "close": 137500,
+            "volume": 950_000,
+        },
+    ]
+
+
+def test_restore_market_data_none_or_empty_returns_none():
+    assert _restore_market_data(None) is None
+    assert _restore_market_data([]) is None
+
+
+def test_restore_market_data_returns_dataframe_with_multiindex():
+    pd = pytest.importorskip("pandas")
+    df = _restore_market_data(_make_records())
+    assert isinstance(df, pd.DataFrame)
+    assert df.index.names == ["ticker", "date"]
+    # 3 days × 2 tickers = 6 rows
+    assert len(df) == 6
+    # date 컬럼이 datetime 으로 복원되었는지
+    assert df.index.get_level_values("date").dtype.kind == "M"
+    # OHLCV 값 보존 확인
+    row = df.loc[("005930", pd.Timestamp("2026-04-18"))]
+    assert int(row["close"]) == 72300
+    assert int(row["volume"]) == 1_400_000
+
+
+def test_restore_market_data_fallback_when_pandas_missing(monkeypatch):
+    """pandas 미설치 환경에서는 records 가 그대로 반환되어야 한다."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fail_pandas(name: str, *args, **kwargs):
+        if name == "pandas":
+            raise ImportError("pandas not installed (simulated)")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_pandas)
+    records = _make_records()
+    out = _restore_market_data(records)
+    assert out is records  # 원본 레퍼런스 그대로
+
+
+def test_stdio_main_restores_market_data_from_records(monkeypatch):
+    """stdin JSON payload 에 market_data_records 가 있으면 screen() 이 DataFrame 을 받는다."""
+    import json
+    from io import StringIO
+
+    from prime_jennie_runtime.screening_executor import executor as exec_mod
+
+    captured: dict = {}
+    orig_run = exec_mod.ScreeningExecutor.run
+
+    def _capture_run(self, code, context, market_data=None):
+        captured["market_data"] = market_data
+        captured["context"] = context
+        return orig_run(self, code, context, market_data=market_data)
+
+    monkeypatch.setattr(exec_mod.ScreeningExecutor, "run", _capture_run)
+
+    code = (
+        "def screen(md, ctx):\n"
+        "    return [{\n"
+        "        'ticker': '005930',\n"
+        "        'strategy_tag': 'SECTOR_MOMENTUM',\n"
+        "        'conviction': 0.7,\n"
+        "        'entry_hint': {'trigger': 'market'},\n"
+        "        'factors': {}, 'notes': '',\n"
+        "    }]\n"
+    )
+    payload = {
+        "code": code,
+        "context": {
+            "as_of": "2026-04-18",
+            "universe": ["005930", "000660"],
+            "market_data_records": _make_records(),
+        },
+    }
+    monkeypatch.setattr("sys.stdin", StringIO(json.dumps(payload)))
+    rc = exec_mod._stdio_main()
+    assert rc == 0
+    # market_data 가 DataFrame (pandas 있을 때) 또는 records (없을 때) 로 복원
+    md = captured["market_data"]
+    try:
+        import pandas as pd
+
+        assert isinstance(md, pd.DataFrame)
+        assert md.index.names == ["ticker", "date"]
+    except ImportError:
+        assert md == _make_records()
+    # market_data_records 는 context 에서 pop 되었어야 한다 (executor 에 유출 X)
+    assert "market_data_records" not in captured["context"]

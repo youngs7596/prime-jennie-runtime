@@ -18,7 +18,6 @@ ALLOWED_MODULES: frozenset[str] = frozenset(
         "pandas",
         "numpy",
         "scipy",
-        "talib",
         "sklearn.cluster",
         "sklearn.linear_model",
         "sklearn.preprocessing",

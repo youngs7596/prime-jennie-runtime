@@ -11,8 +11,7 @@ from .schemas import ScoutContext
 ALLOWED_IMPORTS = (
     "pandas",
     "numpy",
-    "scipy.stats",
-    "talib",
+    "scipy",
     "sklearn.cluster",
     "sklearn.linear_model",
     "sklearn.preprocessing",

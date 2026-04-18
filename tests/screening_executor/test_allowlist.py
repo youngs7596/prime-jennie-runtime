@@ -90,7 +90,6 @@ class TestAllowedSamples:
             "import pandas as pd\n",
             "import numpy as np\n",
             "from scipy.stats import norm\n",
-            "import talib\n",
             "from sklearn.cluster import KMeans\n",
             "from sklearn.linear_model import LinearRegression\n",
             "from sklearn.preprocessing import StandardScaler\n",

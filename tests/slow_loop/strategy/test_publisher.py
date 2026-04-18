@@ -74,3 +74,51 @@ async def test_dlq_for_raw_payload(fake_redis):
     )
     dlq_len = await fake_redis.xlen(STREAM_POSITION_SHEETS_DLQ)
     assert dlq_len == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_persists_to_db_before_stream(fake_redis):
+    """db_engine 주입 시 position_sheets upsert 가 stream publish 전에 수행.
+
+    이게 없으면 slow_loop 의 후행 `update_candidate_promotion` 이 FK 위반 (sheet_id
+    not in position_sheets) 을 일으킨다 — 2026-04-19 smoke 에서 확인된 regression.
+    """
+    executed: list[dict] = []
+
+    class _FakeConn:
+        async def execute(self, stmt, params):
+            executed.append({"stmt": str(stmt), "params": params})
+
+    class _FakeBegin:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    class _FakeEngine:
+        def begin(self):
+            return _FakeBegin()
+
+    publisher = PositionSheetPublisher(fake_redis, db_engine=_FakeEngine())
+    await publisher.publish(_valid_sheet())
+
+    # DB upsert 1회 호출 + INSERT INTO position_sheets 포함
+    assert len(executed) == 1
+    assert "INSERT INTO position_sheets" in executed[0]["stmt"]
+    assert executed[0]["params"]["sid"] == "ps_20260416_005930_abcd"
+    assert executed[0]["params"]["tk"] == "005930"
+
+    # stream 발행도 성공
+    length = await fake_redis.xlen(STREAM_POSITION_SHEETS)
+    assert length == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_without_db_engine_is_noop(fake_redis):
+    """db_engine 미주입 (테스트/dev) 시 DB 경로 skip 하고 stream 발행만 수행."""
+    publisher = PositionSheetPublisher(fake_redis, db_engine=None)
+    msg_id = await publisher.publish(_valid_sheet())
+    assert msg_id
+    length = await fake_redis.xlen(STREAM_POSITION_SHEETS)
+    assert length == 1

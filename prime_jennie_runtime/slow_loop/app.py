@@ -267,7 +267,7 @@ def _build_slow_loop_components(
 
     policy = load_policy()
     engine = StrategyEngine(policy=policy, risk_throttle=NoOpRiskThrottle())
-    publisher = PositionSheetPublisher(client=redis_client)
+    publisher = PositionSheetPublisher(client=redis_client, db_engine=db_engine)
     state_store = MacroStateStore(client=redis_client)
 
     return SlowLoopComponents(

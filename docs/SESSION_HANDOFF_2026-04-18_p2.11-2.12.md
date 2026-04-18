@@ -135,3 +135,50 @@ a462756 feat: Phase 2.11 pages — Overview / Macro / Scout / LLMStats / Logs
 - smoke 1회: MS-01 에서 `docker cp scripts slow-loop:/tmp/ && docker exec slow-loop sh -c "cd /tmp && python -m scripts.smoke_slow_loop_once"`
 - macro/shadow 확인: `docker exec postgres psql ... -c "SELECT macro_run_id, gate, cost_usd, jsonb_pretty(metadata_json->'shadow') FROM macro_runs ORDER BY generated_at DESC LIMIT 1"`
 - UI: Cloudflared 터널 URL 또는 `http://192.168.31.195/` (내부)
+
+---
+
+## Addendum — LLM Features / Shadow 모델 정정 (같은 날 저녁)
+
+사용자가 LLM Stats 페이지 Features 표의 엉터리 매핑 발견 후 연쇄 수정.
+
+### 1. `LLMConfig` drift — Features 표가 실제 라우팅과 어긋남
+
+- `infra/config.LLMConfig` 가 `env_prefix="LITELLM_MODEL_"` 로 v2 LiteLLM 시절 설정. 기본값이 `reasoning: deepseek/deepseek-reasoner`, `fast: ollama/exaone3.5:32b` 로 고정
+- 하지만 v3 slow_loop/briefing 은 langchain-openai/anthropic 직접 호출이라 `ANTHROPIC_MODEL` / `DEEPSEEK_MODEL` env 사용 → UI 가 Macro/Briefing 을 deepseek-reasoner 로 잘못 표시
+- **수정**: `dashboard/routers/llm_stats._service_model(service, cfg)` 가 service 별 실제 env 를 source-of-truth 로 해석. provider 라벨 (vLLM / DeepSeek / Anthropic) 추가. macro_shadow feature 도 테이블에 노출
+- **news_analysis 기본값**: `ollama/exaone3.5:32b` → `LGAI-EXAONE/EXAONE-4.0-32B-AWQ` (compose 기본값과 동기)
+- frequency 문구 현실 반영: "장 시작 전" / "매 시간" → "평일 08:30~14:30 매시 30분 (7회/일)"
+
+### 2. DeepSeek 모델 identifier 계보 정정
+
+당초 "reasoner = reasoning tier" 로 단순 매칭해서 shadow 를 `deepseek-reasoner` 로 전환했으나, DeepSeek API 의 identifier 의미가 달랐음:
+
+| Identifier | 실제 매핑 | Opus 대응 여부 |
+|-----------|----------|-----------------|
+| `deepseek-chat` | **V3.2 (최신 flagship, 하이브리드 thinking)** | **✓ (apples-to-apples)** |
+| `deepseek-reasoner` | R1 (구세대 reasoning 전용) | 스키마 literal 위반 관찰 (`category="volatility"` 허용값 밖) |
+| `deepseek-v3.1` / `v3` | 구버전 (하위 호환) | - |
+
+`-chat` 이 항상 최신 flagship 을 가리키는 alias 라 이미 V3.2 로 연결되고 있었음. 처음 `strong` tier 를 shadow 에 재사용했던 구성이 결과적으로 정답이었음.
+
+### 3. DeepSeek reasoner 도입 시도 & 롤백
+
+- `_DeepSeekReasonerOpenAI` wrapper 추가 (tool_choice 미지원 → `method="json_mode"` 기본). wrapper 자체는 향후 override 대비 유지
+- `DEEPSEEK_SHADOW_MODEL` env 신설 (기본 `deepseek-chat`). `=deepseek-reasoner` 로 override 하면 json_mode + reasoner wrapper 자동 선택
+- compose 에 env pass-through
+
+### 최종 Shadow 구성 (smoke 재검증)
+
+- Primary: `claude-opus-4-7` (Anthropic) — open/0.75 판단 → post-processor high_volatility override 로 closed
+- Shadow: `deepseek-chat` = **V3.2 flagship** — open/0.75 판단, latency/cost 훨씬 저렴
+- DB 저장 확인: `metadata_json->'shadow'` 에 model_used=deepseek-chat, gate=open, size_multiplier=0.75
+
+### 추가 커밋
+
+```
+d752b96 fix(slow_loop): Shadow default 를 deepseek-reasoner → deepseek-chat (V3.2 flagship)
+bd6ad33 fix(slow_loop): DeepSeek reasoner(R1) 는 tool_choice 미지원 → json_mode
+566cc3d feat(slow_loop): Macro Shadow 를 DeepSeek chat → reasoner (R1) 로 전환 (후속 롤백)
+d83c246 fix(dashboard): LLM Features model/provider 실제 env 기반 해석
+```

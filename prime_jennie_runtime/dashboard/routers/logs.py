@@ -70,10 +70,16 @@ async def get_logs(
             logger.warning("Error fetching logs: %s", e)
             raise HTTPException(status_code=500, detail=str(e)) from e
 
+    # Loki 는 label set 별로 여러 `result` 스트림을 돌려준다 (예: stream=stdout /
+    # stream=stderr). 각 스트림은 자체 정렬돼 있지만 그대로 concat 하면 스트림 경계
+    # 에서 시각 순서가 섞인다 — BACKWARD 방향 기준 전역 정렬 후 limit 적용.
     logs: list[dict] = []
     for result in data.get("data", {}).get("result", []):
         for val in result.get("values", []):
             logs.append({"timestamp": val[0], "message": val[1]})
+    logs.sort(key=lambda x: int(x["timestamp"]), reverse=True)
+    if limit and len(logs) > limit:
+        logs = logs[:limit]
     return {"logs": logs}
 
 

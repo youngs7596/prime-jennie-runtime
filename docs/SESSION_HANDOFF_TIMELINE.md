@@ -177,23 +177,21 @@ real 전환 시 KOSPI 20d vol 58% 상태에서 auto_override 가 계속 closed �
 
 ---
 
-## 7. (핸드오프 없음) 2026-04-18 22:xx — promtail 재회귀 진단 + 배포 파이프라인 구축
+## 7. `SESSION_HANDOFF_2026-04-18_deploy_and_docs.md` — promtail 재회귀 재수정 + 배포 파이프라인 + 패밀리 docs + systemd
 
-**시점**: 2026-04-18 22:00 ~ 22:40 (logs_and_vllm_fp8 세션 42분 후)  
+**시점**: 2026-04-18 22:00 ~ 자정 경 (logs_and_vllm_fp8 세션 42분 후)  
 **팀**: lead 단독  
-**형식**: 핸드오프 문서 없이 commit 메시지 + 메모리 기록  
-**선행**: 6번 세션의 promtail fix
+**선행**: 6번 세션의 promtail fix 주장  
+**운영 영향**: promtail drop 46/s → 0, push-to-main 자동 배포, 패밀리 4 리포 문서 drift 정리, 재부팅 후 runner 자동 기동
 
-발견:
-- 6번 세션의 promtail `keep` relabel 필터가 promtail 3.3.2 + docker_sd 환경에서 실제로는 작동 안 함 — `promtail_dropped_entries_total{reason="ingester_error"}` 초당 46건 지속. 원인은 `"at least one label pair is required per stream"` (v2 restart loop 컨테이너 tail 이 멈추지 않아 label 없는 stream push)
-- `docker_sd_configs.filters` (Docker API 레벨 필터) 로 교체 + relabel keep 는 `^...$` anchored 로 안전망 유지 → drop 0/s
-- MS-01 이 `git fetch` 후에도 commit 2개 뒤쳐져 있었음 → `git pull` 로 동기화
+핵심:
+- 6번 세션의 promtail `keep` relabel 이 promtail 3.3.2 + docker_sd 환경에서 실제로는 작동 안 함. Loki 400 응답은 `"at least one label pair is required per stream"` (handoff 6 의 `reject_old_samples` 진단은 오류) → `docker_sd_configs.filters` (Docker API 레벨) 로 교체, relabel keep 는 `^...$` 로 안전망 유지
+- 신규 GitHub Actions self-hosted runner `~/actions-runner-v3` 등록 + `.github/workflows/deploy.yml` — push to main → MS-01 에서 `git pull --ff-only` + `docker compose --profile full up -d --build`. `--profile full` 누락 시 16 서비스 중 postgres/redis 2개만 touch
+- v2 legacy 12 컨테이너 재발견 (real_mode 세션에서 퇴역했지만 재부팅 or 수동 up 으로 부활). 다시 `docker update --restart=no + stop + rm` 로 일괄 제거
+- 패밀리 4 리포 (runtime/control-ui/minyoung-mah, v2 제외) docs 6건 신규/재작성
+- Runner systemd 영구화 (`sudo ./svc.sh install youngs75 && sudo ./svc.sh start`). docker-compose restart policy `unless-stopped` 이 16 서비스에 적용되어 runtime / control-ui 용 별도 systemd unit 불필요
 
-동시 진행:
-- GitHub Actions self-hosted runner `~/actions-runner-v3` 신규 등록 (v2 전용 runner 와 병렬). `.github/workflows/deploy.yml` 작성 — push to main → MS-01 에서 `git pull --ff-only` + `docker compose --profile full up -d --build`
-- MS-01 배포 구조 + SSH alias (`ssh prime-jennie`) 를 auto-memory 에 기록
-
-커밋: `8be4786 fix(promtail)` + `7e4ac44 ci(deploy)` + `f43015b ci(profile)`.
+커밋: `8be4786` (promtail) + `7e4ac44` (workflow) + `f43015b` (profile) + `ddaeb3a` (docs 4종) + `4cf1c9d` (이 핸드오프). control-ui `3ca32cd`, minyoung-mah `167fb1f`.
 
 ---
 

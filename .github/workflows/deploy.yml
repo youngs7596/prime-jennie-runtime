@@ -1,0 +1,57 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'LICENSE'
+      - '.github/ISSUE_TEMPLATE/**'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Pull latest and deploy
+        working-directory: /home/youngs75/projects/prime-jennie-runtime
+        env:
+          COMPOSE_PROJECT_NAME: prime-jennie-runtime
+          DOCKER_BUILDKIT: "1"
+          COMPOSE_DOCKER_CLI_BUILD: "1"
+        run: |
+          set -euo pipefail
+          echo "==> Fetching origin"
+          git fetch --quiet origin main
+          LOCAL_BEFORE=$(git rev-parse HEAD)
+          echo "Before: $(git log --oneline -1)"
+
+          # 로컬 작업 트리에 커밋 안 된 변경이 있으면 stash (초기 전환 방어막)
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "==> Stashing local changes"
+            git stash push -u -m "ci-auto-stash-${GITHUB_RUN_ID}"
+          fi
+
+          git pull --ff-only origin main
+          echo "After:  $(git log --oneline -1)"
+
+          if [ "$LOCAL_BEFORE" = "$(git rev-parse HEAD)" ]; then
+            echo "==> No new commits, skipping build"
+            exit 0
+          fi
+
+          echo "==> docker compose up -d --build"
+          docker compose up -d --build
+
+          echo "==> Pruning dangling images"
+          docker image prune -f || true
+
+          echo ""
+          echo "=== Deploy complete ==="
+          docker compose ps

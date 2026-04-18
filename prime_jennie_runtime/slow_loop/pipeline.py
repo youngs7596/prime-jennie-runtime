@@ -147,6 +147,7 @@ class SlowLoopComponents:
     observer: Observer
     db_engine: Any = None  # AsyncEngine | None — macro_runs/scout_runs 기록용
     shadow_orchestrator: Any = None  # Orchestrator | None — Macro 를 DeepSeek 로 shadow 평가
+    redis_client: Any = None  # aioredis.Redis | None — LLM stats 누적용 (llm:stats:{date}:{svc})
 
 
 def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
@@ -320,6 +321,7 @@ async def run_slow_loop(
         news_digest_ref=getattr(macro_ctx, "news_digest_ref", None),
         prompt_chars=macro_prompt_chars,
         shadow_result=shadow_payload_for_db,
+        redis_client=comp.redis_client,
     )
 
     # 상태 저장
@@ -408,6 +410,7 @@ async def run_slow_loop(
         scout_step_result=scout_result.state["scout"],
         prompt_chars=scout_prompt_chars,
         context_snapshot=scout_context_snapshot,
+        redis_client=comp.redis_client,
     )
 
     await observer.emit(

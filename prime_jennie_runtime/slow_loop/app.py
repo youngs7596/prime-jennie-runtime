@@ -261,6 +261,7 @@ def _build_slow_loop_components(
         observer=observer,
         db_engine=db_engine,
         shadow_orchestrator=shadow_orchestrator,
+        redis_client=redis_client,
     )
 
 

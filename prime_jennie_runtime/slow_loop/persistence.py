@@ -23,6 +23,7 @@ from prime_jennie_runtime.council_logging import (
     CouncilStepOutput,
     save_council_run,
 )
+from prime_jennie_runtime.infra.llm_stats import record_llm_call
 from prime_jennie_runtime.slow_loop.macro.post_processor import MacroPostResult
 from prime_jennie_runtime.slow_loop.scout.schemas import ScoutOutput, ScreeningCandidate
 
@@ -100,6 +101,23 @@ def _resolve_cost(
     return None
 
 
+def _usage_tokens(
+    meta: dict[str, Any],
+    prompt_chars: int | None,
+    output_chars: int,
+) -> tuple[int, int]:
+    """(input_tokens, output_tokens) 추정. meta[usage] 실측이 있으면 우선."""
+    usage = meta.get("usage")
+    if isinstance(usage, dict):
+        in_tok = usage.get("input_tokens")
+        out_tok = usage.get("output_tokens")
+        if isinstance(in_tok, int) and isinstance(out_tok, int):
+            return in_tok, out_tok
+    in_est = _estimate_tokens(prompt_chars) if prompt_chars is not None else 0
+    out_est = _estimate_tokens(output_chars)
+    return in_est, out_est
+
+
 def _role_metadata(pipeline_step_result: Any) -> dict[str, Any]:
     """PipelineStepResult.outputs[0].metadata 추출 (model/cost 등)."""
     try:
@@ -132,10 +150,9 @@ async def persist_macro_run(
     news_digest_ref: str | None = None,
     prompt_chars: int | None = None,
     shadow_result: dict[str, Any] | None = None,
+    redis_client: Any = None,
 ) -> None:
     """Macro 결과 1건을 macro_runs 에 upsert."""
-    if engine is None:
-        return
     meta = _role_metadata(macro_step_result)
     model_name = meta.get("model") or meta.get("model_used") or _tier_model("reasoning")
     # Output char count — reasoning + JSON risks 등
@@ -143,6 +160,11 @@ async def persist_macro_run(
         len(getattr(r, "description", "") or "") for r in post.output.top_risks
     )
     cost = _resolve_cost(meta, model_name, prompt_chars, out_chars)
+    if engine is None:
+        await _record_macro_llm_stats(
+            redis_client, meta, prompt_chars, out_chars, cost, shadow_result, generated_at
+        )
+        return
     step = CouncilStepOutput(
         name="macro_gate",
         output={},
@@ -196,6 +218,49 @@ async def persist_macro_run(
         except Exception:
             logger.exception("persist_macro_run shadow merge failed: id=%s", macro_run_id)
 
+    await _record_macro_llm_stats(
+        redis_client, meta, prompt_chars, out_chars, cost, shadow_result, generated_at
+    )
+
+
+async def _record_macro_llm_stats(
+    redis_client: Any,
+    meta: dict[str, Any],
+    prompt_chars: int | None,
+    out_chars: int,
+    cost: float | None,
+    shadow_result: dict[str, Any] | None,
+    generated_at: datetime,
+) -> None:
+    """Macro + (optional) shadow 사용량을 Redis 에 누적."""
+    if redis_client is None:
+        return
+    in_tok, out_tok = _usage_tokens(meta, prompt_chars, out_chars)
+    await record_llm_call(
+        redis_client,
+        service="macro",
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        cost_usd=cost,
+        timestamp=generated_at,
+    )
+    if shadow_result is None or "error" in shadow_result:
+        return
+    shadow_cost = shadow_result.get("cost_usd_estimated")
+    shadow_in = shadow_result.get("tokens_in")
+    shadow_out = shadow_result.get("tokens_out")
+    if not isinstance(shadow_in, int) or not isinstance(shadow_out, int):
+        # Shadow pipeline 은 별도 usage metadata 를 payload 에 싣지 않아 primary 기준 추정.
+        shadow_in, shadow_out = in_tok, out_tok
+    await record_llm_call(
+        redis_client,
+        service="macro_shadow",
+        input_tokens=shadow_in,
+        output_tokens=shadow_out,
+        cost_usd=shadow_cost,
+        timestamp=generated_at,
+    )
+
 
 async def persist_scout_run(
     engine: AsyncEngine | None,
@@ -207,6 +272,7 @@ async def persist_scout_run(
     candidates_count: int | None = None,
     prompt_chars: int | None = None,
     context_snapshot: dict[str, Any] | None = None,
+    redis_client: Any = None,
 ) -> None:
     """Scout 결과 1건을 scout_runs 에 upsert.
 
@@ -215,14 +281,24 @@ async def persist_scout_run(
     재현 시 같은 코드 × 같은 입력을 복원하는 primary key — migration 012 의
     scout_runs.context_snapshot_json 컬럼.
     """
-    if engine is None:
-        return
     meta = _role_metadata(scout_step_result)
     model_name = meta.get("model") or meta.get("model_used") or _tier_model("strong")
     code_text = scout_out.screening_code
     code_hash = hashlib.sha256(code_text.encode("utf-8")).hexdigest()
     out_chars = len(code_text) + len(scout_out.hypothesis or "")
     cost = _resolve_cost(meta, model_name, prompt_chars, out_chars)
+    if engine is None:
+        if redis_client is not None:
+            in_tok, out_tok = _usage_tokens(meta, prompt_chars, out_chars)
+            await record_llm_call(
+                redis_client,
+                service="scout",
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                cost_usd=cost,
+                timestamp=generated_at,
+            )
+        return
     metadata_json = {
         "hypothesis": scout_out.hypothesis,
         "factor_weights": scout_out.factor_weights,
@@ -273,6 +349,17 @@ async def persist_scout_run(
             await conn.execute(sql, params)
     except Exception:
         logger.exception("persist_scout_run failed: id=%s", scout_run_id)
+
+    if redis_client is not None:
+        in_tok, out_tok = _usage_tokens(meta, prompt_chars, out_chars)
+        await record_llm_call(
+            redis_client,
+            service="scout",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cost_usd=cost,
+            timestamp=generated_at,
+        )
 
 
 async def persist_screening_candidates(

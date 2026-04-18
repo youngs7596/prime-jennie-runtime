@@ -89,6 +89,10 @@ def build_claude_llm_caller(
             logger.warning("model.ainvoke 가 없음 — briefing LLM skip")
             return None
         response = await invoke_fn(messages, max_tokens=max_tokens)
+        # TODO(llm-stats): briefing 호출도 `prime_jennie_runtime.infra.llm_stats.record_llm_call`
+        # 로 service="briefing" 누적. 현재 jobs/app.py 가 llm_caller=None 으로 주입해
+        # dead path 라 후행 작업 — llm_caller 주입 활성화 시 response.usage_metadata 로
+        # tokens/cost 추출 후 기록.
         content = getattr(response, "content", None)
         if isinstance(content, str):
             return content

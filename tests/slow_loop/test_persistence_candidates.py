@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import fakeredis.aioredis
 import pytest
 
 from prime_jennie_runtime.slow_loop.persistence import (
@@ -117,6 +118,50 @@ async def test_persist_scout_run_serializes_context_snapshot():
     assert ctx_payload["universe_hash"] == "abcdef"
     assert ctx_payload["macro_run_id"] == "mr_20260420_0800_scheduled"
     assert ctx_payload["news_scores"]["005930"]["score"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_persist_scout_run_records_llm_stats_to_redis():
+    """engine + redis_client 모두 주어지면 scout service 키에 누적."""
+    conn = _FakeConn()
+    engine = _FakeEngine(conn)
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    kst = timezone(timedelta(hours=9))
+
+    await persist_scout_run(
+        engine,
+        scout_run_id="scout_20260420_0830",
+        generated_at=datetime(2026, 4, 20, 8, 30, tzinfo=kst),
+        scout_out=_scout_out(),
+        scout_step_result=None,
+        prompt_chars=2000,
+        redis_client=redis,
+    )
+
+    data = await redis.hgetall("llm:stats:2026-04-20:scout")
+    assert data["calls"] == "1"
+    assert int(data["tokens_in"]) == 1000  # 2000 chars // 2
+    assert int(data["tokens_out"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_persist_scout_run_records_stats_even_when_engine_none():
+    """DB 미구성 smoke 환경에서도 Redis 통계는 누적되어야 함."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    kst = timezone(timedelta(hours=9))
+
+    await persist_scout_run(
+        None,
+        scout_run_id="scout_x",
+        generated_at=datetime(2026, 4, 20, 8, 30, tzinfo=kst),
+        scout_out=_scout_out(),
+        scout_step_result=None,
+        prompt_chars=1000,
+        redis_client=redis,
+    )
+
+    data = await redis.hgetall("llm:stats:2026-04-20:scout")
+    assert data["calls"] == "1"
 
 
 @pytest.mark.asyncio

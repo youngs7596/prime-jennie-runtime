@@ -267,6 +267,23 @@ SEEDS: list[SeedJob] = [
         cron="0 17 * * 1-5",
         kwargs={},
     ),
+    # Phase 2.13-1 — WSJ/Bloomberg/Reuters RSS 크롤러. 2시간 간격.
+    SeedJob(
+        id="job_worker.global_news_crawl",
+        owner="job_worker",
+        handler_key="global_news_crawl",
+        cron="0 */2 * * *",
+        kwargs={},
+    ),
+    # Phase 2.13-1 — 일일 digest (LLM 요약). 08:00 개장 전 + 12:30 점심, 평일.
+    # Macro Council cron (40 7,11 * * 1-5) 보다 약간 앞서 돌아 fresh digest 를 남긴다.
+    SeedJob(
+        id="job_worker.global_news_digest",
+        owner="job_worker",
+        handler_key="global_news_digest",
+        cron="30 7,11 * * 1-5",
+        kwargs={"lookback_hours": 24},
+    ),
 ]
 
 

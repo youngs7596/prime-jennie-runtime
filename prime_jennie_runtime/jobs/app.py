@@ -29,6 +29,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
+from prime_jennie_runtime.news_pipeline_global.pipeline import (
+    build_digest as global_news_build_digest,
+)
+from prime_jennie_runtime.news_pipeline_global.pipeline import (
+    crawl_cycle as global_news_crawl_cycle,
+)
 from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
     NaverNewsCrawler,
 )
@@ -79,6 +85,7 @@ def build_handlers(
 
     새 job 포팅 시 여기에 등록. kwargs 는 scheduled_jobs.kwargs 에서 옴.
     """
+
     async def h_cleanup_old_data(days: int = 365) -> None:
         await cleanup_old_data(pool, days=days)
 
@@ -139,9 +146,7 @@ def build_handlers(
     async def h_daily_asset_snapshot() -> None:
         await daily_asset_snapshot(pool, http, kis_gateway_url)
 
-    async def h_sync_positions(
-        dry_run: bool = True, stop_loss_pct: float = 6.0
-    ) -> None:
+    async def h_sync_positions(dry_run: bool = True, stop_loss_pct: float = 6.0) -> None:
         await sync_positions(
             pool,
             http,
@@ -164,14 +169,16 @@ def build_handlers(
         await collect_minute_chart(pool, http, kis_gateway_url, top_n=top_n)
 
     async def h_collect_full_market_data(top_n: int = 300, days: int = 30) -> None:
-        await collect_full_market_data(
-            pool, http, kis_gateway_url, top_n=top_n, days=days
-        )
+        await collect_full_market_data(pool, http, kis_gateway_url, top_n=top_n, days=days)
 
     async def h_daily_briefing_report() -> None:
-        await daily_briefing_report(
-            engine, http, telegram_config=telegram_config, llm_caller=None
-        )
+        await daily_briefing_report(engine, http, telegram_config=telegram_config, llm_caller=None)
+
+    async def h_global_news_crawl() -> None:
+        await global_news_crawl_cycle(pool, http)
+
+    async def h_global_news_digest(lookback_hours: int = 24) -> None:
+        await global_news_build_digest(pool, http, lookback_hours=lookback_hours)
 
     return {
         "cleanup_old_data": h_cleanup_old_data,
@@ -199,6 +206,8 @@ def build_handlers(
         "collect_minute_chart": h_collect_minute_chart,
         "collect_full_market_data": h_collect_full_market_data,
         "daily_briefing_report": h_daily_briefing_report,
+        "global_news_crawl": h_global_news_crawl,
+        "global_news_digest": h_global_news_digest,
     }
 
 
@@ -226,17 +235,14 @@ async def run() -> None:
         )
         stack.push_async_callback(pool.close)
 
-        kis_gateway_url = os.environ.get(
-            "KIS_GATEWAY_URL", cfg.kis.gateway_url
-        ).rstrip("/")
+        kis_gateway_url = os.environ.get("KIS_GATEWAY_URL", cfg.kis.gateway_url).rstrip("/")
 
         engine = create_engine(cfg.postgres)
         stack.push_async_callback(engine.dispose)
 
         telegram_cfg: TelegramConfig | None = (
             cfg.telegram
-            if (cfg.telegram.bot_token and cfg.telegram.chat_id)
-            or cfg.telegram.dry_run
+            if (cfg.telegram.bot_token and cfg.telegram.chat_id) or cfg.telegram.dry_run
             else None
         )
 

@@ -250,9 +250,11 @@ class RealKorMacroNewsFeeder:
 
 
 class RealWsjDigestFeeder:
-    """단계 1 — us_market_daily + Redis macro snapshot 기반 factual digest.
+    """Phase 2.13-1: `global_macro_news_digests` (job_worker 가 쌓는 LLM 요약) 읽기.
 
-    digest_id 는 본문 내용 SHA-256 (재현성). 실 WSJ 본문 요약은 후속 크롤러.
+    최근 36h 내 digest 가 없으면 us_market_daily + Redis snapshot 으로 factual
+    fallback (Phase 2.12 단계 1 동작). Macro 게이트 입력은 unavailable 보다
+    factual 이 낫다.
     """
 
     def __init__(self, engine: AsyncEngine, redis_client: aioredis.Redis) -> None:
@@ -260,6 +262,31 @@ class RealWsjDigestFeeder:
         self._redis = redis_client
 
     async def fetch(self, as_of: datetime) -> tuple[str, str, str]:
+        digest = await self._fetch_digest()
+        if digest is not None:
+            return digest["digest_id"], digest["summary"], digest["headlines"]
+        return await self._fallback(as_of)
+
+    async def _fetch_digest(self) -> dict[str, str] | None:
+        async with self._engine.begin() as conn:
+            res = await conn.execute(
+                text(
+                    "SELECT digest_id, summary, headlines "
+                    "FROM global_macro_news_digests "
+                    "WHERE built_at >= NOW() - INTERVAL '36 hours' "
+                    "ORDER BY digest_date DESC LIMIT 1"
+                )
+            )
+            row = res.mappings().one_or_none()
+        if row is None:
+            return None
+        return {
+            "digest_id": row["digest_id"],
+            "summary": row["summary"],
+            "headlines": row["headlines"],
+        }
+
+    async def _fallback(self, as_of: datetime) -> tuple[str, str, str]:
         snap = await _load_macro_snapshot(self._redis, as_of)
         async with self._engine.begin() as conn:
             res = await conn.execute(
@@ -280,9 +307,9 @@ class RealWsjDigestFeeder:
         vix_regime = snap.get("vix_regime", "unknown")
         vix_val = _as_float(snap.get("vix"), 0.0)
         summary = (
-            f"US 장세 요약 — SP500/NASDAQ/SOX/NVDA 등 최신 종가 기반. "
+            f"US 장세 요약 (digest fallback) — SP500/NASDAQ/SOX/NVDA 등 최신 종가 기반. "
             f"VIX {vix_val:.2f} (regime={vix_regime}). "
-            f"상세 매크로 이벤트는 B3 후속 WSJ 크롤러 배선 후 보강."
+            f"global_macro_news_digests 비어있음."
         )
         headlines = "\n".join(us_lines) if us_lines else "- (US market data unavailable)"
         content = f"{summary}\n{headlines}\n{as_of.date().isoformat()}"

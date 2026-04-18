@@ -47,6 +47,7 @@ screening = [
 news = [
     "beautifulsoup4>=4.12",
     "qdrant-client>=1.9",
+    "feedparser>=6.0",  # WSJ/Bloomberg/Reuters RSS (Phase 2.13-1)
 ]
 telegram = [
     "python-telegram-bot>=21.0",

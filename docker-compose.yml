@@ -359,6 +359,12 @@ services:
       # macro_collect_global/korea 는 BOK ECOS 키가 있을 때만 실제 호출.
       # 비어 있으면 jobs/app.py 가 None 으로 전달 → fallback 경로만 동작.
       BOK_ECOS_API_KEY: ${BOK_ECOS_API_KEY:-}
+      DART_API_KEY: ${DART_API_KEY:-}
+      # Phase 2.13-1: global_news_digest 의 DeepSeek 요약. 없으면 fallback 동작.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      MACRO_DIGEST_SUMMARIZER_MODEL: ${MACRO_DIGEST_SUMMARIZER_MODEL:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:

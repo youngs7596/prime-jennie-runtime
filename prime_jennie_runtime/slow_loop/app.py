@@ -200,15 +200,29 @@ def _build_slow_loop_components(
             resilience=default_resilience(),
         )
 
-    # TODO(phase-2.9-slice3): feeder 를 Track E 실제 구현으로 교체
-    # (news_scores: news_pipeline_kor, market_snapshot: KIS/legacy_daily_prices 등)
-    scout_builder = ScoutContextBuilder(
-        universe=StubUniverseFeeder(),
-        news=StubNewsScoreFeeder(),
-        sector=StubSectorMomentumFeeder(),
-        market=StubMarketSummaryFeeder(),
-    )
-    # Real feeders (Phase 2.12 B1~B3). DB engine 없을 때는 stub 으로 fallback.
+    # Real feeders (Phase 2.12 Track D). DB engine 없을 때는 stub 으로 fallback.
+    if db_engine is not None:
+        from prime_jennie_runtime.slow_loop.scout.feeders.real import (
+            RealMarketSummaryFeeder,
+            RealNewsScoreFeeder,
+            RealSectorMomentumFeeder,
+            RealUniverseFeeder,
+        )
+
+        scout_builder = ScoutContextBuilder(
+            universe=RealUniverseFeeder(engine=db_engine),
+            news=RealNewsScoreFeeder(engine=db_engine),
+            sector=RealSectorMomentumFeeder(engine=db_engine),
+            market=RealMarketSummaryFeeder(engine=db_engine),
+        )
+    else:
+        scout_builder = ScoutContextBuilder(
+            universe=StubUniverseFeeder(),
+            news=StubNewsScoreFeeder(),
+            sector=StubSectorMomentumFeeder(),
+            market=StubMarketSummaryFeeder(),
+        )
+
     if db_engine is not None:
         from prime_jennie_runtime.slow_loop.macro.feeders.real import (
             RealKorMacroNewsFeeder,

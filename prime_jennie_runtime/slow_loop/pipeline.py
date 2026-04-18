@@ -257,7 +257,7 @@ async def run_slow_loop(
     if shadow_payload is not None and "error" not in shadow_payload:
         try:
             shadow_res = shadow_payload["result"]
-            shadow_raw: MacroGateOutput | None = shadow_res.state["macro_gate_shadow"].payload_as(
+            shadow_raw: MacroGateOutput | None = shadow_res.state["macro_gate"].payload_as(
                 MacroGateOutput
             )
             if shadow_raw is not None:

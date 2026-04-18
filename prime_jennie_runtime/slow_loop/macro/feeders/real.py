@@ -113,8 +113,8 @@ async def _fetch_sector_drops(engine: AsyncEngine, as_of: datetime) -> list[Sect
     async with engine.begin() as conn:
         res = await conn.execute(
             text(
-                "SELECT DISTINCT trade_date FROM daily_prices "
-                "WHERE trade_date <= :t ORDER BY trade_date DESC LIMIT 1"
+                "SELECT DISTINCT price_date FROM daily_prices "
+                "WHERE price_date <= :t ORDER BY price_date DESC LIMIT 1"
             ),
             {"t": target},
         )
@@ -127,7 +127,7 @@ async def _fetch_sector_drops(engine: AsyncEngine, as_of: datetime) -> list[Sect
                 "SELECT sm.sector_group AS sector, AVG(dp.change_pct) AS avg_pct "
                 "FROM daily_prices dp "
                 "JOIN stock_masters sm ON sm.stock_code = dp.stock_code "
-                "WHERE dp.trade_date = :d AND dp.change_pct IS NOT NULL "
+                "WHERE dp.price_date = :d AND dp.change_pct IS NOT NULL "
                 "AND sm.sector_group IS NOT NULL "
                 "GROUP BY sm.sector_group "
                 "HAVING AVG(dp.change_pct) <= -2.0 "

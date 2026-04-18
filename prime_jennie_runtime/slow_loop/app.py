@@ -112,14 +112,19 @@ def _try_build_tiered_router() -> Any | None:
     # DeepSeek 의 Scout 용 chat tier 와 별도.
     deepseek_shadow_model = os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-reasoner")
 
-    # DeepSeek 은 OpenAI 의 json_schema response_format 을 지원하지 않고 function_calling
-    # 만 지원. minyoung-mah Orchestrator 가 `model.with_structured_output(schema)` 를
-    # 호출할 때 langchain-openai 기본값(json_schema)을 쓰면 HTTP 400 으로 실패하므로,
-    # ChatOpenAI subclass 에서 method 를 강제.
+    # DeepSeek chat: function_calling 만 지원 (json_schema response_format 미지원).
     class _DeepSeekChatOpenAI(ChatOpenAI):
         def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
             return super().with_structured_output(
                 schema, method=method or "function_calling", **kwargs
+            )
+
+    # DeepSeek reasoner (R1): tool_choice/function_calling 미지원 → json_mode 로.
+    # 프롬프트에 JSON 스키마가 이미 명시되어 있어야 함 (Macro 프롬프트는 그렇게 구성됨).
+    class _DeepSeekReasonerOpenAI(ChatOpenAI):
+        def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
+            return super().with_structured_output(
+                schema, method=method or "json_mode", **kwargs
             )
 
     strong = _DeepSeekChatOpenAI(
@@ -134,12 +139,11 @@ def _try_build_tiered_router() -> Any | None:
         api_key=anthropic_key,
     )
     # Shadow = DeepSeek R1 계열 (reasoner). Opus 와 reasoning 동급 비교.
-    # deepseek-reasoner 도 temperature 파라미터를 공식 문서상 무시하지만, 설정해도 오류 없음.
-    shadow_reasoning = _DeepSeekChatOpenAI(
+    # reasoner 는 temperature 설정 무시하지만 오류는 없음.
+    shadow_reasoning = _DeepSeekReasonerOpenAI(
         model=deepseek_shadow_model,
         api_key=deepseek_key,
         base_url=deepseek_base,
-        temperature=0.1,
     )
     return {
         "strong": strong,

@@ -15,7 +15,8 @@ authors = [
     { name = "youngs75", email = "youngs75.kim@gmail.com" },
 ]
 dependencies = [
-    # Harness
+    # Harness — 0.1.2+ 에서 RoleInvocationResult.metadata["usage"] 실측 토큰 전파.
+    # 0.1.0/0.1.1 도 코드 호환 (없으면 char 기반 추정 fallback). PyPI publish 전까진 0.1.0+.
     "minyoung-mah>=0.1.0",
     # Core
     "pydantic>=2.6,<3",

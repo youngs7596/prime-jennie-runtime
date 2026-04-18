@@ -224,7 +224,19 @@ async def run_slow_loop(
                 role_name="macro_gate_shadow",
                 user_request="daily macro gate (shadow)",
             )
-            return {"result": res, "duration_ms": int((time.monotonic() - t0) * 1000)}
+            # metadata (usage 포함 — minyoung-mah 0.1.2+) 를 함께 실어 cost 계산에 활용.
+            shadow_meta: dict[str, Any] = {}
+            try:
+                step = res.state["macro_gate"]
+                if step.outputs:
+                    shadow_meta = dict(step.outputs[0].metadata or {})
+            except Exception:
+                shadow_meta = {}
+            return {
+                "result": res,
+                "duration_ms": int((time.monotonic() - t0) * 1000),
+                "metadata": shadow_meta,
+            }
         except Exception as e:
             logger.warning("macro shadow failed: %s", e)
             return {"error": f"{type(e).__name__}: {e}"}
@@ -263,14 +275,16 @@ async def run_slow_loop(
             if shadow_raw is not None:
                 shadow_cost_est = None
                 try:
-                    from .persistence import _estimate_cost, _tier_model
+                    from .persistence import _resolve_cost, _tier_model
 
-                    shadow_model_name = _tier_model("shadow_reasoning")  # DeepSeek R1 (reasoner)
-                    shadow_cost_est = _estimate_cost(
-                        shadow_model_name,
-                        macro_prompt_chars,
-                        len(shadow_raw.reasoning or "")
-                        + sum(len(r.description or "") for r in shadow_raw.top_risks),
+                    shadow_model_name = _tier_model("shadow_reasoning")  # DeepSeek V3.2 flagship
+                    # shadow_payload 에 metadata (usage 포함 가능) 가 실려 있으면 우선 사용.
+                    shadow_meta = shadow_payload.get("metadata") or {}
+                    shadow_out_chars = len(shadow_raw.reasoning or "") + sum(
+                        len(r.description or "") for r in shadow_raw.top_risks
+                    )
+                    shadow_cost_est = _resolve_cost(
+                        shadow_meta, shadow_model_name, macro_prompt_chars, shadow_out_chars
                     )
                     shadow_payload_for_db = {
                         "model_used": shadow_model_name,

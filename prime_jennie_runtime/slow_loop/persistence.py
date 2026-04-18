@@ -28,9 +28,11 @@ from prime_jennie_runtime.slow_loop.scout.schemas import ScoutOutput
 
 logger = logging.getLogger(__name__)
 
-# Model pricing per 1M tokens (USD). upstream orchestrator 가 실제 usage 를
-# RoleInvocationResult 에 넘겨주지 않아, prompt+output 길이로 거칠게 추정한다.
-# 정확도 ±20% 수준. 정확 비용은 Anthropic/DeepSeek usage report 에서 확인.
+# Model pricing per 1M tokens (USD).
+# minyoung-mah >= 0.1.2 는 RoleInvocationResult.metadata["usage"] 에 실측 token 수
+# (input/output/total) 를 싣는다 — Anthropic/OpenAI/DeepSeek 표준 경로. 이 경우
+# _real_cost 로 정확 비용 계산. 0.1.1 이하 provider 거나 mock 인 경우 prompt+output
+# 문자수 기반 추정(±20%) 으로 fallback.
 _PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-4-7": (15.0, 75.0),
     "claude-opus-4": (15.0, 75.0),
@@ -66,6 +68,36 @@ def _estimate_cost(model: str | None, input_chars: int, output_chars: int) -> fl
     input_tok = _estimate_tokens(input_chars)
     output_tok = _estimate_tokens(output_chars)
     return input_tok * rates[0] / 1e6 + output_tok * rates[1] / 1e6
+
+
+def _real_cost(model: str | None, usage: dict[str, Any]) -> float | None:
+    """minyoung-mah 0.1.2+ usage metadata 로 정확 비용 계산."""
+    if model is None:
+        return None
+    rates = _PRICING.get(model)
+    if rates is None:
+        return None
+    input_tok = usage.get("input_tokens")
+    output_tok = usage.get("output_tokens")
+    if not isinstance(input_tok, int) or not isinstance(output_tok, int):
+        return None
+    return input_tok * rates[0] / 1e6 + output_tok * rates[1] / 1e6
+
+
+def _resolve_cost(
+    meta: dict[str, Any], model: str | None, prompt_chars: int | None, output_chars: int
+) -> float | None:
+    """cost 우선순위: meta[cost_usd] 직접값 → meta[usage] 실측 → char 기반 추정."""
+    if meta.get("cost_usd") is not None:
+        return meta["cost_usd"]
+    usage = meta.get("usage")
+    if isinstance(usage, dict):
+        cost = _real_cost(model, usage)
+        if cost is not None:
+            return cost
+    if prompt_chars is not None:
+        return _estimate_cost(model, prompt_chars, output_chars)
+    return None
 
 
 def _role_metadata(pipeline_step_result: Any) -> dict[str, Any]:
@@ -110,9 +142,7 @@ async def persist_macro_run(
     out_chars = len(post.output.reasoning or "") + sum(
         len(getattr(r, "description", "") or "") for r in post.output.top_risks
     )
-    cost = meta.get("cost_usd")
-    if cost is None and prompt_chars is not None:
-        cost = _estimate_cost(model_name, prompt_chars, out_chars)
+    cost = _resolve_cost(meta, model_name, prompt_chars, out_chars)
     step = CouncilStepOutput(
         name="macro_gate",
         output={},
@@ -185,9 +215,7 @@ async def persist_scout_run(
     code_text = scout_out.screening_code
     code_hash = hashlib.sha256(code_text.encode("utf-8")).hexdigest()
     out_chars = len(code_text) + len(scout_out.hypothesis or "")
-    cost = meta.get("cost_usd")
-    if cost is None and prompt_chars is not None:
-        cost = _estimate_cost(model_name, prompt_chars, out_chars)
+    cost = _resolve_cost(meta, model_name, prompt_chars, out_chars)
     metadata_json = {
         "hypothesis": scout_out.hypothesis,
         "factor_weights": scout_out.factor_weights,

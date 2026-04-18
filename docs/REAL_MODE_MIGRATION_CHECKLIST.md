@@ -1,6 +1,6 @@
 # Real Mode Migration Checklist
 
-KIS paper → real 전환 시 **반드시** 이 문서를 Top-down 으로 실행. 이전 세션(`SESSION_HANDOFF_2026-04-18_real_mode.md`) 의 실전 경험을 체크리스트화.
+KIS paper → real 전환 시 **반드시** 이 문서를 Top-down 으로 실행. 이전 세션(`../.ai/sessions/session-2026-04-18-0005.md`) 의 실전 경험을 체크리스트화.
 
 > **긴급 롤백이 필요하면** 섹션 6 으로 바로 이동.
 

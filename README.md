@@ -257,12 +257,12 @@ prime-jennie-runtime/
 - [`docs/SESSION_HANDOFF_TIMELINE.md`](./docs/SESSION_HANDOFF_TIMELINE.md) — 2026-04-18 집중 세션 시리즈 인덱스
 
 ### 세션별 원시 기록 (시점 스냅샷)
-- `docs/SESSION_HANDOFF_2026-04-18.md` — Phase 2.10 Agent Teams 12 task closing
-- `docs/SESSION_HANDOFF_2026-04-18_p2.11-2.12.md` — Control UI 5 page + Macro Shadow
-- `docs/SESSION_HANDOFF_2026-04-18_p2.13.md` — Global news + heartbeat + cloudflared
-- `docs/SESSION_HANDOFF_2026-04-18_recovery.md` — UI 공백 + apscheduler dow 함정
-- `docs/SESSION_HANDOFF_2026-04-18_real_mode.md` — Backtest persistence + Scout 실전 + Real 전환
-- `docs/SESSION_HANDOFF_2026-04-18_logs_and_vllm_fp8.md` — Logs 가시성 + news 24/7 + vLLM FP8 KV
+- `.ai/sessions/session-2026-04-18-0001.md` — Phase 2.10 Agent Teams 12 task closing
+- `.ai/sessions/session-2026-04-18-0002.md` — Control UI 5 page + Macro Shadow
+- `.ai/sessions/session-2026-04-18-0003.md` — Global news + heartbeat + cloudflared
+- `.ai/sessions/session-2026-04-18-0004.md` — UI 공백 + apscheduler dow 함정
+- `.ai/sessions/session-2026-04-18-0005.md` — Backtest persistence + Scout 실전 + Real 전환
+- `.ai/sessions/session-2026-04-18-0006.md` — Logs 가시성 + news 24/7 + vLLM FP8 KV
 
 ## 관련 리포
 

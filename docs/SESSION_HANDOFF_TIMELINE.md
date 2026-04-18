@@ -12,7 +12,7 @@ Phase 2.9 slice2/slice3 미완 + v2 (prime-jennie) 22 컨테이너 + v3 (prime-j
 
 ---
 
-## 1. `SESSION_HANDOFF_2026-04-18.md` — Phase 2.10 실전 배치
+## 1. `../.ai/sessions/session-2026-04-18-0001.md` — Phase 2.10 실전 배치
 
 **시점**: 2026-04-17 늦은 저녁 ~ 2026-04-18 새벽  
 **팀**: lead + 6 Opus teammate (Agent Teams experimental)  
@@ -29,7 +29,7 @@ Phase 2.9 slice2/slice3 미완 + v2 (prime-jennie) 22 컨테이너 + v3 (prime-j
 
 ---
 
-## 2. `SESSION_HANDOFF_2026-04-18_p2.11-2.12.md` — Control UI 보강 + Macro Shadow
+## 2. `../.ai/sessions/session-2026-04-18-0002.md` — Control UI 보강 + Macro Shadow
 
 **시점**: 2026-04-18 아침 ~ 주간 (Phase 2.10 세션 종료 직후 이어 접속)  
 **팀**: lead 단독  
@@ -58,7 +58,7 @@ Phase 2.9 slice2/slice3 미완 + v2 (prime-jennie) 22 컨테이너 + v3 (prime-j
 
 ---
 
-## 3. `SESSION_HANDOFF_2026-04-18_p2.13.md` — 자가진화 feeder/infra 보강
+## 3. `../.ai/sessions/session-2026-04-18-0003.md` — 자가진화 feeder/infra 보강
 
 **시점**: 2026-04-18 늦은 오후 ~ 야간 (p2.11/2.12 addendum 직후)  
 **팀**: lead 단독  
@@ -77,7 +77,7 @@ Phase 2.9 slice2/slice3 미완 + v2 (prime-jennie) 22 컨테이너 + v3 (prime-j
 
 ---
 
-## 4. `SESSION_HANDOFF_2026-04-18_recovery.md` — UI 공백 진단 + 월요 스케줄러 함정
+## 4. `../.ai/sessions/session-2026-04-18-0004.md` — UI 공백 진단 + 월요 스케줄러 함정
 
 **시점**: 2026-04-18 오후 (Phase 2.13 직후 재접속)  
 **팀**: lead 단독  
@@ -103,7 +103,7 @@ Phase 2.9 slice2/slice3 미완 + v2 (prime-jennie) 22 컨테이너 + v3 (prime-j
 
 ---
 
-## 5. `SESSION_HANDOFF_2026-04-18_real_mode.md` — 백테스트 persistence + Scout 실전 배선 + Real 전환
+## 5. `../.ai/sessions/session-2026-04-18-0005.md` — 백테스트 persistence + Scout 실전 배선 + Real 전환
 
 **시점**: 2026-04-18 오후 ~ 저녁 (복구 세션 종료 직후)  
 **팀**: lead + 6 teammate (bypass / feeders / adapter / backfill / llmstats / candidates-ui)  
@@ -156,7 +156,7 @@ real 전환 시 KOSPI 20d vol 58% 상태에서 auto_override 가 계속 closed �
 
 ---
 
-## 6. `SESSION_HANDOFF_2026-04-18_logs_and_vllm_fp8.md` — Logs 가시성 복구 + news 상시화 + vLLM FP8
+## 6. `../.ai/sessions/session-2026-04-18-0006.md` — Logs 가시성 복구 + news 상시화 + vLLM FP8
 
 **시점**: 2026-04-18 저녁 ~ 밤 (real 전환 세션 종료 직후)  
 **팀**: lead 단독  
@@ -177,7 +177,7 @@ real 전환 시 KOSPI 20d vol 58% 상태에서 auto_override 가 계속 closed �
 
 ---
 
-## 7. `SESSION_HANDOFF_2026-04-18_deploy_and_docs.md` — promtail 재회귀 재수정 + 배포 파이프라인 + 패밀리 docs + systemd
+## 7. `../.ai/sessions/session-2026-04-18-0007.md` — promtail 재회귀 재수정 + 배포 파이프라인 + 패밀리 docs + systemd
 
 **시점**: 2026-04-18 22:00 ~ 자정 경 (logs_and_vllm_fp8 세션 42분 후)  
 **팀**: lead 단독  

@@ -130,7 +130,13 @@ def _try_build_tiered_router() -> Any | None:
         model=anthropic_model,
         api_key=anthropic_key,
     )
-    return {"strong": strong, "reasoning": reasoning, "default": strong}
+    return {
+        "strong": strong,
+        "reasoning": reasoning,
+        "default": strong,
+        # shadow tier — reasoning 자리에 DeepSeek 을 꽂은 거울 구성
+        "shadow_reasoning": strong,
+    }
 
 
 def _build_slow_loop_components(
@@ -155,6 +161,25 @@ def _build_slow_loop_components(
         observer=observer,
         resilience=default_resilience(),
     )
+
+    # Shadow orchestrator — Macro 를 DeepSeek 로도 병렬 평가. Opus 결정이 primary.
+    # MACRO_SHADOW_ENABLED=0 으로 비활성화 가능.
+    shadow_orchestrator: Orchestrator | None = None
+    if os.environ.get("MACRO_SHADOW_ENABLED", "1") == "1" and "shadow_reasoning" in tiers:
+        shadow_tiers = {
+            "strong": tiers["strong"],
+            "reasoning": tiers["shadow_reasoning"],  # DeepSeek 을 reasoning 자리에
+            "default": tiers["default"],
+        }
+        shadow_orchestrator = Orchestrator(
+            role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),
+            tool_registry=ToolRegistry(),
+            model_router=TieredModelRouter(shadow_tiers),
+            memory=NullMemoryStore(),
+            hitl=NullHITLChannel(),
+            observer=observer,
+            resilience=default_resilience(),
+        )
 
     # TODO(phase-2.9-slice3): feeder 를 Track E 실제 구현으로 교체
     # (news_scores: news_pipeline_kor, market_snapshot: KIS/legacy_daily_prices 등)
@@ -199,6 +224,7 @@ def _build_slow_loop_components(
         state_store=state_store,
         observer=observer,
         db_engine=db_engine,
+        shadow_orchestrator=shadow_orchestrator,
     )
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -26,6 +27,43 @@ from prime_jennie_runtime.slow_loop.macro.post_processor import MacroPostResult
 from prime_jennie_runtime.slow_loop.scout.schemas import ScoutOutput
 
 logger = logging.getLogger(__name__)
+
+# Model pricing per 1M tokens (USD). upstream orchestrator 가 실제 usage 를
+# RoleInvocationResult 에 넘겨주지 않아, prompt+output 길이로 거칠게 추정한다.
+# 정확도 ±20% 수준. 정확 비용은 Anthropic/DeepSeek usage report 에서 확인.
+_PRICING: dict[str, tuple[float, float]] = {
+    "claude-opus-4-7": (15.0, 75.0),
+    "claude-opus-4": (15.0, 75.0),
+    "claude-sonnet-4-6": (3.0, 15.0),
+    "claude-haiku-4-5-20251001": (0.80, 4.0),
+    "deepseek-chat": (0.27, 1.10),
+    "deepseek-reasoner": (0.55, 2.19),
+}
+
+
+def _tier_model(tier: str) -> str | None:
+    """tier → 설정된 모델명 (ANTHROPIC_MODEL / DEEPSEEK_MODEL)."""
+    if tier == "reasoning":
+        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+    if tier == "strong":
+        return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    return None
+
+
+def _estimate_tokens(text_len_chars: int) -> int:
+    """한국어/영어 혼재 텍스트 토큰 추정. ~2자당 1 토큰 (rough)."""
+    return max(1, text_len_chars // 2)
+
+
+def _estimate_cost(model: str | None, input_chars: int, output_chars: int) -> float | None:
+    if model is None:
+        return None
+    rates = _PRICING.get(model)
+    if rates is None:
+        return None
+    input_tok = _estimate_tokens(input_chars)
+    output_tok = _estimate_tokens(output_chars)
+    return input_tok * rates[0] / 1e6 + output_tok * rates[1] / 1e6
 
 
 def _role_metadata(pipeline_step_result: Any) -> dict[str, Any]:
@@ -58,18 +96,28 @@ async def persist_macro_run(
     post: MacroPostResult,
     macro_step_result: Any,
     news_digest_ref: str | None = None,
+    prompt_chars: int | None = None,
+    shadow_result: dict[str, Any] | None = None,
 ) -> None:
     """Macro 결과 1건을 macro_runs 에 upsert."""
     if engine is None:
         return
     meta = _role_metadata(macro_step_result)
+    model_name = meta.get("model") or meta.get("model_used") or _tier_model("reasoning")
+    # Output char count — reasoning + JSON risks 등
+    out_chars = len(post.output.reasoning or "") + sum(
+        len(getattr(r, "description", "") or "") for r in post.output.top_risks
+    )
+    cost = meta.get("cost_usd")
+    if cost is None and prompt_chars is not None:
+        cost = _estimate_cost(model_name, prompt_chars, out_chars)
     step = CouncilStepOutput(
         name="macro_gate",
         output={},
-        model_used=meta.get("model") or meta.get("model_used"),
-        cost_usd=meta.get("cost_usd"),
+        model_used=model_name,
+        cost_usd=cost,
         latency_ms=_role_duration_ms(macro_step_result),
-        prompt_version=meta.get("prompt_version"),
+        prompt_version=meta.get("prompt_version") or "v1",
     )
     record = CouncilRunRecord(
         macro_run_id=macro_run_id,
@@ -95,6 +143,26 @@ async def persist_macro_run(
         await save_council_run(engine, record)
     except Exception:
         logger.exception("persist_macro_run failed: id=%s", macro_run_id)
+        return
+    # Shadow result merge into metadata_json.shadow
+    if shadow_result is not None:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE macro_runs SET metadata_json = "
+                        "COALESCE(metadata_json, '{}'::jsonb) || CAST(:shadow AS JSONB) "
+                        "WHERE macro_run_id = :id"
+                    ),
+                    {
+                        "id": macro_run_id,
+                        "shadow": json.dumps(
+                            {"shadow": shadow_result}, ensure_ascii=False, default=str
+                        ),
+                    },
+                )
+        except Exception:
+            logger.exception("persist_macro_run shadow merge failed: id=%s", macro_run_id)
 
 
 async def persist_scout_run(
@@ -105,13 +173,19 @@ async def persist_scout_run(
     scout_out: ScoutOutput,
     scout_step_result: Any,
     candidates_count: int | None = None,
+    prompt_chars: int | None = None,
 ) -> None:
     """Scout 결과 1건을 scout_runs 에 upsert."""
     if engine is None:
         return
     meta = _role_metadata(scout_step_result)
+    model_name = meta.get("model") or meta.get("model_used") or _tier_model("strong")
     code_text = scout_out.screening_code
     code_hash = hashlib.sha256(code_text.encode("utf-8")).hexdigest()
+    out_chars = len(code_text) + len(scout_out.hypothesis or "")
+    cost = meta.get("cost_usd")
+    if cost is None and prompt_chars is not None:
+        cost = _estimate_cost(model_name, prompt_chars, out_chars)
     metadata_json = {
         "hypothesis": scout_out.hypothesis,
         "factor_weights": scout_out.factor_weights,
@@ -148,9 +222,9 @@ async def persist_scout_run(
         "code": code_text,
         "hyp": scout_out.hypothesis,
         "cnt": candidates_count if candidates_count is not None else scout_out.expected_candidates,
-        "model": meta.get("model") or meta.get("model_used"),
-        "pv": meta.get("prompt_version"),
-        "cost": meta.get("cost_usd"),
+        "model": model_name,
+        "pv": meta.get("prompt_version") or "v1",
+        "cost": cost,
         "meta": json.dumps(metadata_json, ensure_ascii=False, default=str),
     }
     try:

@@ -36,6 +36,7 @@ from .macro.context_builder import MacroContextBuilder
 from .macro.post_processor import MacroPostResult, run_post_processing
 from .macro.schemas import MacroGateOutput, RecentMacroRun
 from .macro.state_store import MacroCurrentState, MacroStateStore
+from .persistence import persist_macro_run, persist_scout_run
 from .scout.code_hasher import compute_code_hash
 from .scout.context_builder import ScoutContextBuilder
 from .scout.schemas import (
@@ -46,7 +47,6 @@ from .scout.schemas import (
 )
 from .scout.screening_stub import ScreeningInvoker
 from .scout.validators import ScoutValidationResult, validate_candidates
-from .persistence import persist_macro_run, persist_scout_run
 from .strategy.engine import StrategyEngine, StrategyEngineInputs
 from .strategy.publisher import PositionSheetPublisher
 
@@ -140,6 +140,7 @@ class SlowLoopComponents:
     state_store: MacroStateStore
     observer: Observer
     db_engine: Any = None  # AsyncEngine | None — macro_runs/scout_runs 기록용
+    shadow_orchestrator: Any = None  # Orchestrator | None — Macro 를 DeepSeek 로 shadow 평가
 
 
 def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
@@ -199,12 +200,39 @@ async def run_slow_loop(
         recent_runs=recent_macro_runs,
         trigger_reason=macro_trigger,
     )
-    macro_result = await _run_pipeline_with_retry(
-        comp.orchestrator,
-        _macro_pipeline(macro_ctx),
-        observer,
-        role_name="macro_gate",
-        user_request="daily macro gate",
+
+    async def _primary_macro():
+        return await _run_pipeline_with_retry(
+            comp.orchestrator,
+            _macro_pipeline(macro_ctx),
+            observer,
+            role_name="macro_gate",
+            user_request="daily macro gate",
+        )
+
+    async def _shadow_macro():
+        if comp.shadow_orchestrator is None:
+            return None
+        import time
+
+        t0 = time.monotonic()
+        try:
+            res = await _run_pipeline_with_retry(
+                comp.shadow_orchestrator,
+                _macro_pipeline(macro_ctx),
+                observer,
+                role_name="macro_gate_shadow",
+                user_request="daily macro gate (shadow)",
+            )
+            return {"result": res, "duration_ms": int((time.monotonic() - t0) * 1000)}
+        except Exception as e:
+            logger.warning("macro shadow failed: %s", e)
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    import asyncio
+
+    macro_result, shadow_payload = await asyncio.gather(
+        _primary_macro(), _shadow_macro(), return_exceptions=False
     )
     raw_macro: MacroGateOutput | None = macro_result.state["macro_gate"].payload_as(MacroGateOutput)
     if raw_macro is None:
@@ -218,7 +246,50 @@ async def run_slow_loop(
         observer,
     )
 
-    # DB 기록 (engine=None 이면 no-op)
+    # DB 기록 (engine=None 이면 no-op). prompt_chars 는 비용 추정용.
+    from .macro.prompts import MACRO_SYSTEM_PROMPT
+    from .macro.prompts import build_user_prompt as _build_macro_user
+
+    macro_prompt_chars = len(MACRO_SYSTEM_PROMPT) + len(_build_macro_user(macro_ctx))
+
+    # Shadow 결과 구성 — DeepSeek 가 낸 동일 스키마 output 을 그대로 기록
+    shadow_payload_for_db: dict[str, Any] | None = None
+    if shadow_payload is not None and "error" not in shadow_payload:
+        try:
+            shadow_res = shadow_payload["result"]
+            shadow_raw: MacroGateOutput | None = shadow_res.state["macro_gate_shadow"].payload_as(
+                MacroGateOutput
+            )
+            if shadow_raw is not None:
+                shadow_cost_est = None
+                try:
+                    from .persistence import _estimate_cost, _tier_model
+
+                    shadow_model_name = _tier_model("strong")  # DeepSeek
+                    shadow_cost_est = _estimate_cost(
+                        shadow_model_name,
+                        macro_prompt_chars,
+                        len(shadow_raw.reasoning or "")
+                        + sum(len(r.description or "") for r in shadow_raw.top_risks),
+                    )
+                    shadow_payload_for_db = {
+                        "model_used": shadow_model_name,
+                        "gate": shadow_raw.gate,
+                        "size_multiplier": float(shadow_raw.size_multiplier),
+                        "reasoning": shadow_raw.reasoning,
+                        "confidence": shadow_raw.confidence,
+                        "top_risks": [r.model_dump() for r in shadow_raw.top_risks],
+                        "latency_ms": shadow_payload.get("duration_ms"),
+                        "cost_usd_estimated": shadow_cost_est,
+                        "next_review_hint": getattr(shadow_raw, "next_review_hint", None),
+                    }
+                except Exception:
+                    logger.exception("macro shadow payload build failed")
+        except Exception:
+            logger.exception("macro shadow result extract failed")
+    elif shadow_payload and "error" in shadow_payload:
+        shadow_payload_for_db = {"error": shadow_payload["error"]}
+
     await persist_macro_run(
         comp.db_engine,
         macro_run_id=macro_run_id,
@@ -227,6 +298,8 @@ async def run_slow_loop(
         post=post,
         macro_step_result=macro_result.state["macro_gate"],
         news_digest_ref=getattr(macro_ctx, "news_digest_ref", None),
+        prompt_chars=macro_prompt_chars,
+        shadow_result=shadow_payload_for_db,
     )
 
     # 상태 저장
@@ -284,12 +357,17 @@ async def run_slow_loop(
 
     # DB 기록 (engine=None 이면 no-op). candidates_count 는 screening 후 갱신되지 않으므로
     # expected_candidates 로 대체.
+    from .scout.prompts import SCOUT_SYSTEM_PROMPT
+    from .scout.prompts import build_user_prompt as _build_scout_user
+
+    scout_prompt_chars = len(SCOUT_SYSTEM_PROMPT) + len(_build_scout_user(scout_ctx))
     await persist_scout_run(
         comp.db_engine,
         scout_run_id=scout_run_id,
         generated_at=as_of_dt,
         scout_out=scout_out,
         scout_step_result=scout_result.state["scout"],
+        prompt_chars=scout_prompt_chars,
     )
 
     await observer.emit(

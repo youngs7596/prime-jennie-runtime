@@ -49,12 +49,27 @@ cd ~/projects/prime-jennie-runtime && pytest tests/screening_executor/test_allow
 # 기대: 전부 pass
 ```
 
+```bash
+# G5. Scout primary 가 Opus 로 돌아가는지 + shadow (DeepSeek) 가 병렬 축적 중인지.
+#     2026-04-19 개정으로 Scout primary 가 DeepSeek → Opus 로 전환됨. 실 운영에서
+#     이게 적용 안 되어 있으면 screening 코드 품질이 이전 수준으로 회귀.
+ssh prime-jennie '
+  docker exec prime-jennie-runtime-postgres-1 psql -U pj_admin -d prime_jennie_v3 -c "
+    SELECT scout_run_id, model_used,
+           metadata_json->'"'"'shadow'"'"'->>'"'"'model_used'"'"' AS shadow_model,
+           metadata_json->'"'"'shadow'"'"'->>'"'"'latency_ms'"'"' AS shadow_ms
+    FROM scout_runs WHERE generated_at > NOW() - INTERVAL '"'"'24 hours'"'"'
+    ORDER BY generated_at DESC LIMIT 3;"'
+# 기대: model_used='"'"'claude-opus-4-7'"'"' + shadow_model='"'"'deepseek-chat'"'"' + shadow_ms IS NOT NULL
+```
+
 - [ ] **G1 통과** — `MACRO_AUTO_OVERRIDE_DISABLED` 가 컨테이너 env 에 없거나 `0`
 - [ ] **G2 통과** — 최근 1시간 정기 macro_runs 의 bypass 흔적 없음
 - [ ] **G3 통과** — seccomp 프로파일 파일이 호스트에 실재하고 env 로 주입됨 (F4 배포 완료 후)
 - [ ] **G4 통과** — allowlist 우회 테스트 10건 전부 green (F5 배포 완료 후)
+- [ ] **G5 통과** — Scout primary=Opus + DeepSeek shadow 가 최근 24h scout_runs 에 기록됨
 
-**미충족 시 조치**: stop 유지 + 해당 게이트의 F 작업을 먼저 닫는다. G1 만 통과시키면 이후 섹션 5 절차 진행 가능하지만 **G3/G4 는 defense-in-depth 권장**이며 비상시 G1 만으로도 운영 가능하다.
+**미충족 시 조치**: stop 유지 + 해당 게이트의 F 작업을 먼저 닫는다. G1 만 통과시키면 이후 섹션 5 절차 진행 가능하지만 **G3/G4/G5 는 defense-in-depth / 품질 유지 권장**이며 비상시 G1 만으로도 운영 가능하다.
 
 ---
 

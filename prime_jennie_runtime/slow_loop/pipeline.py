@@ -468,6 +468,10 @@ async def run_slow_loop(
                         "code_hash": _hashlib.sha256(
                             (shadow_scout_out.screening_code or "").encode("utf-8")
                         ).hexdigest(),
+                        # code_text 도 함께 저장 — 두 모델이 생성한 코드 diff 를 UI 에서
+                        # 직접 확인 가능하게 함. shadow code 는 실행하지 않으며 hash 만으로는
+                        # 품질 비교 판단 근거가 부족했음.
+                        "code_text": shadow_scout_out.screening_code,
                         "expected_candidates": shadow_scout_out.expected_candidates,
                         "strategy_tags_used": list(shadow_scout_out.strategy_tags_used or []),
                         "latency_ms": scout_shadow_payload.get("duration_ms"),

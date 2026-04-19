@@ -512,15 +512,6 @@ async def run_slow_loop(
         _primary_screen(), _shadow_screen()
     )
 
-    # raw 후보 전수를 screening_candidates 에 기록 (백테스트 재현용).
-    # 이후 validation / engine 결정에 따라 promoted_to_sheet_id 또는
-    # rejection_reason 이 채워진다.
-    await persist_screening_candidates(
-        comp.db_engine,
-        scout_run_id=scout_run_id,
-        candidates=raw_candidates,
-    )
-
     # Scout shadow 결과 구성 — DeepSeek 의 hypothesis + code + candidates 까지 포함
     scout_shadow_for_db: dict[str, Any] | None = None
     if shadow_scout_out is not None:
@@ -573,6 +564,17 @@ async def run_slow_loop(
         context_snapshot=scout_context_snapshot,
         shadow_result=scout_shadow_for_db,
         redis_client=comp.redis_client,
+    )
+
+    # raw 후보 전수를 screening_candidates 에 기록 (백테스트 재현용).
+    # persist_scout_run 후에 호출 — screening_candidates.scout_run_id 가 scout_runs
+    # 를 참조하는 FK 제약이 있어 순서가 중요함.
+    # 이후 validation / engine 결정에 따라 promoted_to_sheet_id 또는
+    # rejection_reason 이 채워진다.
+    await persist_screening_candidates(
+        comp.db_engine,
+        scout_run_id=scout_run_id,
+        candidates=raw_candidates,
     )
 
     # --- 4. 검증 ---

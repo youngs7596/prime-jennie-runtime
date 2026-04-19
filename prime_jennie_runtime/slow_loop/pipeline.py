@@ -444,57 +444,17 @@ async def run_slow_loop(
         "macro_run_id": macro_run_id,
     }
 
-    # Scout shadow 결과 구성 — DeepSeek 가 낸 동일 스키마 출력을 그대로 기록
-    scout_shadow_for_db: dict[str, Any] | None = None
+    # Shadow ScoutOutput 추출 (screening 실행에 shadow code 가 필요)
+    shadow_scout_out: ScoutOutput | None = None
     if scout_shadow_payload is not None and "error" not in scout_shadow_payload:
         try:
             shadow_res = scout_shadow_payload["result"]
-            shadow_scout_out: ScoutOutput | None = shadow_res.state["scout"].payload_as(ScoutOutput)
-            if shadow_scout_out is not None:
-                try:
-                    from .persistence import _resolve_cost, _tier_model
-
-                    shadow_model_name = _tier_model("shadow_strong")  # DeepSeek chat
-                    shadow_meta = scout_shadow_payload.get("metadata") or {}
-                    shadow_out_chars = len(shadow_scout_out.screening_code or "") + len(
-                        shadow_scout_out.hypothesis or ""
-                    )
-                    shadow_cost_est = _resolve_cost(
-                        shadow_meta, shadow_model_name, scout_prompt_chars, shadow_out_chars
-                    )
-                    scout_shadow_for_db = {
-                        "model_used": shadow_model_name,
-                        "hypothesis": shadow_scout_out.hypothesis,
-                        "code_hash": _hashlib.sha256(
-                            (shadow_scout_out.screening_code or "").encode("utf-8")
-                        ).hexdigest(),
-                        # code_text 도 함께 저장 — 두 모델이 생성한 코드 diff 를 UI 에서
-                        # 직접 확인 가능하게 함. shadow code 는 실행하지 않으며 hash 만으로는
-                        # 품질 비교 판단 근거가 부족했음.
-                        "code_text": shadow_scout_out.screening_code,
-                        "expected_candidates": shadow_scout_out.expected_candidates,
-                        "strategy_tags_used": list(shadow_scout_out.strategy_tags_used or []),
-                        "latency_ms": scout_shadow_payload.get("duration_ms"),
-                        "cost_usd_estimated": shadow_cost_est,
-                    }
-                except Exception:
-                    logger.exception("scout shadow payload build failed")
+            shadow_scout_out = shadow_res.state["scout"].payload_as(ScoutOutput)
         except Exception:
             logger.exception("scout shadow result extract failed")
-    elif scout_shadow_payload and "error" in scout_shadow_payload:
-        scout_shadow_for_db = {"error": scout_shadow_payload["error"]}
 
-    await persist_scout_run(
-        comp.db_engine,
-        scout_run_id=scout_run_id,
-        generated_at=as_of_dt,
-        scout_out=scout_out,
-        scout_step_result=scout_result.state["scout"],
-        prompt_chars=scout_prompt_chars,
-        context_snapshot=scout_context_snapshot,
-        shadow_result=scout_shadow_for_db,
-        redis_client=comp.redis_client,
-    )
+    # persist_scout_run 은 screening 결과까지 포함한 shadow_result 를 원하므로
+    # screening 실행 블록 이후에 호출. 아래 섹션 3 뒤로 이동.
 
     await observer.emit(
         pj_event(
@@ -528,8 +488,28 @@ async def run_slow_loop(
         "macro_size_multiplier": post.output.size_multiplier,
         "market_data_records": market_data_records,
     }
-    raw_candidates: list[ScreeningCandidate] = await comp.screening.invoke(
-        scout_out.screening_code, screening_context
+
+    async def _primary_screen() -> list[ScreeningCandidate]:
+        return await comp.screening.invoke(scout_out.screening_code, screening_context)
+
+    async def _shadow_screen() -> list[ScreeningCandidate]:
+        """Shadow scout 가 생성한 Python 코드를 격리 실행해 후보 추출.
+
+        primary 와 **동일 screening_context** 로 병렬 실행하므로 공정 비교 가능.
+        shadow 가 없거나 코드가 비어있으면 빈 리스트. 실행 실패는 swallow 후 빈 리스트.
+        shadow 후보는 screening_candidates 테이블에 기록하지 않고 metadata.shadow.candidates
+        JSON 으로만 보존 — FK 복잡도 회피 + primary 와 비교 전용이라는 의미 명확.
+        """
+        if shadow_scout_out is None or not shadow_scout_out.screening_code:
+            return []
+        try:
+            return await comp.screening.invoke(shadow_scout_out.screening_code, screening_context)
+        except Exception:
+            logger.exception("shadow screening failed")
+            return []
+
+    raw_candidates, shadow_raw_candidates = await asyncio.gather(
+        _primary_screen(), _shadow_screen()
     )
 
     # raw 후보 전수를 screening_candidates 에 기록 (백테스트 재현용).
@@ -539,6 +519,60 @@ async def run_slow_loop(
         comp.db_engine,
         scout_run_id=scout_run_id,
         candidates=raw_candidates,
+    )
+
+    # Scout shadow 결과 구성 — DeepSeek 의 hypothesis + code + candidates 까지 포함
+    scout_shadow_for_db: dict[str, Any] | None = None
+    if shadow_scout_out is not None:
+        try:
+            from .persistence import _resolve_cost, _tier_model
+
+            shadow_model_name = _tier_model("shadow_strong")  # DeepSeek chat
+            shadow_meta = (
+                (scout_shadow_payload.get("metadata") or {})
+                if scout_shadow_payload is not None
+                else {}
+            )
+            shadow_out_chars = len(shadow_scout_out.screening_code or "") + len(
+                shadow_scout_out.hypothesis or ""
+            )
+            shadow_cost_est = _resolve_cost(
+                shadow_meta, shadow_model_name, scout_prompt_chars, shadow_out_chars
+            )
+            scout_shadow_for_db = {
+                "model_used": shadow_model_name,
+                "hypothesis": shadow_scout_out.hypothesis,
+                "code_hash": _hashlib.sha256(
+                    (shadow_scout_out.screening_code or "").encode("utf-8")
+                ).hexdigest(),
+                "code_text": shadow_scout_out.screening_code,
+                "expected_candidates": shadow_scout_out.expected_candidates,
+                "strategy_tags_used": list(shadow_scout_out.strategy_tags_used or []),
+                "latency_ms": (
+                    scout_shadow_payload.get("duration_ms")
+                    if scout_shadow_payload is not None
+                    else None
+                ),
+                "cost_usd_estimated": shadow_cost_est,
+                # Shadow candidates — primary 와 동일 context 로 실행된 raw 후보 전수.
+                # 20개 HARD CAP 적용됨 (executor.py). DB 에 JSON 으로 저장.
+                "candidates": [c.model_dump(mode="json") for c in shadow_raw_candidates],
+            }
+        except Exception:
+            logger.exception("scout shadow payload build failed")
+    elif scout_shadow_payload and "error" in scout_shadow_payload:
+        scout_shadow_for_db = {"error": scout_shadow_payload["error"]}
+
+    await persist_scout_run(
+        comp.db_engine,
+        scout_run_id=scout_run_id,
+        generated_at=as_of_dt,
+        scout_out=scout_out,
+        scout_step_result=scout_result.state["scout"],
+        prompt_chars=scout_prompt_chars,
+        context_snapshot=scout_context_snapshot,
+        shadow_result=scout_shadow_for_db,
+        redis_client=comp.redis_client,
     )
 
     # --- 4. 검증 ---

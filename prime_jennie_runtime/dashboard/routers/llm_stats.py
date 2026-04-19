@@ -24,13 +24,23 @@ from ..deps import get_redis
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
-# 추적 대상 서비스 목록 (v3 기준 — news_analysis/scout/macro/briefing)
-_SERVICES = ["scout", "macro", "news_analysis", "briefing", "unknown"]
+# 추적 대상 서비스 목록 (2026-04-19 개정 — shadow 2종 추가).
+# slow_loop persistence 가 record_llm_call(service=...) 로 Redis 에 쌓는 이름과 1:1.
+_SERVICES = [
+    "scout",
+    "scout_shadow",
+    "macro",
+    "macro_shadow",
+    "news_analysis",
+    "briefing",
+    "unknown",
+]
 
 # 기능별 LLM 매핑. tier 는 참고용, 실제 model/provider 는 각 서비스가 쓰는 env 에서 해석.
+# 2026-04-19 개정: Scout primary = Claude Opus (코드 생성 품질 우선), shadow = DeepSeek chat.
 # - news_analysis: vLLM EXAONE (VLLM_LLM_MODEL)
-# - scout: DeepSeek chat (DEEPSEEK_MODEL) — langchain-openai 직접
-# - macro: Claude Opus (ANTHROPIC_MODEL) — langchain-anthropic 직접 + DeepSeek shadow 병렬
+# - scout: Claude Opus (ANTHROPIC_MODEL) + DeepSeek shadow 병렬
+# - macro: Claude Opus (ANTHROPIC_MODEL) + DeepSeek shadow 병렬
 # - briefing: Claude Opus (ANTHROPIC_MODEL) — langchain-anthropic 직접
 _FEATURE_MAP = [
     {
@@ -46,6 +56,12 @@ _FEATURE_MAP = [
         "frequency": "평일 08:30~14:30 매시 30분 (7회/일)",
     },
     {
+        "service": "scout_shadow",
+        "name": "Scout (shadow 비교)",
+        "tier": "strong",
+        "frequency": "평일 08:30~14:30 매시 30분 (Scout 와 병렬)",
+    },
+    {
         "service": "macro",
         "name": "Macro Gate",
         "tier": "reasoning",
@@ -54,7 +70,7 @@ _FEATURE_MAP = [
     {
         "service": "macro_shadow",
         "name": "Macro Gate (shadow 비교)",
-        "tier": "strong",
+        "tier": "reasoning",
         "frequency": "평일 08:30~14:30 매시 30분 (Macro 와 병렬)",
     },
     {
@@ -73,6 +89,11 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
         model = os.environ.get("VLLM_LLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
         return model, "vLLM (EXAONE)"
     if service == "scout":
+        # 2026-04-19 개정: Scout primary = Claude Opus (코드 생성 품질 우선).
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+        return model, "Anthropic"
+    if service == "scout_shadow":
+        # Scout shadow = DeepSeek chat (비교 평가용 병렬 축적).
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         return model, "DeepSeek"
     if service == "macro":

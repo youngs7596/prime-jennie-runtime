@@ -93,9 +93,6 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
         dimension=1024,
     )
 
-    sentiment_conc = int(os.environ.get("NEWS_SENTIMENT_CONCURRENCY", "8"))
-    embed_conc = int(os.environ.get("NEWS_EMBED_CONCURRENCY", "8"))
-
     return NewsPipeline(
         crawler=crawler,
         deduplicator=dedup,
@@ -103,8 +100,6 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
         sentiment_repo=sentiment_repo,
         embedder=embedder,
         vector_store=vector_store,
-        sentiment_concurrency=sentiment_conc,
-        embed_concurrency=embed_conc,
     )
 
 

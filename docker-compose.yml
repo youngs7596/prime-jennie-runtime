@@ -49,6 +49,7 @@ services:
   # --- KIS Gateway (Track C) ---
 
   kis-gateway:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/kis-gateway:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.kis_gateway
@@ -76,6 +77,7 @@ services:
   # --- Fast Loop Executor (Track C) ---
 
   fast-loop:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/fast-loop:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.fast_loop
@@ -98,6 +100,7 @@ services:
   # v2 scout_job DAG 대체. vLLM EXAONE 은 v2 재활용.
 
   slow-loop:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/slow-loop:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.slow_loop
@@ -142,6 +145,7 @@ services:
   # REST endpoint 를 쳐서 minute_prices / daily_prices 에 upsert.
 
   price-scheduler:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/price-scheduler:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.price_scheduler
@@ -166,6 +170,7 @@ services:
   # 외부 의존 (vLLM, Qdrant) 은 v2 재활용 — host 에서 접근 가능한 주소로 주입.
 
   news-pipeline:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/news-pipeline:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.news_pipeline
@@ -192,6 +197,7 @@ services:
   # --- Telegram Bot (Track C, Phase 1 단방향 발신) ---
 
   telegram-bot:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/telegram-bot:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.telegram_bot
@@ -215,10 +221,10 @@ services:
   # 빌드만: `docker compose --profile build-only build screening-executor`
 
   screening-executor:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/screening-executor:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.screening
-    image: screening-executor:latest
     profiles: ["build-only"]
     # 아래 설정은 직접 `docker run` 시 ScreeningToolAdapter._build_argv가 부여한다.
     # compose에는 참고용으로만 남김.
@@ -313,6 +319,7 @@ services:
   # 9개 router 소비.
 
   dashboard:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/dashboard:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.dashboard
@@ -338,6 +345,7 @@ services:
   # poller 기반 포지션/체결 모니터 8091. KIS Gateway REST 로 price/balance 폴링.
 
   monitor:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/monitor:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.monitor
@@ -370,6 +378,7 @@ services:
   # cleanup/macro/contract_smoke 등은 `scripts/seed_scheduled_jobs.py` 에서 시드.
 
   job-worker:
+    image: ghcr.io/youngs7596/prime-jennie-runtime/job-worker:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.job_worker

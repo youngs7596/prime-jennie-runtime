@@ -30,7 +30,7 @@ from .schemas import ScreeningResult
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 300.0  # SCOUT §4.2 #6
-DEFAULT_IMAGE = "screening-executor:latest"
+DEFAULT_IMAGE = "ghcr.io/youngs7596/prime-jennie-runtime/screening-executor:latest"
 EXECUTOR_MODULE = "prime_jennie_runtime.screening_executor.executor"
 
 # 호스트 절대경로로 seccomp profile 을 주입하면 docker run 시 --security-opt=seccomp 추가.

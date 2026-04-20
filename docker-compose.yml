@@ -177,6 +177,10 @@ services:
       VLLM_EMBED_MODEL: ${VLLM_EMBED_MODEL:-kure-v1}
       QDRANT_URL: ${QDRANT_URL:-http://host.docker.internal:6333}
       QDRANT_COLLECTION_V3: ${QDRANT_COLLECTION_V3:-v3_news_sentiments}
+      # vLLM 동시 호출 상한 — 42건 배치에서 134W peak 를 낮추려 도입. 8 이면 v2
+      # 의 순차 처리와 유사한 peak, 팬 spike 방지. 처리량 줄이려면 더 낮춤.
+      NEWS_SENTIMENT_CONCURRENCY: ${NEWS_SENTIMENT_CONCURRENCY:-8}
+      NEWS_EMBED_CONCURRENCY: ${NEWS_EMBED_CONCURRENCY:-8}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     extra_hosts:
       # v2 가 host 네트워크로 올라가 있는 Qdrant/vLLM 에 접근 (Linux 호환).

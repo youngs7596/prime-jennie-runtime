@@ -1,0 +1,33 @@
+[Unit]
+# MS-01 본체 팬 PWM override (nct6798 BIOS SmartFan 우회).
+#
+# 문제: nct6798 의 SYSTIN/AUXTIN 센서가 가짜 116°C 로 보고 (실제 VRM/PCH 연결
+# 안 된 핀 노이즈). BIOS SmartFan 이 이 값을 참조해 fan1/fan2 를 pwm=249 (거의
+# max) 로 돌려 "비행기 소리" 발생. CPU 실온도(CPUTIN) 는 40~50°C 로 정상.
+#
+# 해법: pwm1/pwm2 를 manual 모드(1) + pwm=40 으로 강제. fan1 ~1350 / fan2 ~1150
+# RPM 수준 (BIOS max 4900/4300 대비 1/3). CPU 실온도 연동은 없음 — 본 서비스는
+# "조용한 idle" 을 보장하고, CPU 부하 시 자동 상승이 필요하면 별도 fancontrol
+# daemon 으로 교체.
+#
+# 안전: hwmon 번호가 재부팅마다 바뀔 수 있어 name 으로 nct6798 찾아 적용.
+# nct6798 드라이버가 없거나 파일이 없으면 조용히 무시.
+#
+# 설치:
+#   sudo cp infra/systemd/mobo-fan-override.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mobo-fan-override.service
+#
+# 제거 (BIOS 제어로 복귀):
+#   sudo systemctl disable --now mobo-fan-override.service
+#   sudo sh -c 'for h in /sys/class/hwmon/hwmon*; do [ "$(cat $h/name 2>/dev/null)" = nct6798 ] && echo 5 > $h/pwm1_enable && echo 5 > $h/pwm2_enable; done'
+Description=MS-01 motherboard fan PWM override (bypass BIOS SmartFan IV)
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for h in /sys/class/hwmon/hwmon*; do if [ "$(cat $h/name 2>/dev/null)" = "nct6798" ]; then echo 1 > $h/pwm1_enable 2>/dev/null; echo 1 > $h/pwm2_enable 2>/dev/null; echo 40 > $h/pwm1 2>/dev/null; echo 40 > $h/pwm2 2>/dev/null; fi; done; exit 0'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

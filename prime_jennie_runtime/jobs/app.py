@@ -26,6 +26,7 @@ import httpx
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from prime_jennie_runtime.briefing.reporter import LLMCaller, build_claude_llm_caller
 from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
@@ -70,6 +71,24 @@ from .stock_masters import seed_stock_masters
 OWNER = "job_worker"
 
 logger = logging.getLogger(__name__)
+
+
+def _build_briefing_llm_caller() -> LLMCaller | None:
+    """daily_briefing_report 용 Claude Opus LLMCaller. 키/패키지 누락 시 None."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.info("ANTHROPIC_API_KEY 없음 — daily_briefing 은 fallback HTML 사용")
+        return None
+    try:
+        from langchain_anthropic import ChatAnthropic
+    except ImportError:
+        logger.warning("langchain_anthropic 미설치 — daily_briefing 은 fallback HTML")
+        return None
+    model = ChatAnthropic(
+        model=os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7"),
+        api_key=api_key,
+    )
+    return build_claude_llm_caller(model)
 
 
 def build_handlers(
@@ -171,8 +190,12 @@ def build_handlers(
     async def h_collect_full_market_data(top_n: int = 300, days: int = 30) -> None:
         await collect_full_market_data(pool, http, kis_gateway_url, top_n=top_n, days=days)
 
+    briefing_llm_caller = _build_briefing_llm_caller()
+
     async def h_daily_briefing_report() -> None:
-        await daily_briefing_report(engine, http, telegram_config=telegram_config, llm_caller=None)
+        await daily_briefing_report(
+            engine, http, telegram_config=telegram_config, llm_caller=briefing_llm_caller
+        )
 
     async def h_global_news_crawl() -> None:
         await global_news_crawl_cycle(pool, http)

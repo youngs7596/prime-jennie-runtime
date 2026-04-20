@@ -10,8 +10,9 @@ COPY prime_jennie_runtime ./prime_jennie_runtime
 
 # job_worker 는 crawlers (beautifulsoup4) + NaverNewsCrawler 재사용 — news extras.
 # weekly_factor_analysis 는 pandas/numpy IC 계산 — screening extras.
+# daily_briefing_report 가 Claude Opus 로 본문 생성 — slow_loop extras 의 langchain-anthropic.
 # apscheduler / asyncpg / httpx / redis 는 core 의존.
 RUN pip install --no-cache-dir uv && \
-    uv pip install --system -e ".[news,screening]"
+    uv pip install --system -e ".[news,screening,slow_loop]"
 
 CMD ["python", "-m", "prime_jennie_runtime.jobs.app"]

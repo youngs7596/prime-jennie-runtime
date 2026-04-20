@@ -24,6 +24,7 @@ from contextlib import AsyncExitStack
 
 import asyncpg
 import httpx
+import redis as sync_redis
 import redis.asyncio as aioredis
 from qdrant_client import QdrantClient
 
@@ -36,7 +37,7 @@ from .adapters.kure_embedder import KureEmbedder
 from .adapters.naver_crawler import NaverNewsCrawler
 from .adapters.pg_sentiment_repo import PostgresSentimentRepo
 from .adapters.qdrant_store import QdrantVectorStore
-from .dedup import InMemoryDeduplicator
+from .dedup import RedisDeduplicator
 from .pipeline import NewsPipeline
 
 OWNER = "news_pipeline"
@@ -55,10 +56,15 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
 
     http_client = await stack.enter_async_context(httpx.AsyncClient(timeout=10.0))
 
-    # TODO(phase-2.9-slice2): RedisDeduplicator 는 sync 전용.
-    # async redis adapter 가 준비되기 전까지 in-memory 로 운영. 컨테이너 재시작 시
-    # 24h 내 중복 뉴스가 한 번 더 분석될 수 있으나 upsert 는 idempotent.
-    dedup = InMemoryDeduplicator()
+    # RedisDeduplicator 로 전환 (2026-04-20): 컨테이너 재시작 시 InMemoryDeduplicator
+    # 가 리셋돼 crawler window 내 모든 기사를 "신규" 처리 → vLLM 258건 burst →
+    # eGPU 팬 굉음. Redis SET+TTL 기반으로 재시작 유지. RedisDeduplicator 는 sync
+    # Redis 만 지원하므로 별도 sync 클라이언트를 만든다. 연결 localhost 기준
+    # SISMEMBER ~0.1ms, 42건 배치에서 총 ~5ms 블로킹 (event loop 영향 무시 가능).
+    _cfg = AppConfig()
+    sync_redis_client = sync_redis.Redis.from_url(_cfg.redis.url, decode_responses=True)
+    stack.callback(sync_redis_client.close)
+    dedup = RedisDeduplicator(redis_client=sync_redis_client)
 
     crawler = NaverNewsCrawler(client=http_client)
     analyzer = LiteLLMSentimentAnalyzer(

@@ -304,6 +304,10 @@ services:
 
   control-ui:
     image: prime-jennie-control-ui:latest
+    # 별 repo (prime-jennie-control-ui) 에서 로컬 빌드된 이미지. registry 에 없으므로
+    # `docker compose pull` 이 건너뛰도록 pull_policy=never. control-ui 도 ghcr 로
+    # 옮기면 제거 가능 (TODO).
+    pull_policy: never
     ports:
       - "80:80"
     depends_on:

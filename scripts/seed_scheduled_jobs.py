@@ -286,6 +286,16 @@ SEEDS: list[SeedJob] = [
         cron="30 7,11 * * 1-5",
         kwargs={"lookback_hours": 24},
     ),
+    # WSJ 뉴스레터 4종 Gmail 수집 + Telegram 요약 (v2 council_trigger 포팅).
+    # global_macro_news_articles 에 source='wsj_newsletter' 로 upsert → 07:30
+    # global_news_digest 가 자동 흡수 → 08:30 첫 Macro run 에 반영.
+    SeedJob(
+        id="job_worker.wsj_gmail_ingest",
+        owner="job_worker",
+        handler_key="wsj_gmail_ingest",
+        cron="20 7 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

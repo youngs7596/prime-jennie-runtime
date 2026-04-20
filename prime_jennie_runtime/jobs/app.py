@@ -67,6 +67,7 @@ from .market_data import (
 from .minute_chart import collect_minute_chart
 from .positions import sync_positions
 from .stock_masters import seed_stock_masters
+from .wsj_gmail_ingest import wsj_gmail_ingest
 
 OWNER = "job_worker"
 
@@ -203,6 +204,22 @@ def build_handlers(
     async def h_global_news_digest(lookback_hours: int = 24) -> None:
         await global_news_build_digest(pool, http, lookback_hours=lookback_hours)
 
+    wsj_creds_path = os.environ.get(
+        "WSJ_GMAIL_CREDENTIALS_PATH", "/app/infra/secrets/gmail/credentials.json"
+    )
+    wsj_token_path = os.environ.get("WSJ_GMAIL_TOKEN_PATH", "/app/infra/secrets/gmail/token.json")
+
+    async def h_wsj_gmail_ingest() -> None:
+        await wsj_gmail_ingest(
+            pool,
+            http,
+            redis_client,
+            credentials_path=wsj_creds_path,
+            token_path=wsj_token_path,
+            telegram_config=telegram_config,
+            llm_caller=briefing_llm_caller,
+        )
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -231,6 +248,7 @@ def build_handlers(
         "daily_briefing_report": h_daily_briefing_report,
         "global_news_crawl": h_global_news_crawl,
         "global_news_digest": h_global_news_digest,
+        "wsj_gmail_ingest": h_wsj_gmail_ingest,
     }
 
 

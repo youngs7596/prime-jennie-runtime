@@ -391,7 +391,13 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       TELEGRAM_DRY_RUN: ${TELEGRAM_DRY_RUN:-false}
+      # wsj_gmail_ingest 용 OAuth credentials/token. 파일 없으면 job 자체가 skip.
+      WSJ_GMAIL_CREDENTIALS_PATH: /app/infra/secrets/gmail/credentials.json
+      WSJ_GMAIL_TOKEN_PATH: /app/infra/secrets/gmail/token.json
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # token.json 은 refresh 시 재작성 필요 → rw. credentials 도 같이 마운트.
+      - ./infra/secrets/gmail:/app/infra/secrets/gmail
     depends_on:
       postgres:
         condition: service_healthy

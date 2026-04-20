@@ -50,6 +50,12 @@ news = [
     "qdrant-client>=1.9",
     "feedparser>=6.0",  # WSJ/Bloomberg/Reuters RSS (Phase 2.13-1)
 ]
+gmail = [
+    # WSJ 뉴스레터 Gmail API (v2 포팅). OAuth2 token 은 infra/secrets/gmail/ 마운트.
+    "google-api-python-client>=2.140",
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+]
 telegram = [
     "python-telegram-bot>=21.0",
 ]

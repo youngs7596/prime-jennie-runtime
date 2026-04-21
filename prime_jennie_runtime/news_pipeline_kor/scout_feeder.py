@@ -45,11 +45,17 @@ class NewsPipelineScoutFeeder:
             avg = sum(e.sentiment_score for e in events) / len(events)
             latest = max(e.analyzed_at for e in events)
             staleness = max(0.0, (now - latest).total_seconds() / 3600.0)
+            high_impact_count = sum(1 for e in events if e.impact_level == "high")
+            event_types: dict[str, int] = {}
+            for e in events:
+                event_types[e.event_type] = event_types.get(e.event_type, 0) + 1
             out[ticker] = NewsScoreEntry(
                 score=_clamp(avg, -1.0, 1.0),
                 timestamp=latest,
                 article_count=len(events),
                 staleness_hours=staleness,
+                high_impact_count=high_impact_count,
+                event_types=event_types,
             )
         return out
 

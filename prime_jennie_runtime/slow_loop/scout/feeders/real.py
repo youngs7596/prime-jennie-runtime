@@ -74,11 +74,11 @@ class RealUniverseFeeder:
 
 
 class RealNewsScoreFeeder:
-    """news_events ticker 별 최근 48h 평균 sentiment_score + staleness_hours.
+    """news_events ticker 별 최근 48h 평균 sentiment_score + 메타데이터 집계.
 
-    2026-04-21 전환: news_sentiments (legacy) → news_events (metadata 추출 결과).
-    Scout 호환 필드는 avg(sentiment_score). event_type/impact_level 활용은 후속
-    (Scout 프롬프트 확장 시).
+    2026-04-21 전환: news_sentiments → news_events.
+    확장: `high_impact_count` + `event_types` (ticker × event_type 집계) 를 Scout
+    코드가 직접 조건식으로 쓸 수 있도록 실어준다.
     """
 
     def __init__(
@@ -101,6 +101,7 @@ class RealNewsScoreFeeder:
                     "SELECT ticker, "
                     "AVG(sentiment_score)::float AS avg_score, "
                     "COUNT(*)::int AS cnt, "
+                    "COUNT(*) FILTER (WHERE impact_level = 'high')::int AS high_impact_count, "
                     "MAX(analyzed_at) AS latest "
                     "FROM news_events "
                     "WHERE ticker = ANY(:tickers) AND analyzed_at >= :since "
@@ -108,10 +109,26 @@ class RealNewsScoreFeeder:
                 ),
                 {"tickers": list(universe), "since": since},
             )
-            rows = res.mappings().all()
+            agg_rows = res.mappings().all()
+
+            # event_type 분포: (ticker, event_type) → count.
+            res = await conn.execute(
+                text(
+                    "SELECT ticker, event_type, COUNT(*)::int AS cnt "
+                    "FROM news_events "
+                    "WHERE ticker = ANY(:tickers) AND analyzed_at >= :since "
+                    "GROUP BY ticker, event_type"
+                ),
+                {"tickers": list(universe), "since": since},
+            )
+            type_rows = res.mappings().all()
+
+        event_types_by_ticker: dict[str, dict[str, int]] = {}
+        for r in type_rows:
+            event_types_by_ticker.setdefault(r["ticker"], {})[r["event_type"]] = int(r["cnt"])
 
         by_ticker: dict[str, NewsScoreEntry] = {}
-        for r in rows:
+        for r in agg_rows:
             latest: datetime = r["latest"]
             staleness = max(
                 0.0,
@@ -125,6 +142,8 @@ class RealNewsScoreFeeder:
                 timestamp=latest,
                 article_count=int(r["cnt"]),
                 staleness_hours=staleness,
+                high_impact_count=int(r.get("high_impact_count") or 0),
+                event_types=event_types_by_ticker.get(r["ticker"], {}),
             )
 
         # 기사 0건 ticker 를 zero entry 로 채움 (NewsPipelineScoutFeeder 컨벤션).

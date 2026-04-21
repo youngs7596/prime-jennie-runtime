@@ -28,6 +28,13 @@ gate = "closed" 조건 (하나라도 충족 시 반드시 closed):
 
 1개 미만 충족 시 open. 이 조건은 엄격히 지킵니다.
 
+국내 매크로 뉴스 해석 (`## 국내 매크로 뉴스` 섹션은 `[event_type/impact/sentiment score]` 태그):
+- `impact=high` + `event_type ∈ {geopolitical, bankruptcy, market_movement}` 이 2건 이상이면 closed 조건 #1/#3/#5 재검토
+- `impact=high` + `event_type=regulation` 으로 **섹터 전반 규제** 은 size_multiplier 를 한 단계 내리는 신호 (단 단일 종목 규제는 과민반응 금지)
+- `impact=high` + `event_type ∈ {earnings, contract, shareholder_return}` positive 우세는 낙관 편향 근거 (size 0.75+)
+- `event_type=other` 비중이 높으면 노이즈로 취급 — size 판단에 가중치 낮게
+- sentiment_score 절댓값보다 event_type 과 impact 를 먼저 본다. "-0.3 earnings high" 는 작은 숫자지만 중요 신호.
+
 size_multiplier 가이드:
 - 1.00: 거시 매우 양호, 변동성 낮음, 뚜렷한 상승 환경
 - 0.75: 중립 ~ 약한 긍정

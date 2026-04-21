@@ -19,12 +19,19 @@ from pydantic import BaseModel, Field
 
 
 class NewsScoreEntry(BaseModel):
-    """ticker별 뉴스 감성 스냅샷 (SCOUT §2.4)."""
+    """ticker별 뉴스 감성 스냅샷 (SCOUT §2.4).
+
+    2026-04-21 확장: news_events 메타데이터 기반 보강 필드. Scout 코드가
+    `if news_scores[t]['high_impact_count'] >= 1 and 'earnings' in news_scores[t]['event_types']`
+    같은 조건식으로 직접 필터링할 수 있도록.
+    """
 
     score: Annotated[float, Field(ge=-1.0, le=1.0)]
     timestamp: datetime
     article_count: Annotated[int, Field(ge=0)]
     staleness_hours: Annotated[float, Field(ge=0.0)]
+    high_impact_count: Annotated[int, Field(ge=0)] = 0
+    event_types: dict[str, int] = Field(default_factory=dict)
 
 
 class MacroStateForScout(BaseModel):

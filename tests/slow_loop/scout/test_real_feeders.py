@@ -125,16 +125,24 @@ async def test_news_score_feeder_returns_entries_per_ticker():
     conn = _FakeConn(
         responses=[
             (
-                "FROM news_events",
+                "high_impact_count",  # aggregate 쿼리 (unique substring)
                 [
                     {
                         "ticker": "005930",
                         "avg_score": 0.42,
                         "cnt": 5,
+                        "high_impact_count": 2,
                         "latest": latest,
                     }
                 ],
-            )
+            ),
+            (
+                "GROUP BY ticker, event_type",
+                [
+                    {"ticker": "005930", "event_type": "earnings", "cnt": 3},
+                    {"ticker": "005930", "event_type": "product", "cnt": 2},
+                ],
+            ),
         ]
     )
     feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
@@ -147,17 +155,26 @@ async def test_news_score_feeder_returns_entries_per_ticker():
     assert e1.score == pytest.approx(0.42)
     assert e1.article_count == 5
     assert e1.timestamp == latest
+    assert e1.high_impact_count == 2
+    assert e1.event_types == {"earnings": 3, "product": 2}
 
     # 미매칭 ticker 는 zero entry.
     zero = result["000660"]
     assert zero.score == 0.0
     assert zero.article_count == 0
     assert zero.staleness_hours == pytest.approx(48.0)
+    assert zero.high_impact_count == 0
+    assert zero.event_types == {}
 
 
 @pytest.mark.asyncio
 async def test_news_score_feeder_passes_lookback_window():
-    conn = _FakeConn(responses=[("FROM news_events", [])])
+    conn = _FakeConn(
+        responses=[
+            ("high_impact_count", []),
+            ("GROUP BY ticker, event_type", []),
+        ]
+    )
     feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn), lookback_hours=24.0)  # type: ignore[arg-type]
     await feeder.fetch(date(2026, 4, 20), ["005930"])
     sql, params = conn.executed[0]
@@ -166,6 +183,8 @@ async def test_news_score_feeder_passes_lookback_window():
     assert params["tickers"] == ["005930"]
     # as_of 23:59:59 - 24h = 2026-04-19 23:59:59.
     assert params["since"] == datetime(2026, 4, 19, 23, 59, 59)
+    # 2 쿼리 (집계 + event_type 분포)
+    assert len(conn.executed) == 2
 
 
 @pytest.mark.asyncio
@@ -183,9 +202,18 @@ async def test_news_score_feeder_clamps_out_of_range_score():
     conn = _FakeConn(
         responses=[
             (
-                "FROM news_events",
-                [{"ticker": "005930", "avg_score": 2.5, "cnt": 1, "latest": latest}],
-            )
+                "high_impact_count",
+                [
+                    {
+                        "ticker": "005930",
+                        "avg_score": 2.5,
+                        "cnt": 1,
+                        "high_impact_count": 0,
+                        "latest": latest,
+                    }
+                ],
+            ),
+            ("GROUP BY ticker, event_type", []),
         ]
     )
     feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]

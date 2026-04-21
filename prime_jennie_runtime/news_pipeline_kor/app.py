@@ -214,21 +214,25 @@ async def _analyzer_loop(
     sync_redis_client: sync_redis.Redis,
     stop: asyncio.Event,
 ) -> None:
-    """Stream BLOCK 상시 대기 → 배치 LLM → PG upsert → XACK."""
+    """Stream BLOCK 상시 대기 → 배치 LLM → PG upsert → XACK.
+
+    main event loop 에서 직접 await — httpx.AsyncClient 가 이 loop 에 묶여있으므로
+    별도 loop 생성 금지. sync redis 호출은 pipeline 내부에서 ``asyncio.to_thread`` 로
+    위임돼 event loop 이 BLOCK 동안 멈추지 않는다.
+    """
     logger.info("[analyzer] loop started")
     while not stop.is_set():
         try:
-            stats = await asyncio.to_thread(_run_analyze_sync, pipeline, sync_redis_client)
-            if stats["processed"] > 0:
+            stats = await pipeline.analyze_stream_once(sync_redis_client)
+            if stats.analyzed > 0 or stats.errors:
                 logger.info(
                     "[analyzer] processed=%d errors=%d",
-                    stats["processed"],
-                    len(stats["errors"]),
+                    stats.analyzed,
+                    len(stats.errors),
                 )
-                for err in stats["errors"][:3]:
+                for err in stats.errors[:3]:
                     logger.warning("[analyzer] %s", err)
             else:
-                # BLOCK 이 이미 2 초 대기했으므로 추가 yield 만.
                 await _interruptible_sleep(stop, ANALYZER_IDLE_SEC)
         except Exception:
             logger.exception("[analyzer] unexpected error")
@@ -245,14 +249,14 @@ async def _archiver_loop(
     logger.info("[archiver] loop started")
     while not stop.is_set():
         try:
-            stats = await asyncio.to_thread(_run_archive_sync, pipeline, sync_redis_client)
-            if stats["processed"] > 0:
+            stats = await pipeline.archive_stream_once(sync_redis_client)
+            if stats.embedded > 0 or stats.errors:
                 logger.info(
                     "[archiver] processed=%d errors=%d",
-                    stats["processed"],
-                    len(stats["errors"]),
+                    stats.embedded,
+                    len(stats.errors),
                 )
-                for err in stats["errors"][:3]:
+                for err in stats.errors[:3]:
                     logger.warning("[archiver] %s", err)
             else:
                 await _interruptible_sleep(stop, ARCHIVER_IDLE_SEC)
@@ -260,18 +264,6 @@ async def _archiver_loop(
             logger.exception("[archiver] unexpected error")
             await _interruptible_sleep(stop, ERROR_BACKOFF_SEC)
     logger.info("[archiver] loop stopped")
-
-
-def _run_analyze_sync(pipeline: NewsPipeline, r: sync_redis.Redis) -> dict:
-    """``asyncio.to_thread`` 바디. coroutine 을 내부 loop 로 실행해 sync redis BLOCK 을
-    외부 event loop 로부터 분리."""
-    stats = asyncio.run(pipeline.analyze_stream_once(r))
-    return {"processed": stats.analyzed, "errors": stats.errors}
-
-
-def _run_archive_sync(pipeline: NewsPipeline, r: sync_redis.Redis) -> dict:
-    stats = asyncio.run(pipeline.archive_stream_once(r))
-    return {"processed": stats.embedded, "errors": stats.errors}
 
 
 # ---------------------------------------------------------------------
@@ -300,7 +292,7 @@ async def run() -> None:
         stack.push_async_callback(heartbeat.stop)
 
         # Consumer group 을 한번 보장. BUSYGROUP 은 내부에서 무시.
-        pipeline.ensure_streams(sync_redis_client)
+        await pipeline.ensure_streams(sync_redis_client)
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()

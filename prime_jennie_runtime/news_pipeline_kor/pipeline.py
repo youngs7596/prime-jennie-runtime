@@ -12,6 +12,11 @@ v3 초기 포팅 때는 단일 ``run_cycle`` 로 합쳐서 10 분 cron 이 전�
     archive_stream_once()          : XREADGROUP → 배치 embed → Qdrant upsert → XACK
 
 각 메서드는 호출 1 회의 stats 를 반환. app.py 의 3 async loop 가 각자 호출.
+
+``redis_client`` 는 sync ``redis.Redis``. blocking I/O 가 event loop 을 멈추지 않도록
+모든 호출은 ``asyncio.to_thread`` 로 감싼다. LLM/임베딩 httpx 호출은 main event loop
+에서 그대로 await — 별도 loop 생성 금지 (cross-loop httpx 는 "Event loop is closed"
+에러 유발).
 """
 
 from __future__ import annotations
@@ -54,17 +59,17 @@ class CycleStats:
     errors: list[str] = field(default_factory=list)
 
 
-def _ensure_group(redis_client: Any, stream: str, group: str) -> None:
-    """Consumer group 보장. 이미 있으면 BUSYGROUP 으로 무시.
+async def _ensure_group_async(redis_client: Any, stream: str, group: str) -> None:
+    """Consumer group 보장. 이미 있으면 BUSYGROUP 으로 무시."""
 
-    ``redis_client`` 는 sync ``redis.Redis``. XGROUP CREATE 는 group metadata 작업이라
-    async 불필요 — pipeline 시작 시 한번만 호출되므로 blocking 영향도 무시 가능.
-    """
-    try:
-        redis_client.xgroup_create(stream, group, id="0", mkstream=True)
-    except Exception as exc:  # redis.ResponseError 는 import 회피 위해 catch-all
-        if "BUSYGROUP" not in str(exc):
-            raise
+    def _call() -> None:
+        try:
+            redis_client.xgroup_create(stream, group, id="0", mkstream=True)
+        except Exception as exc:  # redis.ResponseError 는 import 회피 위해 catch-all
+            if "BUSYGROUP" not in str(exc):
+                raise
+
+    await asyncio.to_thread(_call)
 
 
 @dataclass
@@ -79,12 +84,11 @@ class NewsPipeline:
     vector_store: VectorStore | None = None
     _groups_ensured: bool = False
 
-    def ensure_streams(self, redis_client: Any) -> None:
-        """Consumer group 생성 — app.py 시작 시 1 회. BUSYGROUP 은 ``_ensure_group`` 내부
-        에서 무시."""
-        _ensure_group(redis_client, NEWS_STREAM, ANALYZER_GROUP)
+    async def ensure_streams(self, redis_client: Any) -> None:
+        """Consumer group 생성 — app.py 시작 시 1 회."""
+        await _ensure_group_async(redis_client, NEWS_STREAM, ANALYZER_GROUP)
         if self.embedder is not None and self.vector_store is not None:
-            _ensure_group(redis_client, NEWS_STREAM, ARCHIVER_GROUP)
+            await _ensure_group_async(redis_client, NEWS_STREAM, ARCHIVER_GROUP)
         self._groups_ensured = True
 
     # ------------------------------------------------------------------
@@ -111,18 +115,23 @@ class NewsPipeline:
             if not articles:
                 continue
 
-            # v2 와 동일: dedup 은 stream 발행 전.
-            new_articles = [
-                a for a in articles if self.deduplicator.is_new(a.source_url.unicode_string())
-            ]
-            if not new_articles:
-                continue
+            # dedup + XADD 는 sync redis 호출 → event loop 차단 방지 위해 to_thread.
+            def _dedup_and_publish(
+                items: list[NewsArticle] = articles,
+            ) -> int:
+                new_items = [
+                    a for a in items if self.deduplicator.is_new(a.source_url.unicode_string())
+                ]
+                if not new_items:
+                    return 0
+                pipe = redis_client.pipeline()
+                for article in new_items:
+                    pipe.xadd(NEWS_STREAM, serialize_article(article), maxlen=NEWS_STREAM_MAXLEN)
+                pipe.execute()
+                return len(new_items)
 
-            pipe = redis_client.pipeline()
-            for article in new_articles:
-                pipe.xadd(NEWS_STREAM, serialize_article(article), maxlen=NEWS_STREAM_MAXLEN)
-            pipe.execute()
-            stats.deduped += len(new_articles)
+            published = await asyncio.to_thread(_dedup_and_publish)
+            stats.deduped += published
 
         return stats
 
@@ -134,13 +143,17 @@ class NewsPipeline:
         """Stream → 배치 LLM 감성 분석 → PG upsert → XACK. 최대 ``ANALYZER_BATCH`` 건/호출."""
         stats = CycleStats()
         if not self._groups_ensured:
-            self.ensure_streams(redis_client)
+            await self.ensure_streams(redis_client)
 
         # Pending 우선 처리: 재시작 후 미ACK 메시지 복구.
-        pending = _read_group(
-            redis_client, ANALYZER_GROUP, ANALYZER_CONSUMER, last_id="0", count=ANALYZER_BATCH
+        pending = await _read_group(
+            redis_client,
+            ANALYZER_GROUP,
+            ANALYZER_CONSUMER,
+            last_id="0",
+            count=ANALYZER_BATCH,
         )
-        entries = pending or _read_group(
+        entries = pending or await _read_group(
             redis_client,
             ANALYZER_GROUP,
             ANALYZER_CONSUMER,
@@ -151,17 +164,20 @@ class NewsPipeline:
         if not entries:
             return stats
 
-        # 파싱 + 배치 LLM 호출
         parsed: list[tuple[bytes, NewsArticle]] = []
+        parse_failed_ids: list[Any] = []
         for msg_id, data in entries:
             try:
                 article = deserialize_article(data)
             except Exception as e:
                 logger.warning("analyzer parse failed id=%s: %s", msg_id, e)
                 stats.errors.append(f"parse:{msg_id!r}:{e}")
-                redis_client.xack(NEWS_STREAM, ANALYZER_GROUP, msg_id)
+                parse_failed_ids.append(msg_id)
                 continue
             parsed.append((msg_id, article))
+
+        if parse_failed_ids:
+            await _xack(redis_client, ANALYZER_GROUP, parse_failed_ids)
 
         if not parsed:
             return stats
@@ -171,17 +187,21 @@ class NewsPipeline:
             return_exceptions=True,
         )
 
+        ack_ids: list[Any] = []
         for (msg_id, article), result in zip(parsed, results, strict=True):
-            try:
-                if isinstance(result, BaseException):
-                    stats.errors.append(f"analyze:{article.article_id}:{result}")
-                    continue
-                await self.sentiment_repo.upsert(result, article=article)
-                stats.analyzed += 1
-            finally:
-                # v2 와 동일하게 at-most-once — 저장 실패해도 ACK (DLQ 없음).
-                # 누락된 기사는 다음 cycle 의 dedup 이 new 로 다시 picked up.
-                redis_client.xack(NEWS_STREAM, ANALYZER_GROUP, msg_id)
+            if isinstance(result, BaseException):
+                stats.errors.append(f"analyze:{article.article_id}:{result}")
+            else:
+                try:
+                    await self.sentiment_repo.upsert(result, article=article)
+                    stats.analyzed += 1
+                except Exception as e:
+                    stats.errors.append(f"upsert:{article.article_id}:{type(e).__name__}:{e}")
+            # v2 와 동일 at-most-once — 저장 실패해도 ACK.
+            ack_ids.append(msg_id)
+
+        if ack_ids:
+            await _xack(redis_client, ANALYZER_GROUP, ack_ids)
 
         return stats
 
@@ -195,12 +215,16 @@ class NewsPipeline:
         if self.embedder is None or self.vector_store is None:
             return stats
         if not self._groups_ensured:
-            self.ensure_streams(redis_client)
+            await self.ensure_streams(redis_client)
 
-        pending = _read_group(
-            redis_client, ARCHIVER_GROUP, ARCHIVER_CONSUMER, last_id="0", count=ARCHIVER_BATCH
+        pending = await _read_group(
+            redis_client,
+            ARCHIVER_GROUP,
+            ARCHIVER_CONSUMER,
+            last_id="0",
+            count=ARCHIVER_BATCH,
         )
-        entries = pending or _read_group(
+        entries = pending or await _read_group(
             redis_client,
             ARCHIVER_GROUP,
             ARCHIVER_CONSUMER,
@@ -212,15 +236,19 @@ class NewsPipeline:
             return stats
 
         parsed: list[tuple[bytes, NewsArticle]] = []
+        parse_failed_ids: list[Any] = []
         for msg_id, data in entries:
             try:
                 article = deserialize_article(data)
             except Exception as e:
                 logger.warning("archiver parse failed id=%s: %s", msg_id, e)
                 stats.errors.append(f"parse:{msg_id!r}:{e}")
-                redis_client.xack(NEWS_STREAM, ARCHIVER_GROUP, msg_id)
+                parse_failed_ids.append(msg_id)
                 continue
             parsed.append((msg_id, article))
+
+        if parse_failed_ids:
+            await _xack(redis_client, ARCHIVER_GROUP, parse_failed_ids)
 
         if not parsed:
             return stats
@@ -229,14 +257,16 @@ class NewsPipeline:
             *(self._embed_one(a) for _, a in parsed),
             return_exceptions=True,
         )
+        ack_ids: list[Any] = []
         for (msg_id, article), result in zip(parsed, embed_results, strict=True):
-            try:
-                if isinstance(result, BaseException):
-                    stats.errors.append(f"embed:{article.article_id}:{result}")
-                    continue
+            if isinstance(result, BaseException):
+                stats.errors.append(f"embed:{article.article_id}:{result}")
+            else:
                 stats.embedded += 1
-            finally:
-                redis_client.xack(NEWS_STREAM, ARCHIVER_GROUP, msg_id)
+            ack_ids.append(msg_id)
+
+        if ack_ids:
+            await _xack(redis_client, ARCHIVER_GROUP, ack_ids)
 
         return stats
 
@@ -266,7 +296,7 @@ class NewsPipeline:
         return True
 
 
-def _read_group(
+async def _read_group(
     redis_client: Any,
     group: str,
     consumer: str,
@@ -277,15 +307,27 @@ def _read_group(
 ) -> list[tuple[Any, dict]]:
     """XREADGROUP 얇은 래퍼. ``[(msg_id, data_dict), ...]`` 로 flatten.
 
-    ``last_id="0"`` → pending 재처리, ``last_id=">"`` → 신규 메시지 (block_ms 대기).
+    sync redis 의 blocking xreadgroup 을 ``asyncio.to_thread`` 로 위임 — BLOCK ms
+    동안 event loop 이 멈추지 않음.
     """
     kwargs: dict[str, Any] = {"count": count}
     if block_ms is not None:
         kwargs["block"] = block_ms
-    messages = redis_client.xreadgroup(group, consumer, {NEWS_STREAM: last_id}, **kwargs)
+
+    def _call() -> Any:
+        return redis_client.xreadgroup(group, consumer, {NEWS_STREAM: last_id}, **kwargs)
+
+    messages = await asyncio.to_thread(_call)
     if not messages:
         return []
     out: list[tuple[Any, dict]] = []
     for _stream_name, msg_entries in messages:
         out.extend(msg_entries)
     return out
+
+
+async def _xack(redis_client: Any, group: str, msg_ids: list[Any]) -> None:
+    """가변 인자 XACK batch. to_thread 로 blocking 회피."""
+    if not msg_ids:
+        return
+    await asyncio.to_thread(redis_client.xack, NEWS_STREAM, group, *msg_ids)

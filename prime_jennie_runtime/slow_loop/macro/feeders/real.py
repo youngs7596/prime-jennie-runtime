@@ -221,7 +221,11 @@ class RealMarketSnapshotFeeder:
 
 
 class RealKorMacroNewsFeeder:
-    """news_articles + news_sentiments 에서 최근 24h 매크로성 뉴스 상위 N건."""
+    """news_articles + news_events 에서 최근 24h 매크로성 뉴스 상위 N건.
+
+    2026-04-21 전환: news_sentiments → news_events. event_type/impact_level 을
+    함께 라벨링해 Macro Council 이 더 세밀한 맥락을 인식하도록.
+    """
 
     def __init__(self, engine: AsyncEngine, top_n: int = 10) -> None:
         self._engine = engine
@@ -232,11 +236,15 @@ class RealKorMacroNewsFeeder:
         async with self._engine.begin() as conn:
             res = await conn.execute(
                 text(
-                    "SELECT na.title, na.published_at, ns.score, ns.label "
+                    "SELECT na.title, na.published_at, ne.sentiment_score, ne.sentiment, "
+                    "       ne.event_type, ne.impact_level "
                     "FROM news_articles na "
-                    "LEFT JOIN news_sentiments ns ON ns.article_id = na.article_id "
+                    "LEFT JOIN news_events ne ON ne.article_id = na.article_id "
                     "WHERE na.published_at >= :since "
-                    "ORDER BY ABS(COALESCE(ns.score, 0)) DESC, na.published_at DESC "
+                    "ORDER BY "
+                    "  CASE ne.impact_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, "
+                    "  ABS(COALESCE(ne.sentiment_score, 0)) DESC, "
+                    "  na.published_at DESC "
                     "LIMIT :n"
                 ),
                 {"since": since, "n": self._top_n},
@@ -246,10 +254,15 @@ class RealKorMacroNewsFeeder:
             return "- (최근 24h 국내 매크로 뉴스 없음)"
         lines = []
         for r in rows:
-            score = r["score"]
-            label = r["label"] or "-"
+            score = r["sentiment_score"]
+            sentiment = r["sentiment"] or "-"
+            event_type = r["event_type"] or "-"
+            impact = r["impact_level"] or "-"
             title = (r["title"] or "").strip().replace("\n", " ")[:120]
-            tag = f"[{label} {score:+.2f}]" if score is not None else f"[{label}]"
+            if score is not None:
+                tag = f"[{event_type}/{impact}/{sentiment} {score:+.2f}]"
+            else:
+                tag = f"[{event_type}/{impact}]"
             lines.append(f"- {title} {tag}")
         return "\n".join(lines)
 

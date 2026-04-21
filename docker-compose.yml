@@ -107,7 +107,7 @@ services:
     environment:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
-      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
+      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
       DEEPSEEK_SHADOW_MODEL: ${DEEPSEEK_SHADOW_MODEL:-deepseek-chat}
@@ -177,7 +177,7 @@ services:
     environment:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
-      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
+      VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     extra_hosts:
       # v2 가 host 네트워크로 올라가 있는 vLLM 에 접근 (Linux 호환).

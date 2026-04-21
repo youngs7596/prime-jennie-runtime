@@ -242,28 +242,35 @@ async def _collect_watchlist(conn) -> list[dict]:
 
 
 async def _collect_news(conn, today: date) -> list[dict]:
-    """최근 24시간 news_sentiments 상위 5건."""
+    """최근 24시간 news_events 상위 5건 (impact 우선, 그다음 |sentiment_score|).
+
+    2026-04-21 전환: news_sentiments → news_events.
+    """
     since = datetime.combine(today, datetime.min.time()) - timedelta(days=1)
     stmt = text(
         """
-        SELECT ns.ticker, ns.score, na.title
-        FROM news_sentiments ns
-        LEFT JOIN news_articles na ON na.article_id = ns.article_id
-        WHERE ns.analyzed_at >= :since
-        ORDER BY ABS(ns.score) DESC
+        SELECT ne.ticker, ne.sentiment_score, ne.event_type, ne.impact_level, na.title
+        FROM news_events ne
+        LEFT JOIN news_articles na ON na.article_id = ne.article_id
+        WHERE ne.analyzed_at >= :since
+        ORDER BY
+          CASE ne.impact_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+          ABS(ne.sentiment_score) DESC
         LIMIT 5
         """
     )
     try:
         rows = (await conn.execute(stmt, {"since": since})).mappings().all()
     except Exception:
-        logger.warning("news_sentiments 조회 실패 — 빈 뉴스 반환", exc_info=True)
+        logger.warning("news_events 조회 실패 — 빈 뉴스 반환", exc_info=True)
         return []
     return [
         {
             "stock_code": r["ticker"],
             "headline": (r["title"] or "")[:80],
-            "score": float(r["score"]),
+            "score": float(r["sentiment_score"]),
+            "event_type": r["event_type"],
+            "impact_level": r["impact_level"],
         }
         for r in rows
     ]

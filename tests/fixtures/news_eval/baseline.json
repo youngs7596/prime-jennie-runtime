@@ -1,0 +1,240 @@
+[
+  {
+    "article_id": "eval-earnings-01",
+    "ticker": "005930",
+    "title": "삼성전자, 1분기 영업이익 7조 어닝서프라이즈…HBM 수요 폭발",
+    "body": "삼성전자는 25일 1분기 영업이익이 7조원을 기록해 증권가 컨센서스(5.8조원)를 상회했다고 공시했다. HBM3E 양산 물량이 엔비디아향으로 본격 출하되며 반도체 부문 이익이 4조원을 돌파한 것이 주효했다. 매출은 72조원으로 전년비 18% 증가.",
+    "published_at": "2026-04-25T07:30:00+09:00",
+    "source_url": "https://eval.fixture/earnings-01",
+    "source_name": "연합뉴스",
+    "expected": {
+      "event_type": "earnings",
+      "impact_level": "high",
+      "sentiment": "positive",
+      "sentiment_score_sign": "positive",
+      "keywords_must_include": ["삼성전자", "HBM"],
+      "sector_tags_must_include": ["반도체"]
+    }
+  },
+  {
+    "article_id": "eval-geopolitical-01",
+    "ticker": "010950",
+    "title": "이란, 호르무즈 해협 봉쇄 경고에 외국인 8조원 이탈…정유주 폭락",
+    "body": "이란 혁명수비대가 호르무즈 해협 봉쇄를 재차 경고하면서 국제유가가 배럴당 95달러를 돌파했다. 외국인은 코스피에서 8조원을 순매도했고, S-Oil·GS칼텍스 등 정유주가 하한가를 기록했다.",
+    "published_at": "2026-04-20T14:00:00+09:00",
+    "source_url": "https://eval.fixture/geo-01",
+    "source_name": "한국경제",
+    "expected": {
+      "event_type": "geopolitical",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["이란", "호르무즈"],
+      "sector_tags_must_include": ["에너지"]
+    }
+  },
+  {
+    "article_id": "eval-contract-01",
+    "ticker": "010140",
+    "title": "삼성중공업, 카타르 LNG선 20척 수주…14조원 규모",
+    "body": "삼성중공업은 카타르에너지로부터 LNG 운반선 20척을 14조원에 수주했다고 공시했다. 인도 시점은 2028~2030년, 총 매출 기여도는 연간 3.5조원 수준.",
+    "published_at": "2026-04-19T10:00:00+09:00",
+    "source_url": "https://eval.fixture/contract-01",
+    "source_name": "매일경제",
+    "expected": {
+      "event_type": "contract",
+      "impact_level": "high",
+      "sentiment": "positive",
+      "sentiment_score_sign": "positive",
+      "keywords_must_include": ["삼성중공업", "LNG선"],
+      "sector_tags_must_include": ["조선"]
+    }
+  },
+  {
+    "article_id": "eval-mna-01",
+    "ticker": "035420",
+    "title": "네이버, 라인야후 지분 일본 소프트뱅크에 7조원 매각",
+    "body": "네이버는 라인야후 보유 지분 34.8%를 일본 소프트뱅크에 7조원에 매각한다고 공시했다. 일본 정부의 행정지도 이후 1년 만의 지분 정리.",
+    "published_at": "2026-04-18T16:00:00+09:00",
+    "source_url": "https://eval.fixture/mna-01",
+    "source_name": "조선비즈",
+    "expected": {
+      "event_type": "mna",
+      "impact_level": "high",
+      "sentiment": "neutral",
+      "keywords_must_include": ["네이버", "라인야후"]
+    }
+  },
+  {
+    "article_id": "eval-lawsuit-01",
+    "ticker": "005490",
+    "title": "포스코, 美 철강 반덤핑 관세 소송 1심 승소…대법원 상고 예정",
+    "body": "포스코가 미국 상무부를 상대로 한 냉연강판 반덤핑 관세(19.7%) 취소 소송에서 미국 국제무역법원 1심 승소 판결을 받았다. 상무부는 대법원 상고 방침.",
+    "published_at": "2026-04-17T13:00:00+09:00",
+    "source_url": "https://eval.fixture/lawsuit-01",
+    "source_name": "뉴스1",
+    "expected": {
+      "event_type": "lawsuit",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["포스코"]
+    }
+  },
+  {
+    "article_id": "eval-regulation-01",
+    "ticker": "055550",
+    "title": "금감원, 4대 금융지주에 자본규제 강화 지시…배당 축소 전망",
+    "body": "금융감독원이 KB·신한·하나·우리 4대 금융지주에 보통주자본비율(CET1) 13.5% 이상 유지를 요구했다. 이로 인해 올해 배당성향이 30% → 25%로 하락할 전망.",
+    "published_at": "2026-04-16T09:00:00+09:00",
+    "source_url": "https://eval.fixture/regulation-01",
+    "source_name": "이데일리",
+    "expected": {
+      "event_type": "regulation",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["금감원"],
+      "sector_tags_must_include": ["금융"]
+    }
+  },
+  {
+    "article_id": "eval-market-movement-01",
+    "ticker": "069500",
+    "title": "코스피 3200 돌파…외국인 3조 순매수, 반도체 주도",
+    "body": "코스피지수가 전일비 2.1% 오른 3,204p로 3200선을 돌파했다. 외국인이 3조원 순매수하며 반도체·바이오 업종이 상승을 주도. 거래대금은 18조원으로 연중 최대.",
+    "published_at": "2026-04-15T15:45:00+09:00",
+    "source_url": "https://eval.fixture/market-01",
+    "source_name": "연합인포맥스",
+    "expected": {
+      "event_type": "market_movement",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["코스피"]
+    }
+  },
+  {
+    "article_id": "eval-product-01",
+    "ticker": "207940",
+    "title": "삼성바이오로직스, 美 FDA 알츠하이머 신약 '레켐비' 바이오시밀러 상용화 승인",
+    "body": "삼성바이오로직스가 개발한 알츠하이머 치료제 레켐비(레카네맙)의 바이오시밀러 'SB17'이 미국 FDA 승인을 받아 4분기 상용화된다. 연 매출 1조원 기대.",
+    "published_at": "2026-04-14T08:00:00+09:00",
+    "source_url": "https://eval.fixture/product-01",
+    "source_name": "머니투데이",
+    "expected": {
+      "event_type": "product",
+      "impact_level": "high",
+      "sentiment": "positive",
+      "keywords_must_include": ["삼성바이오로직스"],
+      "sector_tags_must_include": ["제약"]
+    }
+  },
+  {
+    "article_id": "eval-shareholder-return-01",
+    "ticker": "000270",
+    "title": "기아, 자사주 5000억원 매입·소각…배당성향 40%로 상향",
+    "body": "기아는 이사회 결의로 자사주 5,000억원을 매입해 전량 소각한다고 발표했다. 배당성향도 기존 30% → 40%로 상향. 밸류업 프로그램의 일환.",
+    "published_at": "2026-04-13T17:00:00+09:00",
+    "source_url": "https://eval.fixture/sh-ret-01",
+    "source_name": "한경비즈니스",
+    "expected": {
+      "event_type": "shareholder_return",
+      "impact_level": "high",
+      "sentiment": "positive",
+      "keywords_must_include": ["기아", "자사주"],
+      "sector_tags_must_include": ["자동차"]
+    }
+  },
+  {
+    "article_id": "eval-investment-01",
+    "ticker": "247540",
+    "title": "에코프로비엠, 유상증자 1조원 결정…신규 양극재 공장 증설 재원",
+    "body": "에코프로비엠이 1조원 규모 유상증자를 결정했다. 기준가 대비 15% 할인 발행이며, 자금은 헝가리 양극재 공장 증설에 투입된다. 기존 주주 희석률 8%.",
+    "published_at": "2026-04-12T18:00:00+09:00",
+    "source_url": "https://eval.fixture/inv-01",
+    "source_name": "서울경제",
+    "expected": {
+      "event_type": "investment",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["에코프로비엠", "유상증자"]
+    }
+  },
+  {
+    "article_id": "eval-bankruptcy-01",
+    "ticker": "079550",
+    "title": "LIG넥스원 자회사 LIG시스템, 법정관리 신청…상장폐지 위기",
+    "body": "LIG넥스원 자회사인 LIG시스템이 누적 영업손실 확대로 서울회생법원에 법정관리를 신청했다. 자본잠식률 210%, 상장폐지 사유 발생.",
+    "published_at": "2026-04-11T15:00:00+09:00",
+    "source_url": "https://eval.fixture/bank-01",
+    "source_name": "파이낸셜뉴스",
+    "expected": {
+      "event_type": "bankruptcy",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "keywords_must_include": ["법정관리"]
+    }
+  },
+  {
+    "article_id": "eval-personnel-01",
+    "ticker": "105560",
+    "title": "KB금융, 이승호 부사장 승진…차기 회장 후보로 부상",
+    "body": "KB금융지주는 이사회에서 이승호 부사장을 사장으로 승진시켰다. 윤종규 현 회장의 임기 만료(2027년 3월)를 앞두고 차기 회장 후보 구도가 형성되는 모양새.",
+    "published_at": "2026-04-10T11:00:00+09:00",
+    "source_url": "https://eval.fixture/pers-01",
+    "source_name": "한겨레",
+    "expected": {
+      "event_type": "personnel",
+      "impact_level": "medium",
+      "sentiment": "neutral",
+      "keywords_must_include": ["KB금융"]
+    }
+  },
+  {
+    "article_id": "eval-fund-product-01",
+    "ticker": "465580",
+    "title": "ACE 미국빅테크TOP7 ETF 순자산 3조 돌파…미래에셋 압도",
+    "body": "한국투자신탁운용의 'ACE 미국빅테크TOP7 Plus' ETF 순자산이 3조원을 넘어섰다. 미래에셋 TIGER 미국나스닥100의 5.8조를 위협하는 수준까지 성장.",
+    "published_at": "2026-04-09T10:30:00+09:00",
+    "source_url": "https://eval.fixture/fund-01",
+    "source_name": "더벨",
+    "expected": {
+      "event_type": "fund_product",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["ETF"]
+    }
+  },
+  {
+    "article_id": "eval-analyst-rating-01",
+    "ticker": "000660",
+    "title": "SK증권, SK하이닉스 목표가 32만원 → 38만원 상향…HBM4 모멘텀",
+    "body": "SK증권은 SK하이닉스 투자의견 매수, 목표주가를 32만원에서 38만원으로 상향했다. HBM4 양산 시점이 6개월 앞당겨져 2027년 실적 추정치를 15% 상향.",
+    "published_at": "2026-04-08T08:30:00+09:00",
+    "source_url": "https://eval.fixture/analyst-01",
+    "source_name": "인포스탁",
+    "expected": {
+      "event_type": "analyst_rating",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["SK하이닉스"],
+      "sector_tags_must_include": ["반도체"]
+    }
+  },
+  {
+    "article_id": "eval-strike-01",
+    "ticker": "005380",
+    "title": "현대차 노조, 임금 8% 인상·정년 65세 요구하며 파업 돌입",
+    "body": "현대차 노조가 임금 8% 인상과 정년 65세 연장을 요구하며 24일부터 4시간 부분파업에 돌입했다. 울산 1·2·3공장 생산량 1만대 차질 전망.",
+    "published_at": "2026-04-24T09:00:00+09:00",
+    "source_url": "https://eval.fixture/strike-01",
+    "source_name": "국민일보",
+    "expected": {
+      "event_type": "strike",
+      "impact_level": "medium",
+      "sentiment": "negative",
+      "keywords_must_include": ["현대차", "파업"],
+      "sector_tags_must_include": ["자동차"]
+    }
+  }
+]

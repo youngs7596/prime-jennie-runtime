@@ -178,13 +178,9 @@ services:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
       VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-LGAI-EXAONE/EXAONE-4.0-32B-AWQ}
-      VLLM_EMBED_URL: ${VLLM_EMBED_URL:-http://host.docker.internal:8002/v1}
-      VLLM_EMBED_MODEL: ${VLLM_EMBED_MODEL:-kure-v1}
-      QDRANT_URL: ${QDRANT_URL:-http://host.docker.internal:6333}
-      QDRANT_COLLECTION_V3: ${QDRANT_COLLECTION_V3:-v3_news_sentiments}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     extra_hosts:
-      # v2 가 host 네트워크로 올라가 있는 Qdrant/vLLM 에 접근 (Linux 호환).
+      # v2 가 host 네트워크로 올라가 있는 vLLM 에 접근 (Linux 호환).
       - "host.docker.internal:host-gateway"
     depends_on:
       postgres:

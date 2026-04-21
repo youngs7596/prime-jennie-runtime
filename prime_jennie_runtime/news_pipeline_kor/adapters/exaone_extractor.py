@@ -1,0 +1,252 @@
+"""EXAONE 4.0 event extraction adapter — LiteLLM 경유.
+
+2026-04-21 설계 전환 (기존 exaone_sentiment 대체):
+- 출력 형태: sentiment score 하나 → ``NewsEvent`` structured JSON
+- event_type / impact_level / sentiment / time_horizon / keywords / sector_tags /
+  financial_signals / confidence 를 한 번에 추출
+
+Scout/Macro 가 RDB 조건식으로 소비 → 벡터 DB 의 semantic duplicate 문제 회피.
+
+구조:
+- ``LiteLLMEventExtractor`` — LiteLLM 호출. ``completion_fn`` 주입으로 테스트 가능.
+- 실패 시 'other/low/neutral' NewsEvent 반환 (at-most-once 정책).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, get_args
+
+from ..models import (
+    EventType,
+    FinancialSignal,
+    ImpactLevel,
+    NewsArticle,
+    NewsEvent,
+    SentimentLabel,
+    SignalDirection,
+    TimeHorizon,
+)
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MODEL = "ollama/exaone3.5:32b"
+
+_VALID_EVENT_TYPES: tuple[str, ...] = get_args(EventType)
+_VALID_IMPACT: tuple[str, ...] = get_args(ImpactLevel)
+_VALID_SENTIMENT: tuple[str, ...] = get_args(SentimentLabel)
+_VALID_HORIZONS: tuple[str, ...] = get_args(TimeHorizon)
+_VALID_DIRECTIONS: tuple[str, ...] = get_args(SignalDirection)
+
+_PROMPT_TEMPLATE = """다음 한국 주식 뉴스에서 메타데이터를 JSON 으로 추출하세요.
+
+종목코드: {ticker}
+헤드라인: {title}
+본문(발췌): {body_excerpt}
+
+필드 정의:
+- event_type: {event_types} 중 하나
+- impact_level: {impact_levels} 중 하나 (주가 영향 크기)
+- sentiment: {sentiments} 중 하나
+- sentiment_score: -1.0~+1.0 (0=중립)
+- time_horizon: {horizons} 중 하나
+  (immediate=당일, short=1주 이내, medium=1개월 이내, long=분기 이상)
+- keywords: 한국어 키워드 3~5개 배열
+- sector_tags: 관련 섹터 태그 0~3개 (예: 반도체/자동차/제약)
+- financial_signals: [{{"type":"revenue|profit|guidance|dividend|margin",
+  "direction":"up|down|flat"}}, ...] 0~3개
+- confidence: 0.0~1.0 분류 확신도
+
+응답은 JSON 오브젝트로만. 다른 텍스트 금지.
+예시:
+{{"event_type":"earnings","impact_level":"high","sentiment":"positive",
+"sentiment_score":0.7,"time_horizon":"short",
+"keywords":["어닝서프라이즈","매출","영업이익"],"sector_tags":["반도체"],
+"financial_signals":[{{"type":"revenue","direction":"up"}},
+{{"type":"profit","direction":"up"}}],"confidence":0.9}}"""
+
+CompletionFn = Callable[..., Awaitable[Any]]
+
+
+@dataclass
+class LiteLLMEventExtractor:
+    """EXAONE structured JSON 추출 ``EventExtractor``."""
+
+    model: str = DEFAULT_MODEL
+    api_base: str | None = None
+    completion_fn: CompletionFn | None = None
+    body_excerpt_chars: int = 400
+    model_name_override: str | None = None
+    temperature: float = 0.1
+    extra_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    async def extract(self, article: NewsArticle) -> NewsEvent:
+        prompt = _PROMPT_TEMPLATE.format(
+            ticker=article.ticker,
+            title=article.title,
+            body_excerpt=article.body[: self.body_excerpt_chars] or "(본문 없음)",
+            event_types="/".join(_VALID_EVENT_TYPES),
+            impact_levels="/".join(_VALID_IMPACT),
+            sentiments="/".join(_VALID_SENTIMENT),
+            horizons="/".join(_VALID_HORIZONS),
+        )
+
+        raw = await self._call_llm(prompt)
+        parsed = _parse_event_json(raw)
+        if parsed is None:
+            logger.warning(
+                "exaone extractor parse failed: article=%s raw=%s",
+                article.article_id,
+                (raw or "")[:200],
+            )
+            return self._fallback(article)
+
+        return _build_event(article, parsed, model=self.model_name_override or self.model)
+
+    async def _call_llm(self, prompt: str) -> str:
+        fn = self.completion_fn or await _default_completion_fn()
+        try:
+            response = await fn(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                api_base=self.api_base,
+                temperature=self.temperature,
+                **self.extra_kwargs,
+            )
+        except Exception:
+            logger.exception("exaone extractor completion failed")
+            return ""
+        return _extract_content(response)
+
+    def _fallback(self, article: NewsArticle) -> NewsEvent:
+        return NewsEvent(
+            article_id=article.article_id,
+            ticker=article.ticker,
+            published_at=article.published_at,
+            event_type="other",
+            impact_level="low",
+            sentiment="neutral",
+            sentiment_score=0.0,
+            time_horizon="short",
+            keywords=[],
+            sector_tags=[],
+            financial_signals=[],
+            confidence=0.0,
+            model=self.model_name_override or self.model,
+            analyzed_at=datetime.now(),
+        )
+
+
+# ---------------------------------------------------------------------
+# 헬퍼
+# ---------------------------------------------------------------------
+
+
+async def _default_completion_fn() -> CompletionFn:
+    import litellm  # type: ignore[import-untyped]
+
+    return litellm.acompletion  # type: ignore[return-value]
+
+
+def _extract_content(response: Any) -> str:
+    try:
+        choices = response["choices"] if isinstance(response, dict) else response.choices
+        first = choices[0]
+        message = first["message"] if isinstance(first, dict) else first.message
+        content = message["content"] if isinstance(message, dict) else message.content
+        return content or ""
+    except (KeyError, IndexError, AttributeError):
+        return ""
+
+
+_JSON_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _parse_event_json(raw: str) -> dict | None:
+    if not raw:
+        return None
+    cleaned = raw.replace("```json", "").replace("```", "").strip()
+
+    candidates = [cleaned]
+    match = _JSON_OBJ_RE.search(cleaned)
+    if match:
+        candidates.append(match.group(0))
+
+    for s in candidates:
+        try:
+            obj = json.loads(s)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def _coerce_enum(value: Any, valid: tuple[str, ...], default: str) -> str:
+    if isinstance(value, str) and value in valid:
+        return value
+    return default
+
+
+def _coerce_float(value: Any, *, lo: float, hi: float, default: float) -> float:
+    if isinstance(value, int | float):
+        return max(lo, min(hi, float(value)))
+    return default
+
+
+def _coerce_keyword_list(value: Any, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            out.append(item.strip())
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _coerce_signals(value: Any) -> list[FinancialSignal]:
+    if not isinstance(value, list):
+        return []
+    out: list[FinancialSignal] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        sig_type = item.get("type")
+        direction = item.get("direction")
+        if not isinstance(sig_type, str) or not isinstance(direction, str):
+            continue
+        if direction not in _VALID_DIRECTIONS:
+            continue
+        out.append(FinancialSignal(type=sig_type.strip()[:40], direction=direction))  # type: ignore[arg-type]
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _build_event(article: NewsArticle, parsed: dict, *, model: str) -> NewsEvent:
+    return NewsEvent(
+        article_id=article.article_id,
+        ticker=article.ticker,
+        published_at=article.published_at,
+        event_type=_coerce_enum(parsed.get("event_type"), _VALID_EVENT_TYPES, "other"),  # type: ignore[arg-type]
+        impact_level=_coerce_enum(parsed.get("impact_level"), _VALID_IMPACT, "low"),  # type: ignore[arg-type]
+        sentiment=_coerce_enum(parsed.get("sentiment"), _VALID_SENTIMENT, "neutral"),  # type: ignore[arg-type]
+        sentiment_score=_coerce_float(parsed.get("sentiment_score"), lo=-1.0, hi=1.0, default=0.0),
+        time_horizon=_coerce_enum(parsed.get("time_horizon"), _VALID_HORIZONS, "short"),  # type: ignore[arg-type]
+        keywords=_coerce_keyword_list(parsed.get("keywords"), limit=10),
+        sector_tags=_coerce_keyword_list(parsed.get("sector_tags"), limit=5),
+        financial_signals=_coerce_signals(parsed.get("financial_signals")),
+        confidence=_coerce_float(parsed.get("confidence"), lo=0.0, hi=1.0, default=0.5),
+        model=model,
+        analyzed_at=datetime.now(),
+    )
+
+
+__all__ = ["DEFAULT_MODEL", "LiteLLMEventExtractor"]

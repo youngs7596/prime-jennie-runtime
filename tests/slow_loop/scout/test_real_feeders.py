@@ -125,7 +125,7 @@ async def test_news_score_feeder_returns_entries_per_ticker():
     conn = _FakeConn(
         responses=[
             (
-                "FROM news_sentiments",
+                "FROM news_events",
                 [
                     {
                         "ticker": "005930",
@@ -157,7 +157,7 @@ async def test_news_score_feeder_returns_entries_per_ticker():
 
 @pytest.mark.asyncio
 async def test_news_score_feeder_passes_lookback_window():
-    conn = _FakeConn(responses=[("FROM news_sentiments", [])])
+    conn = _FakeConn(responses=[("FROM news_events", [])])
     feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn), lookback_hours=24.0)  # type: ignore[arg-type]
     await feeder.fetch(date(2026, 4, 20), ["005930"])
     sql, params = conn.executed[0]
@@ -183,7 +183,7 @@ async def test_news_score_feeder_clamps_out_of_range_score():
     conn = _FakeConn(
         responses=[
             (
-                "FROM news_sentiments",
+                "FROM news_events",
                 [{"ticker": "005930", "avg_score": 2.5, "cnt": 1, "latest": latest}],
             )
         ]

@@ -1,31 +1,40 @@
-"""감성 분석 추상화 (Phase 1).
+"""감성/메타데이터 추출 추상화.
 
-v2 운영: EXAONE 4.0 Q8 (vLLM 호스팅). Phase 1 Track E는 Protocol + 결정론 Stub.
-실제 LLM 어댑터는 Phase 2에서 LiteLLM 경유로 합쳐서 추가.
+2026-04-21 이후 운영은 ``EventExtractor`` 로 전환 — EXAONE 이 이벤트 분류 + 메타
+데이터를 structured JSON 으로 추출. 과거 ``SentimentAnalyzer`` Protocol 은
+테스트/호환용으로 일부 남기지만 파이프라인 기본 경로는 Event.
 
-스코어 산식 (Stub):
-- 긍정 키워드 hit 수 - 부정 키워드 hit 수
-- ÷ (긍정 + 부정 키워드 총량 + 1)  ← 0/0 회피, 0~±1 클램프
-- label은 -0.2/+0.2 임계값으로 이산화
+``Embedder`` 는 Qdrant 제거와 함께 사라짐.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from .models import NewsArticle, SentimentLabel, SentimentScore
+from .models import (
+    EventType,
+    ImpactLevel,
+    NewsArticle,
+    NewsEvent,
+    SentimentLabel,
+    SentimentScore,
+    TimeHorizon,
+)
+
+# ---------------------------------------------------------------------
+# SentimentAnalyzer — legacy
+# ---------------------------------------------------------------------
 
 
 @runtime_checkable
 class SentimentAnalyzer(Protocol):
-    """단일 기사 → SentimentScore. 배치는 호출자가 비동기 gather로."""
+    """단일 기사 → SentimentScore. legacy path."""
 
     async def analyze(self, article: NewsArticle) -> SentimentScore: ...
 
 
-# Phase 1 결정론 stub — 운영 EXAONE 대체
 _DEFAULT_POSITIVE = (
     "상승",
     "호조",
@@ -60,9 +69,17 @@ def _label_for(
     return "neutral"
 
 
+def _score_from_keywords(text: str, positive: tuple[str, ...], negative: tuple[str, ...]) -> float:
+    pos = sum(1 for kw in positive if kw in text)
+    neg = sum(1 for kw in negative if kw in text)
+    denom = pos + neg + 1
+    raw = (pos - neg) / denom
+    return max(-1.0, min(1.0, raw))
+
+
 @dataclass
 class StubSentimentAnalyzer:
-    """키워드 기반 결정론 분석. 같은 입력 → 같은 출력 (테스트 재현성)."""
+    """키워드 기반 결정론 감성. legacy 호환 테스트."""
 
     positive_keywords: tuple[str, ...] = _DEFAULT_POSITIVE
     negative_keywords: tuple[str, ...] = _DEFAULT_NEGATIVE
@@ -70,14 +87,7 @@ class StubSentimentAnalyzer:
 
     async def analyze(self, article: NewsArticle) -> SentimentScore:
         text = f"{article.title}\n{article.body}"
-        pos = sum(1 for kw in self.positive_keywords if kw in text)
-        neg = sum(1 for kw in self.negative_keywords if kw in text)
-
-        denom = pos + neg + 1
-        raw = (pos - neg) / denom
-        # ±1 클램프 (이미 -1~+1이지만 명시적으로)
-        score = max(-1.0, min(1.0, raw))
-
+        score = _score_from_keywords(text, self.positive_keywords, self.negative_keywords)
         return SentimentScore(
             article_id=article.article_id,
             ticker=article.ticker,
@@ -89,32 +99,85 @@ class StubSentimentAnalyzer:
 
 
 # ---------------------------------------------------------------------
-# 임베더 — Track E의 Qdrant 아카이빙 단계용 추상화
+# EventExtractor — 신규 운영 경로
 # ---------------------------------------------------------------------
 
 
 @runtime_checkable
-class Embedder(Protocol):
-    """기사 텍스트 → 벡터. 운영: kure-v1 (768d). 테스트: 결정론 stub."""
+class EventExtractor(Protocol):
+    """단일 기사 → NewsEvent. EXAONE structured JSON 추출."""
 
-    dimension: int
+    async def extract(self, article: NewsArticle) -> NewsEvent: ...
 
-    async def embed(self, article: NewsArticle) -> list[float]: ...
+
+# event_type 키워드 힌트 (Stub 전용) — 실 운영 LLM 은 이보다 훨씬 정교.
+_EVENT_TYPE_HINTS: tuple[tuple[EventType, tuple[str, ...]], ...] = (
+    ("earnings", ("실적", "매출", "영업이익", "순이익", "어닝", "분기", "흑자", "적자")),
+    ("mna", ("인수", "합병", "M&A", "매각", "인수합병", "지분")),
+    ("lawsuit", ("소송", "고소", "제소", "손해배상", "패소", "승소")),
+    ("product", ("출시", "공개", "론칭", "신제품", "상용화")),
+    ("personnel", ("CEO", "대표", "선임", "사임", "인사", "취임")),
+    ("regulation", ("규제", "제재", "승인", "허가", "심사", "정책")),
+    ("contract", ("수주", "계약", "체결", "공급")),
+    ("strike", ("파업", "노조", "쟁의", "협상")),
+)
+
+
+def _infer_event_type(text: str) -> EventType:
+    for event_type, hints in _EVENT_TYPE_HINTS:
+        if any(kw in text for kw in hints):
+            return event_type
+    return "other"
+
+
+def _infer_impact(text: str, score: float) -> ImpactLevel:
+    if abs(score) >= 0.5:
+        return "high"
+    if abs(score) >= 0.2:
+        return "medium"
+    return "low"
+
+
+def _infer_time_horizon(event_type: EventType) -> TimeHorizon:
+    if event_type in ("earnings", "mna", "lawsuit"):
+        return "short"
+    if event_type in ("regulation", "personnel"):
+        return "medium"
+    if event_type == "strike":
+        return "immediate"
+    return "short"
 
 
 @dataclass
-class StubEmbedder:
-    """ticker + 기사 length 기반 결정론 벡터. 같은 article_id → 같은 vector."""
+class StubEventExtractor:
+    """결정론 키워드 기반 이벤트 추출기 — 테스트/개발 전용.
 
-    dimension: int = 8
-    seed_offset: float = 0.0
-    _cache: dict[str, list[float]] = field(default_factory=dict)
+    운영에선 ``LiteLLMEventExtractor`` (EXAONE structured JSON) 이 대체.
+    """
 
-    async def embed(self, article: NewsArticle) -> list[float]:
-        if article.article_id in self._cache:
-            return self._cache[article.article_id]
-        # 단순 결정론: article_id의 ord 합으로 vector 채움
-        seed = sum(ord(c) for c in article.article_id)
-        vec = [((seed + i) % 100) / 100.0 + self.seed_offset for i in range(self.dimension)]
-        self._cache[article.article_id] = vec
-        return vec
+    positive_keywords: tuple[str, ...] = _DEFAULT_POSITIVE
+    negative_keywords: tuple[str, ...] = _DEFAULT_NEGATIVE
+    model_name: str = "stub-event-v1"
+
+    async def extract(self, article: NewsArticle) -> NewsEvent:
+        text = f"{article.title}\n{article.body}"
+        score = _score_from_keywords(text, self.positive_keywords, self.negative_keywords)
+        event_type = _infer_event_type(text)
+        return NewsEvent(
+            article_id=article.article_id,
+            ticker=article.ticker,
+            published_at=article.published_at,
+            event_type=event_type,
+            impact_level=_infer_impact(text, score),
+            sentiment=_label_for(score),
+            sentiment_score=score,
+            time_horizon=_infer_time_horizon(event_type),
+            keywords=[kw for kw in (self.positive_keywords + self.negative_keywords) if kw in text][
+                :5
+            ],
+            sector_tags=[],
+            financial_signals=[],
+            confidence=0.5,
+            model=self.model_name,
+            analyzed_at=datetime.now(),
+        )

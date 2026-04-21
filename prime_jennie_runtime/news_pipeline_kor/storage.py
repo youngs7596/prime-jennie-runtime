@@ -1,30 +1,30 @@
-"""Sentiment 저장소 + Vector store 추상화.
+"""Sentiment/Event 저장소 추상화.
 
-Phase 1 Track E:
-- SentimentRepo: ticker별 SentimentScore + 기사 메타. Scout feeder가 read.
-- VectorStore: Qdrant 추상화. Phase 1은 InMemory만, Phase 2에서 httpx adapter.
+- SentimentRepo: 과거 호환 — news_sentiments 저장. 2026-04-21 이후 write 중단.
+- EventRepo: 신규 — news_events 테이블 upsert.
 
-운영(Phase 2+) 어댑터:
-- PostgresSentimentRepo: v3 schema의 news_sentiments 테이블
-- QdrantVectorStore: kure-v1 임베딩 + 컬렉션 검색
+Qdrant/VectorStore 계열은 2026-04-21 제거 (메타데이터 RDB 전환).
 
-InMemory 구현은 단위 테스트와 single-process dev에서 충분.
+운영 어댑터:
+- PostgresSentimentRepo: migrations/004 news_sentiments (legacy)
+- PostgresEventRepo: migrations/014 news_events
+
+InMemory 구현은 단위 테스트 전용.
 """
 
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Protocol, runtime_checkable
 
-from .models import NewsArticle, NewsEmbedding, SentimentScore
+from .models import NewsArticle, NewsEvent, SentimentScore
 
 
 @runtime_checkable
 class SentimentRepo(Protocol):
-    """ticker별 (article_id → SentimentScore) 저장소."""
+    """legacy ticker × article_id → SentimentScore 저장소."""
 
     async def upsert(
         self, score: SentimentScore, *, article: NewsArticle | None = None
@@ -40,20 +40,18 @@ class SentimentRepo(Protocol):
 
 
 @runtime_checkable
-class VectorStore(Protocol):
-    """기사 임베딩 upsert + ticker별 top-k 검색."""
+class EventRepo(Protocol):
+    """news_events 저장소 — 2026-04-21 이후 신규 쓰기 경로."""
 
-    async def upsert(self, embedding: NewsEmbedding) -> None: ...
+    async def upsert(self, event: NewsEvent, *, article: NewsArticle | None = None) -> None: ...
 
-    async def top_k(
+    async def recent_for_ticker(
         self,
-        query_vector: list[float],
+        ticker: str,
         *,
-        ticker: str | None,
-        k: int,
-    ) -> list[tuple[str, float]]:
-        """``[(article_id, similarity)]`` (코사인 또는 L2-역수). 구현 자유."""
-        ...
+        since: datetime,
+        now: datetime | None = None,
+    ) -> list[NewsEvent]: ...
 
 
 # ---------------------------------------------------------------------
@@ -63,7 +61,7 @@ class VectorStore(Protocol):
 
 @dataclass
 class InMemorySentimentRepo:
-    """append-only 저장. 같은 article_id가 들어오면 덮어씀 (재분석 시 최신 우선)."""
+    """append-only 저장. 같은 article_id 면 덮어씀. legacy tests 전용."""
 
     _by_ticker: dict[str, dict[str, SentimentScore]] = field(
         default_factory=lambda: defaultdict(dict)
@@ -87,48 +85,36 @@ class InMemorySentimentRepo:
         out.sort(key=lambda s: s.analyzed_at, reverse=True)
         return out
 
-    # 테스트 보조
     def total_count(self) -> int:
         return sum(len(b) for b in self._by_ticker.values())
 
 
 @dataclass
-class InMemoryVectorStore:
-    """간단한 코사인 유사도 검색."""
+class InMemoryEventRepo:
+    """news_events 인메모리 구현. 테스트/dev."""
 
-    _store: dict[str, NewsEmbedding] = field(default_factory=dict)
+    _by_ticker: dict[str, dict[str, NewsEvent]] = field(default_factory=lambda: defaultdict(dict))
+    _articles: dict[str, NewsArticle] = field(default_factory=dict)
 
-    async def upsert(self, embedding: NewsEmbedding) -> None:
-        self._store[embedding.article_id] = embedding
+    async def upsert(self, event: NewsEvent, *, article: NewsArticle | None = None) -> None:
+        self._by_ticker[event.ticker][event.article_id] = event
+        if article is not None:
+            self._articles[article.article_id] = article
 
-    async def top_k(
+    async def recent_for_ticker(
         self,
-        query_vector: list[float],
+        ticker: str,
         *,
-        ticker: str | None,
-        k: int,
-    ) -> list[tuple[str, float]]:
-        scored: list[tuple[str, float]] = []
-        for emb in self._store.values():
-            if ticker is not None and emb.ticker != ticker:
-                continue
-            scored.append((emb.article_id, _cosine(query_vector, emb.vector)))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:k]
+        since: datetime,
+        now: datetime | None = None,
+    ) -> list[NewsEvent]:
+        bucket = self._by_ticker.get(ticker, {})
+        out = [e for e in bucket.values() if e.analyzed_at >= since]
+        out.sort(key=lambda e: e.analyzed_at, reverse=True)
+        return out
 
-    def __len__(self) -> int:
-        return len(self._store)
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(y * y for y in b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
+    def total_count(self) -> int:
+        return sum(len(b) for b in self._by_ticker.values())
 
 
 # ---------------------------------------------------------------------

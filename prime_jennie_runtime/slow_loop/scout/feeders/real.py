@@ -74,11 +74,11 @@ class RealUniverseFeeder:
 
 
 class RealNewsScoreFeeder:
-    """news_sentiments ticker 별 최근 48h 평균 score + staleness_hours.
+    """news_events ticker 별 최근 48h 평균 sentiment_score + staleness_hours.
 
-    `NewsPipelineScoutFeeder` 와 동일한 시맨틱 (기사 0건 ticker 는 zero entry
-    로 명시) — but asyncpg 대신 slow_loop 가 이미 가진 SQLAlchemy AsyncEngine
-    을 재사용해 의존성 단순화.
+    2026-04-21 전환: news_sentiments (legacy) → news_events (metadata 추출 결과).
+    Scout 호환 필드는 avg(sentiment_score). event_type/impact_level 활용은 후속
+    (Scout 프롬프트 확장 시).
     """
 
     def __init__(
@@ -99,10 +99,10 @@ class RealNewsScoreFeeder:
             res = await conn.execute(
                 text(
                     "SELECT ticker, "
-                    "AVG(score)::float AS avg_score, "
+                    "AVG(sentiment_score)::float AS avg_score, "
                     "COUNT(*)::int AS cnt, "
                     "MAX(analyzed_at) AS latest "
-                    "FROM news_sentiments "
+                    "FROM news_events "
                     "WHERE ticker = ANY(:tickers) AND analyzed_at >= :since "
                     "GROUP BY ticker"
                 ),

@@ -2,7 +2,7 @@
 
 stub → real 드롭인 교체를 실제 파이프라인 전 구간에서 검증.
 
-- News: ``InMemorySentimentRepo`` + ``NewsPipelineScoutFeeder`` 로 ticker별 평균 score 산출
+- News: ``InMemoryEventRepo`` + ``NewsPipelineScoutFeeder`` 로 ticker별 평균 score 산출
 - Screening: ``ScreeningToolAdapter(backend="subprocess")`` 로 Scout 코드가 자식 프로세스에서
   실제로 ``exec`` 되고 list[ScreeningCandidate] 를 돌려주는지 확인
 
@@ -27,9 +27,9 @@ from minyoung_mah import (
 
 from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS
 from prime_jennie_runtime.news_pipeline_kor import (
-    InMemorySentimentRepo,
+    InMemoryEventRepo,
+    NewsEvent,
     NewsPipelineScoutFeeder,
-    SentimentScore,
 )
 from prime_jennie_runtime.position_sheet.schema import KST
 from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
@@ -105,12 +105,22 @@ def _macro_output_open() -> MacroGateOutput:
     )
 
 
-def _score(ticker: str, article_id: str, score: float, when: datetime) -> SentimentScore:
-    return SentimentScore(
+def _score(ticker: str, article_id: str, score: float, when: datetime) -> NewsEvent:
+    sentiment = "positive" if score > 0.2 else ("negative" if score < -0.2 else "neutral")
+    return NewsEvent(
         article_id=article_id,
         ticker=ticker,
-        score=score,
-        label="positive" if score > 0.2 else ("negative" if score < -0.2 else "neutral"),
+        published_at=when,
+        event_type="other",
+        impact_level="medium",
+        sentiment=sentiment,  # type: ignore[arg-type]
+        sentiment_score=score,
+        time_horizon="short",
+        keywords=[],
+        sector_tags=[],
+        financial_signals=[],
+        confidence=0.5,
+        model="test",
         analyzed_at=when,
     )
 
@@ -120,7 +130,7 @@ def _make_real_components(
     observer,
     scout_out: ScoutOutput,
     macro_out: MacroGateOutput,
-    sentiment_repo: InMemorySentimentRepo,
+    sentiment_repo: InMemoryEventRepo,
     screening: ScreeningInvoker,
 ) -> SlowLoopComponents:
     stub_model = StubChatModel({ScoutOutput: scout_out, MacroGateOutput: macro_out})
@@ -137,7 +147,7 @@ def _make_real_components(
 
     scout_builder = ScoutContextBuilder(
         universe=StubUniverseFeeder(),
-        news=NewsPipelineScoutFeeder(sentiment_repo=sentiment_repo),
+        news=NewsPipelineScoutFeeder(event_repo=sentiment_repo),
         sector=StubSectorMomentumFeeder(),
         market=StubMarketSummaryFeeder(),
     )
@@ -175,7 +185,7 @@ async def test_real_feeder_and_subprocess_adapter_publish_sheets(fake_redis):
     as_of = date(2026, 4, 16)
     t = datetime.combine(as_of, datetime.min.time()).replace(hour=12)
 
-    repo = InMemorySentimentRepo()
+    repo = InMemoryEventRepo()
     # 005930, 000660 → score > 0.3 (발행 대상)
     await repo.upsert(_score("005930", "a1", 0.8, t))
     await repo.upsert(_score("005930", "a2", 0.6, t - timedelta(hours=2)))
@@ -230,7 +240,7 @@ async def test_real_feeder_empty_repo_subprocess_still_runs(fake_redis):
     Scout 코드가 score >= 0.3 필터링이므로 결과는 0건 → no_candidates 로 skipped.
     핵심은 real adapter가 JSON 직렬화 실패 없이 정상 spawn/return 한다는 점."""
     observer = CollectingObserver()
-    repo = InMemorySentimentRepo()  # 비어있음
+    repo = InMemoryEventRepo()  # 비어있음
     adapter = ScreeningToolAdapter(backend="subprocess", timeout_s=30.0)
 
     comp = _make_real_components(
@@ -270,7 +280,7 @@ async def test_real_adapter_handles_json_unsafe_context_via_pipeline(fake_redis)
     as_of = date(2026, 4, 16)
     t = datetime.combine(as_of, datetime.min.time()).replace(hour=12)
 
-    repo = InMemorySentimentRepo()
+    repo = InMemoryEventRepo()
     await repo.upsert(_score("005930", "a1", 0.9, t))  # 높은 score
 
     observer = CollectingObserver()

@@ -1,12 +1,17 @@
-"""News Pipeline 단일 사이클 오케스트레이션.
+"""News Pipeline — v2 3-stage (collect/analyze/archive) 흐름을 Redis Stream 으로 분리.
 
-v2 원본은 3개 스레드(collector / analyzer / archiver) + Redis Stream 분리. v3는
-일단 단일 함수로 한 사이클을 처리 (테스트 용이 + 스케줄러 분리). 운영시엔 cron
-또는 별도 서비스가 `run_cycle`을 주기 호출.
+v2 원본: ``prime_jennie/services/news/{collector,analyzer,archiver}.py``. v2 는 3 개
+스레드가 각자 상시 구동하며 ``stream:news:raw`` 로 consumer group 기반 소비.
+v3 초기 포팅 때는 단일 ``run_cycle`` 로 합쳐서 10 분 cron 이 전체 단계를 한번에
+돌렸는데, 그로 인해 분석 단계의 LLM 호출이 burst 로 몰려 GPU 팬 굉음의 원인이 됨
+(세션 2026-04-20). 그래서 v2 패턴으로 되돌린다.
 
 흐름:
-  crawl → dedup → analyze → upsert sentiment
-                       ↘ embed → upsert vector
+    collect_and_publish(universe)  : crawl → dedup → XADD v3:news:raw
+    analyze_stream_once()          : XREADGROUP → 배치 LLM → PG upsert → XACK
+    archive_stream_once()          : XREADGROUP → 배치 embed → Qdrant upsert → XACK
+
+각 메서드는 호출 1 회의 stats 를 반환. app.py 의 3 async loop 가 각자 호출.
 """
 
 from __future__ import annotations
@@ -14,30 +19,57 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 from .crawler import NewsCrawler
 from .dedup import NewsDeduplicator
 from .models import NewsArticle, SentimentScore
 from .sentiment import Embedder, SentimentAnalyzer
 from .storage import SentimentRepo, VectorStore
+from .stream import (
+    ANALYZER_BATCH,
+    ANALYZER_CONSUMER,
+    ANALYZER_GROUP,
+    ARCHIVER_BATCH,
+    ARCHIVER_CONSUMER,
+    ARCHIVER_GROUP,
+    BLOCK_MS,
+    NEWS_STREAM,
+    NEWS_STREAM_MAXLEN,
+    deserialize_article,
+    serialize_article,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class CycleStats:
-    """단일 사이클 결과 통계."""
+    """단일 호출 결과 통계. v2 상시 구동 모델에선 call 단위 경량 집계."""
 
     crawled: int = 0
-    deduped: int = 0  # dedup 통과 (= 신규)한 기사 수
+    deduped: int = 0  # stream 에 발행된 신규 기사 수
     analyzed: int = 0
     embedded: int = 0
     errors: list[str] = field(default_factory=list)
 
 
+def _ensure_group(redis_client: Any, stream: str, group: str) -> None:
+    """Consumer group 보장. 이미 있으면 BUSYGROUP 으로 무시.
+
+    ``redis_client`` 는 sync ``redis.Redis``. XGROUP CREATE 는 group metadata 작업이라
+    async 불필요 — pipeline 시작 시 한번만 호출되므로 blocking 영향도 무시 가능.
+    """
+    try:
+        redis_client.xgroup_create(stream, group, id="0", mkstream=True)
+    except Exception as exc:  # redis.ResponseError 는 import 회피 위해 catch-all
+        if "BUSYGROUP" not in str(exc):
+            raise
+
+
 @dataclass
 class NewsPipeline:
-    """필수 컴포넌트 묶음 + run_cycle. 의존 객체는 모두 Protocol."""
+    """필수 컴포넌트 묶음. app.py 가 3 async loop 로 이 객체를 호출."""
 
     crawler: NewsCrawler
     deduplicator: NewsDeduplicator
@@ -45,11 +77,23 @@ class NewsPipeline:
     sentiment_repo: SentimentRepo
     embedder: Embedder | None = None
     vector_store: VectorStore | None = None
+    _groups_ensured: bool = False
 
-    async def run_cycle(self, universe: list[str]) -> CycleStats:
-        """크롤링 → 중복 제거 → 감성 분석 → (선택) 임베딩 → 저장."""
+    def ensure_streams(self, redis_client: Any) -> None:
+        """Consumer group 생성 — app.py 시작 시 1 회. BUSYGROUP 은 ``_ensure_group`` 내부
+        에서 무시."""
+        _ensure_group(redis_client, NEWS_STREAM, ANALYZER_GROUP)
+        if self.embedder is not None and self.vector_store is not None:
+            _ensure_group(redis_client, NEWS_STREAM, ARCHIVER_GROUP)
+        self._groups_ensured = True
+
+    # ------------------------------------------------------------------
+    # Stage 1 — Collector
+    # ------------------------------------------------------------------
+
+    async def collect_and_publish(self, universe: list[str], redis_client: Any) -> CycleStats:
+        """crawl → dedup → stream 에 XADD. ``redis_client`` 는 sync ``redis.Redis``."""
         stats = CycleStats()
-
         try:
             articles = await self.crawler.crawl(universe)
         except Exception as e:
@@ -58,40 +102,140 @@ class NewsPipeline:
             return stats
 
         stats.crawled = len(articles)
+        if not articles:
+            return stats
+
+        # v2 와 동일: dedup 은 stream 발행 전 (분석/아카이빙 단에선 ACK 정책 단순)
         new_articles = [
             a for a in articles if self.deduplicator.is_new(a.source_url.unicode_string())
         ]
-        stats.deduped = len(new_articles)
-
         if not new_articles:
             return stats
 
-        # 감성 분석 + 임베딩 동시 — 같은 article을 두 추출에 흘림
-        sentiment_results = await asyncio.gather(
-            *(self._analyze_one(a) for a in new_articles),
+        pipe = redis_client.pipeline()
+        for article in new_articles:
+            pipe.xadd(NEWS_STREAM, serialize_article(article), maxlen=NEWS_STREAM_MAXLEN)
+        pipe.execute()
+        stats.deduped = len(new_articles)
+        return stats
+
+    # ------------------------------------------------------------------
+    # Stage 2 — Analyzer
+    # ------------------------------------------------------------------
+
+    async def analyze_stream_once(self, redis_client: Any) -> CycleStats:
+        """Stream → 배치 LLM 감성 분석 → PG upsert → XACK. 최대 ``ANALYZER_BATCH`` 건/호출."""
+        stats = CycleStats()
+        if not self._groups_ensured:
+            self.ensure_streams(redis_client)
+
+        # Pending 우선 처리: 재시작 후 미ACK 메시지 복구.
+        pending = _read_group(
+            redis_client, ANALYZER_GROUP, ANALYZER_CONSUMER, last_id="0", count=ANALYZER_BATCH
+        )
+        entries = pending or _read_group(
+            redis_client,
+            ANALYZER_GROUP,
+            ANALYZER_CONSUMER,
+            last_id=">",
+            count=ANALYZER_BATCH,
+            block_ms=BLOCK_MS,
+        )
+        if not entries:
+            return stats
+
+        # 파싱 + 배치 LLM 호출
+        parsed: list[tuple[bytes, NewsArticle]] = []
+        for msg_id, data in entries:
+            try:
+                article = deserialize_article(data)
+            except Exception as e:
+                logger.warning("analyzer parse failed id=%s: %s", msg_id, e)
+                stats.errors.append(f"parse:{msg_id!r}:{e}")
+                redis_client.xack(NEWS_STREAM, ANALYZER_GROUP, msg_id)
+                continue
+            parsed.append((msg_id, article))
+
+        if not parsed:
+            return stats
+
+        results: list[SentimentScore | BaseException] = await asyncio.gather(
+            *(self._analyze_one(a) for _, a in parsed),
             return_exceptions=True,
         )
-        for result, article in zip(sentiment_results, new_articles, strict=True):
-            if isinstance(result, BaseException):
-                stats.errors.append(f"analyze:{article.article_id}:{result}")
-                continue
-            await self.sentiment_repo.upsert(result, article=article)
-            stats.analyzed += 1
 
-        if self.embedder is not None and self.vector_store is not None:
-            embed_results = await asyncio.gather(
-                *(self._embed_one(a) for a in new_articles),
-                return_exceptions=True,
-            )
-            for result, article in zip(embed_results, new_articles, strict=True):
+        for (msg_id, article), result in zip(parsed, results, strict=True):
+            try:
+                if isinstance(result, BaseException):
+                    stats.errors.append(f"analyze:{article.article_id}:{result}")
+                    continue
+                await self.sentiment_repo.upsert(result, article=article)
+                stats.analyzed += 1
+            finally:
+                # v2 와 동일하게 at-most-once — 저장 실패해도 ACK (DLQ 없음).
+                # 누락된 기사는 다음 cycle 의 dedup 이 new 로 다시 picked up.
+                redis_client.xack(NEWS_STREAM, ANALYZER_GROUP, msg_id)
+
+        return stats
+
+    # ------------------------------------------------------------------
+    # Stage 3 — Archiver
+    # ------------------------------------------------------------------
+
+    async def archive_stream_once(self, redis_client: Any) -> CycleStats:
+        """Stream → 배치 embed → Qdrant upsert → XACK. 1 회 호출 = 최대 ``ARCHIVER_BATCH`` 건."""
+        stats = CycleStats()
+        if self.embedder is None or self.vector_store is None:
+            return stats
+        if not self._groups_ensured:
+            self.ensure_streams(redis_client)
+
+        pending = _read_group(
+            redis_client, ARCHIVER_GROUP, ARCHIVER_CONSUMER, last_id="0", count=ARCHIVER_BATCH
+        )
+        entries = pending or _read_group(
+            redis_client,
+            ARCHIVER_GROUP,
+            ARCHIVER_CONSUMER,
+            last_id=">",
+            count=ARCHIVER_BATCH,
+            block_ms=BLOCK_MS,
+        )
+        if not entries:
+            return stats
+
+        parsed: list[tuple[bytes, NewsArticle]] = []
+        for msg_id, data in entries:
+            try:
+                article = deserialize_article(data)
+            except Exception as e:
+                logger.warning("archiver parse failed id=%s: %s", msg_id, e)
+                stats.errors.append(f"parse:{msg_id!r}:{e}")
+                redis_client.xack(NEWS_STREAM, ARCHIVER_GROUP, msg_id)
+                continue
+            parsed.append((msg_id, article))
+
+        if not parsed:
+            return stats
+
+        embed_results = await asyncio.gather(
+            *(self._embed_one(a) for _, a in parsed),
+            return_exceptions=True,
+        )
+        for (msg_id, article), result in zip(parsed, embed_results, strict=True):
+            try:
                 if isinstance(result, BaseException):
                     stats.errors.append(f"embed:{article.article_id}:{result}")
                     continue
                 stats.embedded += 1
+            finally:
+                redis_client.xack(NEWS_STREAM, ARCHIVER_GROUP, msg_id)
 
         return stats
 
-    # ----- internal helpers -----
+    # ------------------------------------------------------------------
+    # internal helpers
+    # ------------------------------------------------------------------
 
     async def _analyze_one(self, article: NewsArticle) -> SentimentScore:
         return await self.analyzer.analyze(article)
@@ -113,3 +257,28 @@ class NewsPipeline:
         )
         await self.vector_store.upsert(emb)
         return True
+
+
+def _read_group(
+    redis_client: Any,
+    group: str,
+    consumer: str,
+    *,
+    last_id: str,
+    count: int,
+    block_ms: int | None = None,
+) -> list[tuple[Any, dict]]:
+    """XREADGROUP 얇은 래퍼. ``[(msg_id, data_dict), ...]`` 로 flatten.
+
+    ``last_id="0"`` → pending 재처리, ``last_id=">"`` → 신규 메시지 (block_ms 대기).
+    """
+    kwargs: dict[str, Any] = {"count": count}
+    if block_ms is not None:
+        kwargs["block"] = block_ms
+    messages = redis_client.xreadgroup(group, consumer, {NEWS_STREAM: last_id}, **kwargs)
+    if not messages:
+        return []
+    out: list[tuple[Any, dict]] = []
+    for _stream_name, msg_entries in messages:
+        out.extend(msg_entries)
+    return out

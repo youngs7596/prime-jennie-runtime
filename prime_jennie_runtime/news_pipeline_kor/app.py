@@ -1,7 +1,12 @@
 """News Pipeline long-running runner (entrypoint for `news-pipeline` 컨테이너).
 
-`SchedulerRunner` 가 `scheduled_jobs` (owner='news_pipeline') 를 읽어 apscheduler
-트리거로 등록한다. handler_key → async callable 매핑 은 이 파일에 정의.
+v2 ``prime_jennie/services/news/app.py`` 3-thread 상시 구동 모델을 asyncio task 로
+이식. ``SchedulerRunner`` 는 제거 — 이 서비스는 cron 으로 구동되지 않는다.
+
+흐름 (3 async task 병렬):
+    _collector_loop : 장중 10 분 / 장외 30 분 주기로 crawl → stream 발행
+    _analyzer_loop  : stream BLOCK 상시 대기 → LLM → PG upsert → XACK
+    _archiver_loop  : stream BLOCK 상시 대기 → embed → Qdrant upsert → XACK
 
 실행:
     python -m prime_jennie_runtime.news_pipeline_kor.app
@@ -21,6 +26,7 @@ import logging
 import os
 import signal
 from contextlib import AsyncExitStack
+from datetime import datetime
 
 import asyncpg
 import httpx
@@ -29,8 +35,6 @@ import redis.asyncio as aioredis
 from qdrant_client import QdrantClient
 
 from prime_jennie_runtime.infra.config import AppConfig
-from prime_jennie_runtime.infra.db import create_engine
-from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 
 from .adapters.exaone_sentiment import LiteLLMSentimentAnalyzer
 from .adapters.kure_embedder import KureEmbedder
@@ -40,13 +44,25 @@ from .adapters.qdrant_store import QdrantVectorStore
 from .dedup import RedisDeduplicator
 from .pipeline import NewsPipeline
 
-OWNER = "news_pipeline"
-
 logger = logging.getLogger(__name__)
 
+# Collector 주기 (v2 동일). "상시 구동" 의 상시는 analyzer/archiver 가 stream 을
+# BLOCK 으로 상시 소비하는 쪽. 네트워크 크롤은 여전히 주기적이지만 stream 에 얇게
+# 퍼지므로 GPU peak 이 평탄해진다.
+INTERVAL_MARKET_SEC = 10 * 60
+INTERVAL_OFF_SEC = 30 * 60
 
-async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
-    """외부 의존을 생성해 `NewsPipeline` 을 조립. AsyncExitStack 에 cleanup 등록."""
+# analyzer/archiver 가 XREADGROUP BLOCK 2 초 대기 후 idle 일 때 추가로 쉬는 시간.
+# BLOCK 자체가 대부분의 idle 대기를 흡수하므로 이 값은 짧게.
+ANALYZER_IDLE_SEC = 1
+ARCHIVER_IDLE_SEC = 2
+ERROR_BACKOFF_SEC = 30
+
+
+async def _build_pipeline(
+    stack: AsyncExitStack,
+) -> tuple[NewsPipeline, sync_redis.Redis, asyncpg.Pool]:
+    """외부 의존 생성. ``(pipeline, sync_redis_for_streams, pg_pool)`` 반환."""
     vllm_llm_url = os.environ["VLLM_LLM_URL"]
     vllm_llm_model = os.environ["VLLM_LLM_MODEL"]
     vllm_embed_url = os.environ["VLLM_EMBED_URL"]
@@ -56,13 +72,13 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
 
     http_client = await stack.enter_async_context(httpx.AsyncClient(timeout=10.0))
 
-    # RedisDeduplicator 로 전환 (2026-04-20): 컨테이너 재시작 시 InMemoryDeduplicator
-    # 가 리셋돼 crawler window 내 모든 기사를 "신규" 처리 → vLLM 258건 burst →
-    # eGPU 팬 굉음. Redis SET+TTL 기반으로 재시작 유지. RedisDeduplicator 는 sync
-    # Redis 만 지원하므로 별도 sync 클라이언트를 만든다. 연결 localhost 기준
-    # SISMEMBER ~0.1ms, 42건 배치에서 총 ~5ms 블로킹 (event loop 영향 무시 가능).
-    _cfg = AppConfig()
-    sync_redis_client = sync_redis.Redis.from_url(_cfg.redis.url, decode_responses=True)
+    cfg = AppConfig()
+
+    # Redis Streams + Dedup 은 sync redis-py. v2 의 XREADGROUP 패턴과 일치하며
+    # redis-py sync 가 `block` ms 동안만 blocking. asyncio loop 에선 dedicated
+    # task 에서 호출하므로 event loop 영향은 제한적 (loop 간 bounce 를 위해
+    # asyncio.to_thread 로 래핑).
+    sync_redis_client = sync_redis.Redis.from_url(cfg.redis.url, decode_responses=False)
     stack.callback(sync_redis_client.close)
     dedup = RedisDeduplicator(redis_client=sync_redis_client)
 
@@ -78,7 +94,6 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
         client=http_client,
     )
 
-    cfg = AppConfig()
     pool = await asyncpg.create_pool(
         host=cfg.postgres.host,
         port=cfg.postgres.port,
@@ -99,7 +114,7 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
         dimension=1024,
     )
 
-    return NewsPipeline(
+    pipeline = NewsPipeline(
         crawler=crawler,
         deduplicator=dedup,
         analyzer=analyzer,
@@ -107,6 +122,161 @@ async def _build_pipeline(stack: AsyncExitStack) -> NewsPipeline:
         embedder=embedder,
         vector_store=vector_store,
     )
+    return pipeline, sync_redis_client, pool
+
+
+# ---------------------------------------------------------------------
+# Universe / 시간대 헬퍼
+# ---------------------------------------------------------------------
+
+
+_UNIVERSE_SQL = (
+    "SELECT stock_code FROM stock_masters "
+    "WHERE is_active = TRUE "
+    "  AND length(stock_code) = 6 "
+    "  AND stock_code ~ '^[0-9]+$' "
+    "ORDER BY stock_code"
+)
+
+
+async def _load_universe(pool: asyncpg.Pool) -> list[str]:
+    """v2 동일 조건. active + 6자리 숫자 코드 (우선주 K/L/G suffix 자동 제외)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_UNIVERSE_SQL)
+    return [r["stock_code"] for r in rows]
+
+
+def _is_market_hours(now: datetime | None = None) -> bool:
+    """장중 (07:00~16:00 KST). v2 동일."""
+    current = now or datetime.now()
+    return 7 <= current.hour < 16
+
+
+def _collector_interval() -> int:
+    return INTERVAL_MARKET_SEC if _is_market_hours() else INTERVAL_OFF_SEC
+
+
+async def _interruptible_sleep(stop: asyncio.Event, seconds: float) -> None:
+    """stop event 가 set 되면 즉시 깨어나는 sleep."""
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
+
+
+# ---------------------------------------------------------------------
+# 3 async loops
+# ---------------------------------------------------------------------
+
+
+async def _collector_loop(
+    pipeline: NewsPipeline,
+    sync_redis_client: sync_redis.Redis,
+    pool: asyncpg.Pool,
+    stop: asyncio.Event,
+) -> None:
+    """주기 크롤 → stream 발행. universe 는 매 cycle DB 에서 재로드 (v2 동일)."""
+    cycle = 0
+    logger.info("[collector] loop started")
+    while not stop.is_set():
+        cycle += 1
+        try:
+            universe = await _load_universe(pool)
+            if not universe:
+                logger.warning("[collector cycle %d] empty universe, skipping", cycle)
+            else:
+                stats = await pipeline.collect_and_publish(universe, sync_redis_client)
+                logger.info(
+                    "[collector cycle %d] universe=%d crawled=%d published=%d errors=%d",
+                    cycle,
+                    len(universe),
+                    stats.crawled,
+                    stats.deduped,
+                    len(stats.errors),
+                )
+                for err in stats.errors[:3]:
+                    logger.warning("[collector cycle %d] %s", cycle, err)
+        except Exception:
+            logger.exception("[collector cycle %d] unexpected error", cycle)
+            await _interruptible_sleep(stop, ERROR_BACKOFF_SEC)
+            continue
+
+        interval = _collector_interval()
+        phase = "market" if _is_market_hours() else "off-hours"
+        logger.info("[collector cycle %d] sleep %ds (%s)", cycle, interval, phase)
+        await _interruptible_sleep(stop, interval)
+
+    logger.info("[collector] loop stopped")
+
+
+async def _analyzer_loop(
+    pipeline: NewsPipeline,
+    sync_redis_client: sync_redis.Redis,
+    stop: asyncio.Event,
+) -> None:
+    """Stream BLOCK 상시 대기 → 배치 LLM → PG upsert → XACK."""
+    logger.info("[analyzer] loop started")
+    while not stop.is_set():
+        try:
+            stats = await asyncio.to_thread(_run_analyze_sync, pipeline, sync_redis_client)
+            if stats["processed"] > 0:
+                logger.info(
+                    "[analyzer] processed=%d errors=%d",
+                    stats["processed"],
+                    len(stats["errors"]),
+                )
+                for err in stats["errors"][:3]:
+                    logger.warning("[analyzer] %s", err)
+            else:
+                # BLOCK 이 이미 2 초 대기했으므로 추가 yield 만.
+                await _interruptible_sleep(stop, ANALYZER_IDLE_SEC)
+        except Exception:
+            logger.exception("[analyzer] unexpected error")
+            await _interruptible_sleep(stop, ERROR_BACKOFF_SEC)
+    logger.info("[analyzer] loop stopped")
+
+
+async def _archiver_loop(
+    pipeline: NewsPipeline,
+    sync_redis_client: sync_redis.Redis,
+    stop: asyncio.Event,
+) -> None:
+    """Stream BLOCK 상시 대기 → 배치 embed → Qdrant upsert → XACK."""
+    logger.info("[archiver] loop started")
+    while not stop.is_set():
+        try:
+            stats = await asyncio.to_thread(_run_archive_sync, pipeline, sync_redis_client)
+            if stats["processed"] > 0:
+                logger.info(
+                    "[archiver] processed=%d errors=%d",
+                    stats["processed"],
+                    len(stats["errors"]),
+                )
+                for err in stats["errors"][:3]:
+                    logger.warning("[archiver] %s", err)
+            else:
+                await _interruptible_sleep(stop, ARCHIVER_IDLE_SEC)
+        except Exception:
+            logger.exception("[archiver] unexpected error")
+            await _interruptible_sleep(stop, ERROR_BACKOFF_SEC)
+    logger.info("[archiver] loop stopped")
+
+
+def _run_analyze_sync(pipeline: NewsPipeline, r: sync_redis.Redis) -> dict:
+    """``asyncio.to_thread`` 바디. coroutine 을 내부 loop 로 실행해 sync redis BLOCK 을
+    외부 event loop 로부터 분리."""
+    stats = asyncio.run(pipeline.analyze_stream_once(r))
+    return {"processed": stats.analyzed, "errors": stats.errors}
+
+
+def _run_archive_sync(pipeline: NewsPipeline, r: sync_redis.Redis) -> dict:
+    stats = asyncio.run(pipeline.archive_stream_once(r))
+    return {"processed": stats.embedded, "errors": stats.errors}
+
+
+# ---------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------
 
 
 async def run() -> None:
@@ -117,30 +287,9 @@ async def run() -> None:
     cfg = AppConfig()
 
     async with AsyncExitStack() as stack:
-        pipeline = await _build_pipeline(stack)
+        pipeline, sync_redis_client, pool = await _build_pipeline(stack)
 
-        async def crawl_cycle(universe: list[str] | None = None) -> None:
-            if not universe:
-                logger.warning("crawl_cycle: empty universe, skipping")
-                return
-            stats = await pipeline.run_cycle(universe)
-            logger.info(
-                "news cycle: crawled=%d deduped=%d analyzed=%d embedded=%d errors=%d",
-                stats.crawled,
-                stats.deduped,
-                stats.analyzed,
-                stats.embedded,
-                len(stats.errors),
-            )
-            if stats.errors:
-                for err in stats.errors[:5]:
-                    logger.warning("news cycle error: %s", err)
-
-        handlers = {"crawl_cycle": crawl_cycle}
-
-        engine = create_engine(cfg.postgres)
-        stack.push_async_callback(engine.dispose)
-
+        # heartbeat 는 async redis 로. daemon 가시성은 container state 보다 신뢰.
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=True)
         stack.push_async_callback(redis_client.aclose)
 
@@ -150,24 +299,43 @@ async def run() -> None:
         await heartbeat.start()
         stack.push_async_callback(heartbeat.stop)
 
-        scheduler = SchedulerRunner(
-            owner=OWNER,
-            handlers=handlers,
-            store=PostgresSchedulerStore(engine),
-            redis_client=redis_client,
-            timezone_name=cfg.timezone,
-        )
-        await scheduler.start()
-        stack.push_async_callback(scheduler.stop)
+        # Consumer group 을 한번 보장. BUSYGROUP 은 내부에서 무시.
+        pipeline.ensure_streams(sync_redis_client)
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
 
-        logger.info("news_pipeline runner ready — waiting for signals")
+        logger.info(
+            "news_pipeline ready — 3 async loops (collector/analyzer/archiver). "
+            "stream=%s analyzer_group=%s archiver_group=%s",
+            "v3:news:raw",
+            "v3:news:analyzer",
+            "v3:news:archiver",
+        )
+
+        tasks = [
+            asyncio.create_task(
+                _collector_loop(pipeline, sync_redis_client, pool, stop_event),
+                name="collector",
+            ),
+            asyncio.create_task(
+                _analyzer_loop(pipeline, sync_redis_client, stop_event), name="analyzer"
+            ),
+            asyncio.create_task(
+                _archiver_loop(pipeline, sync_redis_client, stop_event), name="archiver"
+            ),
+        ]
+
         await stop_event.wait()
-        logger.info("news_pipeline runner shutting down")
+        logger.info("news_pipeline shutting down — waiting for loops")
+        for t in tasks:
+            try:
+                await asyncio.wait_for(t, timeout=10)
+            except TimeoutError:
+                logger.warning("loop %s did not exit within 10s, cancelling", t.get_name())
+                t.cancel()
 
 
 if __name__ == "__main__":

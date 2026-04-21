@@ -1,8 +1,8 @@
 # jobs/ — v2 job-worker 포팅 영역 (Track B)
 
 v2 `prime_jennie/services/jobs/app.py` (2883줄, 26 ep) 중 **22개** 를 포팅한다.
-나머지 4개 (news_pipeline.crawl_cycle, price_scheduler.collect_minute/daily,
-slow_loop.scout_daily) 는 이미 전용 runner 로 분리됨.
+나머지 4개 (price_scheduler.collect_minute/daily, slow_loop.scout_daily, 그리고
+news_pipeline_kor 3-stage Redis Stream 상시 소비) 는 이미 전용 runner 로 분리됨.
 
 ## 원칙
 

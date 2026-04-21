@@ -1,7 +1,8 @@
 """v3 `scheduled_jobs` 초기 시드.
 
-우선 news_pipeline.crawl_cycle 만 시드. 추가 owner 는 다음 슬라이스 (price_scheduler,
-slow_loop, fast_loop) 에서 확장.
+추가 owner 는 슬라이스별로 확장. `news_pipeline` owner 는 2026-04-21 이후 scheduler
+기반에서 Redis Stream 상시 소비 모델로 전환 → 이 seed 에 포함하지 않는다 (참조:
+migration 013).
 
 - 기본 동작 (idempotent): 해당 id 가 없을 때만 INSERT. 수동으로 cron/universe 를
   바꿔둔 경우 덮어쓰지 않는다.
@@ -36,24 +37,14 @@ class SeedJob:
     enabled: bool = True
 
 
-# 초기 시드 — news_pipeline 만.
 # universe 는 v2 에서 자주 모니터하던 대형주 샘플. 영석님이 control-ui 또는 SQL 로
-# 직접 조정. 스케줄은 v2 news-pipeline AGENTS.md 의 "10분 주기" 원칙 + 장중 한정.
+# 직접 조정. (news_pipeline 은 stock_masters 전체 active 종목을 자체 로드하므로
+# 여기 universe 에 의존하지 않음)
 _DEFAULT_UNIVERSE = ["005930", "000660", "035720", "005380", "051910"]
 
 # 초기 시드 — Phase 2.9. universe 는 v2 운영 시 자주 모니터하던 대형주 샘플.
 # 영석님이 control-ui 또는 SQL 로 조정. cron 은 v2 DAG 의 schedule 을 최대한 맞춤.
 SEEDS: list[SeedJob] = [
-    # Track E — 뉴스 감성. v2 는 3-스레드 상시 구동 (collector 장중 10분/장외 30분 +
-    # analyzer/archiver Redis stream BLOCK 상시). EXAONE 로컬 LLM 이라 비용 無.
-    # v3 는 pipeline 한 덩어리로 통합됐으므로 cron 을 24/7 10분 으로 확장해 상시 근사.
-    SeedJob(
-        id="news_pipeline.crawl_cycle",
-        owner="news_pipeline",
-        handler_key="crawl_cycle",
-        cron="*/10 * * * *",
-        kwargs={"universe": _DEFAULT_UNIVERSE},
-    ),
     # Track C — KIS 분봉/일봉 (v2 collect_minute_chart: */5 9-15 * * 1-5)
     SeedJob(
         id="price_scheduler.collect_minute",

@@ -1,7 +1,8 @@
 """Track E — News Pipeline KOR.
 
-v2 ``prime_jennie/services/news`` 포팅. Phase 1 핵심 산출물:
-- 결정론적 단일 사이클 ``NewsPipeline.run_cycle``
+v2 ``prime_jennie/services/news`` 포팅. 핵심 산출물:
+- 3-stage Redis Stream 소비 ``NewsPipeline`` (collect_and_publish / analyze_stream_once /
+  archive_stream_once). app.py 가 3 async loop 로 상시 구동.
 - Scout 공급 ``NewsPipelineScoutFeeder`` (Track B ``NewsScoreFeeder`` Protocol 구현)
 
 외부 의존(Naver 크롤링, EXAONE LLM, kure-v1 임베딩, Qdrant)은 Protocol + Stub로

@@ -111,15 +111,26 @@ class EventExtractor(Protocol):
 
 
 # event_type 키워드 힌트 (Stub 전용) — 실 운영 LLM 은 이보다 훨씬 정교.
+# 순서가 우선순위: 먼저 매칭되는 타입이 할당됨. 구체적·드문 타입을 위로.
 _EVENT_TYPE_HINTS: tuple[tuple[EventType, tuple[str, ...]], ...] = (
-    ("earnings", ("실적", "매출", "영업이익", "순이익", "어닝", "분기", "흑자", "적자")),
+    # 기업 이벤트 (구체 키워드 먼저)
+    ("bankruptcy", ("상장폐지", "워크아웃", "회생", "파산")),
+    ("shareholder_return", ("배당", "자사주", "밸류업", "주주환원")),
+    ("investment", ("유상증자", "회사채", "자금조달", "투자유치")),
     ("mna", ("인수", "합병", "M&A", "매각", "인수합병", "지분")),
     ("lawsuit", ("소송", "고소", "제소", "손해배상", "패소", "승소")),
+    ("earnings", ("실적", "매출", "영업이익", "순이익", "어닝", "분기", "흑자", "적자")),
     ("product", ("출시", "공개", "론칭", "신제품", "상용화")),
     ("personnel", ("CEO", "대표", "선임", "사임", "인사", "취임")),
-    ("regulation", ("규제", "제재", "승인", "허가", "심사", "정책")),
     ("contract", ("수주", "계약", "체결", "공급")),
     ("strike", ("파업", "노조", "쟁의", "협상")),
+    # 시장/거시
+    ("geopolitical", ("이란", "호르무즈", "미중", "우크라이나", "제재", "관세", "전쟁")),
+    ("regulation", ("규제", "승인", "허가", "심사", "정책")),
+    ("market_movement", ("코스피", "코스닥", "지수", "폭락", "급등락", "거래량", "시장심리")),
+    # 금융상품/분석
+    ("fund_product", ("ETF", "펀드", "순자산", "운용사", "TDF")),
+    ("analyst_rating", ("목표가", "매수의견", "매도의견", "리포트", "컨센서스")),
 )
 
 
@@ -139,12 +150,14 @@ def _infer_impact(text: str, score: float) -> ImpactLevel:
 
 
 def _infer_time_horizon(event_type: EventType) -> TimeHorizon:
-    if event_type in ("earnings", "mna", "lawsuit"):
-        return "short"
-    if event_type in ("regulation", "personnel"):
-        return "medium"
-    if event_type == "strike":
+    if event_type in ("market_movement", "geopolitical", "strike"):
         return "immediate"
+    if event_type in ("earnings", "mna", "lawsuit", "analyst_rating", "fund_product"):
+        return "short"
+    if event_type in ("regulation", "personnel", "shareholder_return", "investment"):
+        return "medium"
+    if event_type == "bankruptcy":
+        return "long"
     return "short"
 
 

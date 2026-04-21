@@ -49,26 +49,62 @@ _PROMPT_TEMPLATE = """다음 한국 주식 뉴스에서 메타데이터를 JSON 
 헤드라인: {title}
 본문(발췌): {body_excerpt}
 
-필드 정의:
-- event_type: {event_types} 중 하나
+## event_type (아래 설명 참고, 가장 구체적인 것 선택. other 는 정말 맞는 게 없을 때만)
+- earnings: 실적 발표 (매출/영업익/순익/어닝서프라이즈/분기 실적)
+- mna: 인수·합병·매각·지분 거래·경영권
+- lawsuit: 소송·고소·손해배상·판결·피소
+- product: 신제품 출시·상용화·론칭·공개
+- personnel: CEO/대표/임원 선임·사임·인사
+- contract: 수주·계약·공급·납품 체결
+- strike: 파업·노조·쟁의·단체협상
+- shareholder_return: 배당·자사주 매입/소각·주주환원·밸류업
+- investment: 유상증자·회사채·CB/BW·자금조달·투자유치
+- bankruptcy: 상장폐지·워크아웃·기업회생·법정관리·파산
+- market_movement: 지수 동향·코스피/코스닥 폭락·급등·시장심리·거래량
+- geopolitical: 지정학 (이란·호르무즈·우크라이나·미중 무역·관세·전쟁)
+- regulation: 정부 규제·승인·허가·심사·제재·정책 변화
+- fund_product: ETF/펀드 신상품·순자산·운용사 뉴스·수익률 비교
+- analyst_rating: 증권사 리포트·목표가·매수/매도 의견·컨센서스
+- other: 위 15개 중 어디에도 명확히 속하지 않는 경우만
+
+## 필드 정의
 - impact_level: {impact_levels} 중 하나 (주가 영향 크기)
 - sentiment: {sentiments} 중 하나
 - sentiment_score: -1.0~+1.0 (0=중립)
 - time_horizon: {horizons} 중 하나
   (immediate=당일, short=1주 이내, medium=1개월 이내, long=분기 이상)
-- keywords: 한국어 키워드 3~5개 배열
-- sector_tags: 관련 섹터 태그 0~3개 (예: 반도체/자동차/제약)
+- keywords: 한국어 키워드 3~5개 배열 (고유명사 원형 유지, 숫자/영문 혼합 가능)
+- sector_tags: 관련 섹터 태그 0~3개 (예: 반도체/자동차/제약/금융/에너지)
 - financial_signals: [{{"type":"revenue|profit|guidance|dividend|margin",
   "direction":"up|down|flat"}}, ...] 0~3개
 - confidence: 0.0~1.0 분류 확신도
 
 응답은 JSON 오브젝트로만. 다른 텍스트 금지.
-예시:
-{{"event_type":"earnings","impact_level":"high","sentiment":"positive",
-"sentiment_score":0.7,"time_horizon":"short",
-"keywords":["어닝서프라이즈","매출","영업이익"],"sector_tags":["반도체"],
+
+## 예시 1 (실적)
+입력: "삼성전자, 1분기 영업이익 7조 어닝서프라이즈… HBM 수요 폭발"
+출력: {{"event_type":"earnings","impact_level":"high","sentiment":"positive",
+"sentiment_score":0.85,"time_horizon":"short",
+"keywords":["삼성전자","영업이익","HBM","어닝서프라이즈"],
+"sector_tags":["반도체"],
 "financial_signals":[{{"type":"revenue","direction":"up"}},
-{{"type":"profit","direction":"up"}}],"confidence":0.9}}"""
+{{"type":"profit","direction":"up"}}],"confidence":0.95}}
+
+## 예시 2 (지정학)
+입력: "이란, 호르무즈 해협 봉쇄 경고에 외국인 8조원 이탈"
+출력: {{"event_type":"geopolitical","impact_level":"high","sentiment":"negative",
+"sentiment_score":-0.7,"time_horizon":"immediate",
+"keywords":["이란","호르무즈","봉쇄","외국인"],
+"sector_tags":["에너지"],
+"financial_signals":[],"confidence":0.9}}
+
+## 예시 3 (ETF/펀드)
+입력: "타임폴리오 액티브 ETF 순자산 2조 돌파… 배당주 펀드 유입"
+출력: {{"event_type":"fund_product","impact_level":"medium","sentiment":"positive",
+"sentiment_score":0.4,"time_horizon":"medium",
+"keywords":["타임폴리오","액티브 ETF","순자산","배당주"],
+"sector_tags":["금융"],
+"financial_signals":[{{"type":"dividend","direction":"up"}}],"confidence":0.85}}"""
 
 CompletionFn = Callable[..., Awaitable[Any]]
 
@@ -90,7 +126,6 @@ class LiteLLMEventExtractor:
             ticker=article.ticker,
             title=article.title,
             body_excerpt=article.body[: self.body_excerpt_chars] or "(본문 없음)",
-            event_types="/".join(_VALID_EVENT_TYPES),
             impact_levels="/".join(_VALID_IMPACT),
             sentiments="/".join(_VALID_SENTIMENT),
             horizons="/".join(_VALID_HORIZONS),

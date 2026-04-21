@@ -125,6 +125,38 @@ _SCHEMA_STATEMENTS = [
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    # news_articles (migrations/004)
+    """
+    CREATE TABLE IF NOT EXISTS news_articles (
+        article_id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        title TEXT,
+        body TEXT,
+        published_at TIMESTAMP,
+        source_url TEXT,
+        source_name TEXT
+    )
+    """,
+    # news_events (migrations/014) — SQLite 용으로 단순화 (TEXT[] → TEXT JSON string)
+    """
+    CREATE TABLE IF NOT EXISTS news_events (
+        article_id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        published_at TIMESTAMP,
+        event_type TEXT NOT NULL,
+        impact_level TEXT NOT NULL,
+        sentiment TEXT NOT NULL,
+        sentiment_score NUMERIC,
+        time_horizon TEXT,
+        keywords TEXT,
+        sector_tags TEXT,
+        financial_signals TEXT,
+        confidence NUMERIC,
+        model TEXT,
+        analyzed_at TIMESTAMP NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
     # scheduled_jobs
     """
     CREATE TABLE IF NOT EXISTS scheduled_jobs (

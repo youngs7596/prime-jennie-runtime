@@ -56,14 +56,14 @@ jobs:
         run: |
           set -euo pipefail
           echo "==> Pulling images from ghcr.io"
-          docker compose --profile full pull
+          docker compose --profile full --profile gpu pull
 
           echo "==> docker compose up -d (no build)"
-          docker compose --profile full up -d --no-build
+          docker compose --profile full --profile gpu up -d --no-build
 
           echo "==> Pruning dangling images"
           docker image prune -f || true
 
           echo ""
           echo "=== Deploy complete ==="
-          docker compose --profile full ps
+          docker compose --profile full --profile gpu ps

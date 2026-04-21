@@ -106,7 +106,7 @@ services:
       dockerfile: infra/docker/Dockerfile.slow_loop
     environment:
       <<: *common-env
-      VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
+      VLLM_LLM_URL: ${VLLM_LLM_URL:-http://vllm-llm:8001/v1}
       VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
@@ -129,8 +129,6 @@ services:
       # 예: SCREENING_SECCOMP_PROFILE=/opt/prime-jennie-runtime/infra/screening/seccomp.json
       # 빈 값이면 adapter 가 --security-opt=seccomp 옵션 생략 (Docker default seccomp 적용).
       SCREENING_SECCOMP_PROFILE: ${SCREENING_SECCOMP_PROFILE:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -163,11 +161,56 @@ services:
     restart: unless-stopped
     profiles: ["full"]
 
-  # --- News Pipeline (Track E, Phase 2.9 데이터 수집 runner) ---
+  # --- vLLM (로컬 LLM 서버 — Qwen3 30B-A3B MoE INT4) ---
   #
-  # apscheduler 기반 long-running runner. scheduled_jobs 테이블(owner=news_pipeline)
-  # 에서 cron 을 읽어 네이버 크롤 → EXAONE 감성 → kure 임베딩 → Postgres/Qdrant 적재.
-  # 외부 의존 (vLLM, Qdrant) 은 v2 재활용 — host 에서 접근 가능한 주소로 주입.
+  # 2026-04-21 v2 → v3 로 이관 (v2 전면 퇴역). news-pipeline 의 EventExtractor 가
+  # 소비. slow-loop 도 env 로 연결되지만 실제 호출은 DeepSeek/Opus API 라 무관.
+  # RTX 3090 (Ampere sm_86) 호환성 이슈로 vLLM 0.16.0-cu130 유지 — 0.19.1-cu130 은
+  # fill_/attention 기본 커널 누락으로 crash. gpu 프로필 — GPU 없는 dev 환경은
+  # --profile full 만 up 하면 자동 스킵.
+  vllm-llm:
+    image: vllm/vllm-openai:v0.16.0-cu130
+    profiles: ["gpu"]
+    ipc: host
+    environment:
+      # 첫 기동 시 모델 다운로드 필요 — offline=0. 캐시되면 "1" 로.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+      LD_LIBRARY_PATH: "/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/usr/local/nvidia/lib"
+    command: >
+      jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq
+      --port 8001
+      --gpu-memory-utilization 0.88
+      --max-model-len 8192
+      --quantization gptq_marlin
+      --dtype half
+      --kv-cache-dtype fp8_e4m3
+      --max-num-seqs 64
+      --enable-prefix-caching
+      --trust-remote-code
+      --enforce-eager
+    volumes:
+      - ${DOCKER_DATA_DIR:-/docker_data}/huggingface_cache:/root/.cache/huggingface
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/v1/models')\""]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+    ports:
+      - "127.0.0.1:8001:8001"
+
+  # --- News Pipeline (Track E) ---
+  #
+  # long-running runner. collector 주기 크롤 → Redis Stream → extractor (EXAONE/
+  # Qwen3 기반 메타데이터 추출) → news_events 테이블.
 
   news-pipeline:
     image: ghcr.io/youngs7596/prime-jennie-runtime/news-pipeline:latest
@@ -176,12 +219,9 @@ services:
       dockerfile: infra/docker/Dockerfile.news_pipeline
     environment:
       <<: *common-env
-      VLLM_LLM_URL: ${VLLM_LLM_URL:-http://host.docker.internal:8001/v1}
+      VLLM_LLM_URL: ${VLLM_LLM_URL:-http://vllm-llm:8001/v1}
       VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    extra_hosts:
-      # v2 가 host 네트워크로 올라가 있는 vLLM 에 접근 (Linux 호환).
-      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

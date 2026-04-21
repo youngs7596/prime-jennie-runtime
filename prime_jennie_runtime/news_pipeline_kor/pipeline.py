@@ -92,31 +92,38 @@ class NewsPipeline:
     # ------------------------------------------------------------------
 
     async def collect_and_publish(self, universe: list[str], redis_client: Any) -> CycleStats:
-        """crawl → dedup → stream 에 XADD. ``redis_client`` 는 sync ``redis.Redis``."""
+        """crawl → dedup → stream 에 XADD. ``redis_client`` 는 sync ``redis.Redis``.
+
+        ticker 단위로 즉시 발행 — universe 전체를 모은 뒤 flood 하지 않고 크롤 진행에
+        맞춰 얇게 stream 을 채운다. 덕분에 analyzer 가 cycle 시작 몇 초 내에 소비를
+        시작하고 GPU 부하가 23 분 cycle 전체에 평탄하게 분산된다.
+        """
         stats = CycleStats()
-        try:
-            articles = await self.crawler.crawl(universe)
-        except Exception as e:
-            logger.exception("crawl failed")
-            stats.errors.append(f"crawl:{type(e).__name__}:{e}")
-            return stats
+        for ticker in universe:
+            try:
+                articles = await self.crawler.crawl([ticker])
+            except Exception as e:
+                logger.warning("crawl ticker=%s failed: %s", ticker, e)
+                stats.errors.append(f"crawl:{ticker}:{type(e).__name__}:{e}")
+                continue
 
-        stats.crawled = len(articles)
-        if not articles:
-            return stats
+            stats.crawled += len(articles)
+            if not articles:
+                continue
 
-        # v2 와 동일: dedup 은 stream 발행 전 (분석/아카이빙 단에선 ACK 정책 단순)
-        new_articles = [
-            a for a in articles if self.deduplicator.is_new(a.source_url.unicode_string())
-        ]
-        if not new_articles:
-            return stats
+            # v2 와 동일: dedup 은 stream 발행 전.
+            new_articles = [
+                a for a in articles if self.deduplicator.is_new(a.source_url.unicode_string())
+            ]
+            if not new_articles:
+                continue
 
-        pipe = redis_client.pipeline()
-        for article in new_articles:
-            pipe.xadd(NEWS_STREAM, serialize_article(article), maxlen=NEWS_STREAM_MAXLEN)
-        pipe.execute()
-        stats.deduped = len(new_articles)
+            pipe = redis_client.pipeline()
+            for article in new_articles:
+                pipe.xadd(NEWS_STREAM, serialize_article(article), maxlen=NEWS_STREAM_MAXLEN)
+            pipe.execute()
+            stats.deduped += len(new_articles)
+
         return stats
 
     # ------------------------------------------------------------------

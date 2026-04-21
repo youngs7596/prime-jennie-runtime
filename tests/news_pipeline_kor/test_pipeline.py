@@ -100,6 +100,9 @@ async def test_collect_filters_universe_via_crawler():
 
 @pytest.mark.asyncio
 async def test_collect_handles_crawler_exception():
+    """per-ticker 루프라 universe 의 ticker 각각에 대해 에러가 기록되지만 cycle 은
+    계속 진행 — 단일 ticker 장애가 전체 cycle 을 내리지 않아야."""
+
     class _Boom:
         async def crawl(self, universe):
             raise RuntimeError("network down")
@@ -113,8 +116,40 @@ async def test_collect_handles_crawler_exception():
     r = _fake_redis()
     stats = await pipe.collect_and_publish(UNIVERSE, r)
     assert stats.crawled == 0
-    assert stats.errors and stats.errors[0].startswith("crawl:RuntimeError")
+    # universe 의 ticker 수 만큼 에러 누적
+    assert len(stats.errors) == len(UNIVERSE)
+    assert stats.errors[0].startswith("crawl:")
+    assert "RuntimeError" in stats.errors[0]
     assert r.xlen(NEWS_STREAM) == 0
+
+
+@pytest.mark.asyncio
+async def test_collect_one_ticker_failure_does_not_abort_cycle():
+    """한 ticker 가 실패해도 나머지 ticker 는 그대로 발행."""
+
+    class _FlakyCrawler:
+        def __init__(self):
+            self._fail_next = False
+
+        async def crawl(self, universe):
+            ticker = universe[0]
+            if ticker == "000660":
+                raise RuntimeError("boom")
+            return [make_dummy_article(ticker, title=f"{ticker} ok")]
+
+    pipe = NewsPipeline(
+        crawler=_FlakyCrawler(),
+        deduplicator=InMemoryDeduplicator(),
+        analyzer=StubSentimentAnalyzer(),
+        sentiment_repo=InMemorySentimentRepo(),
+    )
+    r = _fake_redis()
+    stats = await pipe.collect_and_publish(["005930", "000660", "035720"], r)
+    assert stats.crawled == 2  # 005930, 035720
+    assert stats.deduped == 2
+    assert len(stats.errors) == 1
+    assert stats.errors[0].startswith("crawl:000660:")
+    assert r.xlen(NEWS_STREAM) == 2
 
 
 # ---------- analyze_stream_once ----------

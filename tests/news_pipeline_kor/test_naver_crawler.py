@@ -81,6 +81,26 @@ def test_parse_news_page_bad_date_falls_back_to_now():
     assert article.published_at is not None  # now fallback
 
 
+def test_parse_news_page_date_is_treated_as_kst():
+    """네이버가 주는 날짜 문자열은 KST 로컬 시각. UTC 로 변환해 저장되어야.
+
+    regression: 2026-04-21 이전 버그 — `dt.replace(tzinfo=UTC)` 로 KST 를 UTC
+    로 잘못 태깅해 9 시간 앞 shift 된 채 저장. UI 에서 미래 시각으로 표시됨.
+    """
+    from datetime import UTC
+
+    html = (
+        b'<table class="type5"><tr>'
+        b'<td class="title"><a href="/x">x</a></td>'
+        b'<td class="date">2026.04.21 12:15</td></tr></table>'
+    )
+    [article] = _parse_news_page(html, "005930")
+    # 12:15 KST == 03:15 UTC
+    assert article.published_at.tzinfo is UTC
+    assert article.published_at.hour == 3
+    assert article.published_at.minute == 15
+
+
 # ---------- crawler 단위: respx 로 네이버 엔드포인트 mock ----------
 
 

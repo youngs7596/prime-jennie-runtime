@@ -25,6 +25,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 from bs4 import BeautifulSoup
@@ -33,6 +34,8 @@ from ..dedup import article_fingerprint
 from ..models import NewsArticle
 
 logger = logging.getLogger(__name__)
+
+KST = ZoneInfo("Asia/Seoul")
 
 NAVER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -195,10 +198,16 @@ def _absolute_url(href: str) -> str:
 
 
 def _parse_published_at(date_str: str) -> datetime:
+    """네이버 금융 뉴스의 날짜 문자열(`%Y.%m.%d %H:%M`)은 **KST 로컬 시각**이다.
+
+    TIMESTAMPTZ 컬럼은 UTC 로 정규화 저장되므로 KST 로 tz 태깅 후 UTC 로 변환해
+    반환. 2026-04-21 이전에는 ``dt.replace(tzinfo=UTC)`` 로 잘못 태깅해 9 시간
+    앞 shift 된 채 저장됐음 (UI 상 미래 시각으로 표시).
+    """
     if date_str:
         try:
             dt = datetime.strptime(date_str, _DATE_FORMAT)
-            return dt.replace(tzinfo=UTC)
+            return dt.replace(tzinfo=KST).astimezone(UTC)
         except ValueError:
             pass
     return datetime.now(UTC)

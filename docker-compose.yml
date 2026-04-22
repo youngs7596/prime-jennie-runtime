@@ -97,7 +97,7 @@ services:
   # --- Slow Loop (Track B, Phase 2.9 scout/macro 주기 runner) ---
   #
   # scheduled_jobs(owner=slow_loop) 에서 cron 을 읽어 run_slow_loop() 호출.
-  # v2 scout_job DAG 대체. vLLM EXAONE 은 v2 재활용.
+  # v2 scout_job DAG 대체. vLLM (Qwen3) 은 v2 재활용.
 
   slow-loop:
     image: ghcr.io/youngs7596/prime-jennie-runtime/slow-loop:latest

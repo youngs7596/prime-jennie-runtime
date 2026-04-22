@@ -24,8 +24,8 @@ from ..deps import get_redis
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
-# 추적 대상 서비스 목록 (2026-04-19 개정 — shadow 2종 추가).
-# slow_loop persistence 가 record_llm_call(service=...) 로 Redis 에 쌓는 이름과 1:1.
+# 추적 대상 서비스 목록. shadow 2종은 historical 데이터 보존 위해 list 에 유지
+# (record_llm_call 은 SHADOW_ENABLED=0 이면 호출 안 됨 — 신규 누적 0).
 _SERVICES = [
     "scout",
     "scout_shadow",
@@ -37,15 +37,15 @@ _SERVICES = [
 ]
 
 # 기능별 LLM 매핑. tier 는 참고용, 실제 model/provider 는 각 서비스가 쓰는 env 에서 해석.
-# 2026-04-19 개정: Scout primary = Claude Opus (코드 생성 품질 우선), shadow = DeepSeek chat.
-# - news_analysis: vLLM EXAONE (VLLM_LLM_MODEL)
-# - scout: Claude Opus (ANTHROPIC_MODEL) + DeepSeek shadow 병렬
-# - macro: Claude Opus (ANTHROPIC_MODEL) + DeepSeek shadow 병렬
+# 2026-04-22 swap: Scout/Macro primary = DeepSeek (Opus 비용 부담 복귀), shadow 종료.
+# News extractor 는 Qwen3-30B-A3B MoE (2026-04-21 EXAONE 4.0-32B 에서 교체).
+# - news_analysis: vLLM Qwen3 (VLLM_LLM_MODEL)
+# - scout / macro: DeepSeek chat (DEEPSEEK_MODEL)
 # - briefing: Claude Opus (ANTHROPIC_MODEL) — langchain-anthropic 직접
 _FEATURE_MAP = [
     {
         "service": "news_analysis",
-        "name": "뉴스 감성 분석",
+        "name": "뉴스 메타데이터 추출",
         "tier": "fast",
         "frequency": "실시간 (배치, */10min)",
     },
@@ -56,22 +56,10 @@ _FEATURE_MAP = [
         "frequency": "평일 08:30~14:30 매시 30분 (7회/일)",
     },
     {
-        "service": "scout_shadow",
-        "name": "Scout (shadow 비교)",
-        "tier": "strong",
-        "frequency": "평일 08:30~14:30 매시 30분 (Scout 와 병렬)",
-    },
-    {
         "service": "macro",
         "name": "Macro Gate",
         "tier": "reasoning",
         "frequency": "평일 08:30~14:30 매시 30분 (7회/일)",
-    },
-    {
-        "service": "macro_shadow",
-        "name": "Macro Gate (shadow 비교)",
-        "tier": "reasoning",
-        "frequency": "평일 08:30~14:30 매시 30분 (Macro 와 병렬)",
     },
     {
         "service": "briefing",
@@ -85,9 +73,13 @@ _FEATURE_MAP = [
 def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
     """service → (model_id, provider_label). slow_loop/briefing 은 env 직독, 나머지는 LLMConfig."""
     if service == "news_analysis":
-        # v3: news_pipeline 은 vLLM EXAONE 4.0 AWQ. compose 기본값과 동기화.
-        model = os.environ.get("VLLM_LLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
-        return model, "vLLM (EXAONE)"
+        # v3: news_pipeline 은 vLLM Qwen3-30B-A3B MoE INT4 (2026-04-21 EXAONE 4.0 에서 교체).
+        # compose 기본값과 동기화.
+        model = os.environ.get(
+            "VLLM_LLM_MODEL",
+            "jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq",
+        )
+        return model, "vLLM (Qwen3)"
     if service == "scout":
         # 2026-04-22 swap: Scout primary = DeepSeek chat (Opus 비용 부담으로 복귀).
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")

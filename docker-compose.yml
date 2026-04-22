@@ -108,9 +108,10 @@ services:
       <<: *common-env
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://vllm-llm:8001/v1}
       VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq}
+      # Primary = DeepSeek chat (Scout + Macro). Shadow = Claude Opus 4.7 (회귀 검증).
+      # 2026-04-22 swap — Opus 비용 부담으로 primary 복귀, Opus 는 1~2주 회귀 데이터용.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
-      DEEPSEEK_SHADOW_MODEL: ${DEEPSEEK_SHADOW_MODEL:-deepseek-chat}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
@@ -120,8 +121,8 @@ services:
       # 으로 주문 이중 차단된 상태에서는 신호/코드/후보 축적이 우선이라 bypass 활성.
       # 실 매매 재개 전에 반드시 이 env 를 제거 (또는 "0" 로 덮어씀).
       MACRO_AUTO_OVERRIDE_DISABLED: ${MACRO_AUTO_OVERRIDE_DISABLED:-1}
-      # Macro/Scout shadow 병렬 평가 (DeepSeek 으로 거울 실행, primary 결정에 영향 없음).
-      # 비교 데이터 축적 목적. 비용 우려 시 0 으로 비활성화.
+      # Macro/Scout shadow 병렬 평가 (Opus 로 거울 실행, primary 결정에 영향 없음).
+      # 회귀 검증 데이터 축적 목적. 1~2주 후 0 으로 끄면 비용 발생 0.
       MACRO_SHADOW_ENABLED: ${MACRO_SHADOW_ENABLED:-1}
       SCOUT_SHADOW_ENABLED: ${SCOUT_SHADOW_ENABLED:-1}
       # screening-executor docker sandbox seccomp profile.

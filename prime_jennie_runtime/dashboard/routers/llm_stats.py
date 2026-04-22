@@ -89,21 +89,21 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
         model = os.environ.get("VLLM_LLM_MODEL", "LGAI-EXAONE/EXAONE-4.0-32B-AWQ")
         return model, "vLLM (EXAONE)"
     if service == "scout":
-        # 2026-04-19 개정: Scout primary = Claude Opus (코드 생성 품질 우선).
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-        return model, "Anthropic"
-    if service == "scout_shadow":
-        # Scout shadow = DeepSeek chat (비교 평가용 병렬 축적).
+        # 2026-04-22 swap: Scout primary = DeepSeek chat (Opus 비용 부담으로 복귀).
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         return model, "DeepSeek"
-    if service == "macro":
+    if service == "scout_shadow":
+        # Scout shadow = Claude Opus 4.7 (회귀 검증용 병렬 축적, 1~2주 후 종료).
         model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
         return model, "Anthropic"
-    if service == "macro_shadow":
-        # Shadow = DeepSeek V3.2 (deepseek-chat identifier 가 항상 최신 flagship 을 가리킴,
-        # 하이브리드 thinking 지원). Opus 와 reasoning 동급 비교.
-        model = os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-chat")
+    if service == "macro":
+        # 2026-04-22 swap: Macro primary = DeepSeek chat (4일 shadow 비교 결과 Gate 100% 일치).
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         return model, "DeepSeek"
+    if service == "macro_shadow":
+        # Macro shadow = Claude Opus 4.7 (회귀 검증용 병렬 축적, 1~2주 후 종료).
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+        return model, "Anthropic"
     if service == "briefing":
         model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
         return model, "Anthropic"

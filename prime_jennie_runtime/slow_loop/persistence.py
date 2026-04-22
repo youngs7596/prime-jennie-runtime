@@ -45,19 +45,15 @@ _PRICING: dict[str, tuple[float, float]] = {
 
 
 def _tier_model(tier: str) -> str | None:
-    """tier → 설정된 모델명 (ANTHROPIC_MODEL / DEEPSEEK_MODEL / DEEPSEEK_SHADOW_MODEL).
+    """tier → 설정된 모델명 (DEEPSEEK_MODEL / ANTHROPIC_MODEL).
 
-    2026-04-19: Scout primary 도 Opus 로 전환. "strong" tier 는 이제 Anthropic.
-    Scout shadow 는 DeepSeek chat 재사용.
+    2026-04-22: Opus 비용 부담으로 primary 를 DeepSeek 로 복귀, Opus 는 shadow
+    회귀 검증용. tier 매핑은 app.py `_try_build_tiered_router` 와 1:1 동기.
     """
-    if tier == "reasoning":
-        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-    if tier == "strong":
-        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-    if tier == "shadow_reasoning":
-        return os.environ.get("DEEPSEEK_SHADOW_MODEL", "deepseek-chat")
-    if tier == "shadow_strong":
+    if tier in ("reasoning", "strong"):
         return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    if tier in ("shadow_reasoning", "shadow_strong"):
+        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
     return None
 
 

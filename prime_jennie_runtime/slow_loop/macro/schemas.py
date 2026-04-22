@@ -11,11 +11,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # =====================================================================
 # 보조 타입
 # =====================================================================
+
+
+_RISK_CATEGORIES = frozenset(
+    {"geopolitical", "monetary", "liquidity", "sector_contagion", "fx", "commodity", "other"}
+)
 
 
 class RiskItem(BaseModel):
@@ -32,6 +37,15 @@ class RiskItem(BaseModel):
     ]
     description: Annotated[str, Field(max_length=80)]
     severity: Literal["critical", "high", "medium", "low"]
+
+    # DeepSeek 류 모델이 news event_type (market_movement / bankruptcy 등) 을 risk
+    # category 로 혼동해 반환하는 사례가 관측됨 — 알 수 없는 값은 "other" 로 강등.
+    @field_validator("category", mode="before")
+    @classmethod
+    def _coerce_unknown_category(cls, v: object) -> object:
+        if isinstance(v, str) and v not in _RISK_CATEGORIES:
+            return "other"
+        return v
 
 
 class IndexPoint(BaseModel):

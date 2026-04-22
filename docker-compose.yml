@@ -121,10 +121,10 @@ services:
       # 으로 주문 이중 차단된 상태에서는 신호/코드/후보 축적이 우선이라 bypass 활성.
       # 실 매매 재개 전에 반드시 이 env 를 제거 (또는 "0" 로 덮어씀).
       MACRO_AUTO_OVERRIDE_DISABLED: ${MACRO_AUTO_OVERRIDE_DISABLED:-1}
-      # Macro/Scout shadow 병렬 평가 (Opus 로 거울 실행, primary 결정에 영향 없음).
-      # 회귀 검증 데이터 축적 목적. 1~2주 후 0 으로 끄면 비용 발생 0.
-      MACRO_SHADOW_ENABLED: ${MACRO_SHADOW_ENABLED:-1}
-      SCOUT_SHADOW_ENABLED: ${SCOUT_SHADOW_ENABLED:-1}
+      # Macro/Scout shadow 병렬 평가 — 2026-04-22 종료 (4일치 35 successful run 으로
+      # DeepSeek Gate 100%/Size 86% 일치 확인됨). 모델 비교 재실행 필요 시 1 로.
+      MACRO_SHADOW_ENABLED: ${MACRO_SHADOW_ENABLED:-0}
+      SCOUT_SHADOW_ENABLED: ${SCOUT_SHADOW_ENABLED:-0}
       # screening-executor docker sandbox seccomp profile.
       # 배포 호스트 기준 절대경로 (docker-in-docker: 호스트 데몬이 읽는다).
       # 예: SCREENING_SECCOMP_PROFILE=/opt/prime-jennie-runtime/infra/screening/seccomp.json

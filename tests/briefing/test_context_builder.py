@@ -160,14 +160,17 @@ async def test_collect_briefing_data_macro_maps_gate_and_risks():
     assert data["macro"]["trading_reasoning"] == "선별 매수"
     assert data["macro"]["risk_factors"] == ["금리 리스크", "환율"]
     assert data["macro"]["regime_hint"] == "high"
-    # 인덱스/insight 는 별도 테이블 행이 없으니 None 으로 수렴
+    # 인덱스 별도 테이블 행이 없으니 None 으로 수렴
     assert data["macro"]["kospi_index"] is None
-    assert data["macro"]["vix_value"] is None
+    # VIX/USD-KRW/sectors/consensus/themes 필드는 C-2 결정으로 context 에서 제거됨
+    assert "vix_value" not in data["macro"]
+    assert "usd_krw" not in data["macro"]
+    assert "sectors_to_favor" not in data["macro"]
 
 
 @pytest.mark.asyncio
-async def test_collect_briefing_data_macro_merges_indices_and_fresh_insight():
-    """index_daily_prices + 신선한 daily_macro_insights 가 macro dict 에 병합."""
+async def test_collect_briefing_data_macro_merges_kospi_kosdaq_indices():
+    """macro_runs + index_daily_prices 병합 — 전일 대비 change_pct 계산까지."""
     conn = _FakeConn(
         rows_by_prefix={
             "FROM macro_runs": [
@@ -187,18 +190,6 @@ async def test_collect_briefing_data_macro_merges_indices_and_fresh_insight():
                 {"index_code": "KOSDAQ", "price_date": date(2026, 4, 23), "close_price": 1170.0},
                 {"index_code": "KOSDAQ", "price_date": date(2026, 4, 22), "close_price": 1160.0},
             ],
-            "FROM daily_macro_insights": [
-                {
-                    "insight_date": date(2026, 4, 22),  # 전날, 신선
-                    "vix_value": 17.5,
-                    "vix_regime": "normal",
-                    "usd_krw": 1450.2,
-                    "sectors_to_favor": "반도체, 자동차",
-                    "sectors_to_avoid": "건설",
-                    "council_consensus": "agree",
-                    "key_themes_json": '["AI 랠리", "금리 인하 기대"]',
-                }
-            ],
         }
     )
     engine = _FakeEngine(conn)
@@ -208,11 +199,6 @@ async def test_collect_briefing_data_macro_merges_indices_and_fresh_insight():
     assert m["kospi_index"] == 6200.0
     assert m["kospi_change_pct"] == pytest.approx((6200 - 6100) / 6100 * 100)
     assert m["kosdaq_index"] == 1170.0
-    assert m["vix_value"] == 17.5
-    assert m["usd_krw"] == 1450.2
-    assert m["sectors_to_favor"] == "반도체, 자동차"
-    assert m["council_consensus"] == "agree"
-    assert m["key_themes"] == ["AI 랠리", "금리 인하 기대"]
 
 
 @pytest.mark.asyncio
@@ -271,8 +257,8 @@ async def test_collect_briefing_data_news_failure_returns_empty():
 
 @pytest.mark.asyncio
 async def test_collect_briefing_data_macro_side_tables_failure_are_nonfatal():
-    """index_daily_prices / daily_macro_insights / daily_asset_snapshots 장애는
-    브리핑 본체(trades/positions/macro_runs/watchlist/news) 에 영향 없어야 한다."""
+    """index_daily_prices / daily_asset_snapshots 장애는 브리핑 본체
+    (trades/positions/macro_runs/watchlist/news) 에 영향 없어야 한다."""
     conn = _FakeConn(
         rows_by_prefix={
             "FROM macro_runs": [
@@ -289,7 +275,6 @@ async def test_collect_briefing_data_macro_side_tables_failure_are_nonfatal():
         },
         raise_on_prefix={
             "FROM index_daily_prices",
-            "FROM daily_macro_insights",
             "FROM daily_asset_snapshots",
         },
     )

@@ -5,18 +5,24 @@
 - `_format_fallback_html` → `format_fallback_html`
 - `_compute_trade_summary` → `compute_trade_summary`
 
-데이터 포맷은 v2 호환. collect_briefing_data 가 채워주는 dict 구조:
+데이터 포맷. collect_briefing_data 가 채워주는 dict 구조:
   {
     "date": "YYYY-MM-DD",
     "positions": [{"stock_code", "stock_name", "quantity", "avg_price", "total_buy"}, ...],
     "trades": [{"stock_code", "stock_name", "trade_type", "quantity", "price",
                 "total_amount", "reason", "profit_pct", "profit_amount"}, ...],
     "trade_summary": {...},
-    "macro": {...} | None,
+    "macro": {"sentiment", "sentiment_score", "regime_hint",
+              "kospi_index", "kospi_change_pct", "kosdaq_index", "kosdaq_change_pct",
+              "risk_factors", "trading_reasoning", "next_review_hint"} | None,
     "watchlist": [{"stock_code", "stock_name", "hybrid_score", "trade_tier", "rank"}, ...],
     "assets": {"total_asset", "cash_balance", "stock_eval", "position_count"} | None,
     "news": [{"stock_code", "headline", "score"}, ...],
   }
+
+VIX/USD-KRW/sectors/council_consensus/key_themes 는 v3 에 수집 경로가 없어 제외
+(2026-04-24 C-2). 복원 필요 시 global_macro_snapshots 수집 포팅 후 macro dict 에
+재추가.
 """
 
 from __future__ import annotations
@@ -138,27 +144,12 @@ def build_llm_context(data: dict) -> str:
                 else ""
             )
             lines.append(f"코스닥: {m['kosdaq_index']:,.2f}{change}")
-        if m.get("vix_value"):
-            regime = f" [{m['vix_regime']}]" if m.get("vix_regime") else ""
-            lines.append(f"VIX: {m['vix_value']:.2f}{regime}")
-        if m.get("usd_krw"):
-            lines.append(f"USD/KRW: {m['usd_krw']:,.1f}")
         if m.get("sentiment") is not None:
             lines.append(f"심리: {m['sentiment']} (점수: {m.get('sentiment_score', '-')})")
         if m.get("regime_hint"):
             lines.append(f"국면: {m['regime_hint']}")
-        if m.get("council_consensus"):
-            lines.append(f"AI 의회 합의: {m['council_consensus']}")
         if m.get("trading_reasoning"):
             lines.append(f"매매 근거: {m['trading_reasoning']}")
-        if m.get("sectors_to_favor"):
-            lines.append(f"유망 섹터: {m['sectors_to_favor']}")
-        if m.get("sectors_to_avoid"):
-            lines.append(f"회피 섹터: {m['sectors_to_avoid']}")
-        if m.get("key_themes"):
-            themes = m["key_themes"]
-            if isinstance(themes, list):
-                lines.append(f"핵심 테마: {', '.join(str(t) for t in themes)}")
         if m.get("risk_factors"):
             factors = m["risk_factors"]
             if isinstance(factors, list):
@@ -248,10 +239,6 @@ def format_fallback_html(data: dict) -> str:
                 else ""
             )
             parts.append(f"코스닥: {m['kosdaq_index']:,.2f}{change}")
-        if m.get("vix_value"):
-            parts.append(f"VIX: {m['vix_value']:.2f}")
-        if m.get("usd_krw"):
-            parts.append(f"USD/KRW: {m['usd_krw']:,.1f}")
         if parts:
             lines.append(" | ".join(parts))
         if m.get("sentiment") is not None:

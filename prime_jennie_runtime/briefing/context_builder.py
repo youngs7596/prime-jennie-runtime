@@ -161,12 +161,14 @@ async def _collect_positions(conn) -> list[dict]:
 
 
 async def _collect_macro(conn, today: date) -> dict | None:
-    """최신 macro_runs + index_daily_prices + (신선할 때만) daily_macro_insights 병합.
+    """최신 macro_runs + KOSPI/KOSDAQ (index_daily_prices) 병합.
 
     - gate/size/reasoning: macro_runs 최신
-    - KOSPI/KOSDAQ index + change_pct: index_daily_prices 최근 2일 (가장 신선)
-    - VIX/USD-KRW/sectors/council_consensus/themes: daily_macro_insights 가 7일 이내만 차용
-      (insight_date 보다 오래된 데이터는 "불러오지 못함" 보다 차라리 None 으로 숨김)
+    - KOSPI/KOSDAQ index + change_pct: index_daily_prices 최근 2일
+
+    VIX/USD-KRW/sectors_to_favor/council_consensus/key_themes 는 v3 에 수집 경로가
+    없어 필드 자체 미제공. 복원 시 global_macro_snapshots 수집 job 포팅 + 이 함수
+    확장이 함께 필요 (2026-04-24 C-2 결정).
     """
     stmt = text(
         """
@@ -191,9 +193,6 @@ async def _collect_macro(conn, today: date) -> dict | None:
                 risk_descriptions.append(r)
 
     indices = await _fetch_latest_indices(conn, today)
-    # daily_macro_insights 는 장 개장일 아침에 갱신되므로 3일(주말 커버) 이내만 차용.
-    # 그 이상 오래되면 오래된 VIX/FX 가 "오늘의 시장" 으로 오인되는 걸 피하려 None.
-    insight = await _fetch_fresh_insight(conn, today, max_age_days=3)
 
     return {
         "sentiment": row["gate"],  # open/closed 를 심리로 노출
@@ -203,15 +202,8 @@ async def _collect_macro(conn, today: date) -> dict | None:
         "kospi_change_pct": indices.get("kospi_change_pct"),
         "kosdaq_index": indices.get("kosdaq_index"),
         "kosdaq_change_pct": indices.get("kosdaq_change_pct"),
-        "vix_value": insight.get("vix_value"),
-        "vix_regime": insight.get("vix_regime"),
-        "usd_krw": insight.get("usd_krw"),
-        "council_consensus": insight.get("council_consensus"),
         "risk_factors": risk_descriptions or None,
-        "key_themes": insight.get("key_themes"),
         "trading_reasoning": row["reasoning"],
-        "sectors_to_favor": insight.get("sectors_to_favor"),
-        "sectors_to_avoid": insight.get("sectors_to_avoid"),
         "next_review_hint": row["next_review_hint"],
     }
 
@@ -258,43 +250,6 @@ async def _fetch_latest_indices(conn, today: date) -> dict:
             out["kosdaq_index"] = float(latest["close_price"])
             out["kosdaq_change_pct"] = change_pct
     return out
-
-
-async def _fetch_fresh_insight(conn, today: date, *, max_age_days: int) -> dict:
-    """daily_macro_insights 에서 신선한(=today 로부터 max_age_days 이내) 항목 차용.
-
-    테이블이 현재 4-17 까지만 갱신되고 있으므로 너무 오래된 데이터가 나가면 오해 소지.
-    max_age_days 초과면 빈 dict.
-    """
-    since = today - timedelta(days=max_age_days)
-    stmt = text(
-        """
-        SELECT insight_date, vix_value, vix_regime, usd_krw,
-               sectors_to_favor, sectors_to_avoid, council_consensus,
-               key_themes_json
-        FROM daily_macro_insights
-        WHERE insight_date >= :since
-        ORDER BY insight_date DESC
-        LIMIT 1
-        """
-    )
-    try:
-        row = (await conn.execute(stmt, {"since": since})).mappings().first()
-    except Exception:
-        logger.warning("daily_macro_insights 조회 실패 — VIX/FX/consensus 생략", exc_info=True)
-        return {}
-    if row is None:
-        return {}
-    themes = _parse_json_field(row["key_themes_json"]) if row["key_themes_json"] else None
-    return {
-        "vix_value": float(row["vix_value"]) if row["vix_value"] is not None else None,
-        "vix_regime": row["vix_regime"],
-        "usd_krw": float(row["usd_krw"]) if row["usd_krw"] is not None else None,
-        "sectors_to_favor": row["sectors_to_favor"],
-        "sectors_to_avoid": row["sectors_to_avoid"],
-        "council_consensus": row["council_consensus"],
-        "key_themes": themes if isinstance(themes, list) else None,
-    }
 
 
 async def _collect_assets(conn, today: date) -> dict | None:

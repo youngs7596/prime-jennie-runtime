@@ -64,15 +64,8 @@ def _sample_data(**overrides) -> dict:
             "kospi_change_pct": 0.5,
             "kosdaq_index": 855.0,
             "kosdaq_change_pct": -0.3,
-            "vix_value": 18.5,
-            "vix_regime": "calm",
-            "usd_krw": 1380.0,
-            "council_consensus": None,
             "risk_factors": ["미국 금리 인상", "반도체 수요 둔화"],
-            "key_themes": ["AI", "반도체"],
             "trading_reasoning": "선별적 매수",
-            "sectors_to_favor": "반도체",
-            "sectors_to_avoid": "건설",
         },
         "watchlist": [
             {
@@ -142,7 +135,7 @@ def test_build_llm_context_includes_all_sections():
     assert "총자산: 10,000,000원" in ctx
     assert "매수: 1건 / 매도: 2건" in ctx
     assert "코스피: 2,650.12 (+0.50%)" in ctx
-    assert "핵심 테마: AI, 반도체" in ctx
+    assert "위험 요인: 미국 금리 인상, 반도체 수요 둔화" in ctx
 
 
 def test_build_llm_context_handles_empty_data():

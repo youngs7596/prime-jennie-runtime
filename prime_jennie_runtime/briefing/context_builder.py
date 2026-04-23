@@ -298,11 +298,12 @@ async def _fetch_fresh_insight(conn, today: date, *, max_age_days: int) -> dict:
 
 
 async def _collect_assets(conn, today: date) -> dict | None:
-    """daily_asset_snapshots 에서 최근 7일 이내 최신 snapshot.
+    """daily_asset_snapshots 에서 최근 3일 이내 최신 snapshot.
 
-    너무 오래된 데이터 (예: 수집 job 이 멈춘 기간) 가 그대로 노출되는 것을 피한다.
+    주말/월요일 gap(T-3) 까지만 허용 — 더 오래된 snapshot 이 "오늘 자산" 처럼
+    노출되면 사용자에게 오히려 잘못된 정보.
     """
-    since = today - timedelta(days=7)
+    since = today - timedelta(days=3)
     stmt = text(
         """
         SELECT snapshot_date, total_asset, cash_balance, stock_eval_amount, position_count

@@ -160,6 +160,96 @@ async def test_collect_briefing_data_macro_maps_gate_and_risks():
     assert data["macro"]["trading_reasoning"] == "선별 매수"
     assert data["macro"]["risk_factors"] == ["금리 리스크", "환율"]
     assert data["macro"]["regime_hint"] == "high"
+    # 인덱스/insight 는 별도 테이블 행이 없으니 None 으로 수렴
+    assert data["macro"]["kospi_index"] is None
+    assert data["macro"]["vix_value"] is None
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_macro_merges_indices_and_fresh_insight():
+    """index_daily_prices + 신선한 daily_macro_insights 가 macro dict 에 병합."""
+    conn = _FakeConn(
+        rows_by_prefix={
+            "FROM macro_runs": [
+                {
+                    "gate": "open",
+                    "size_multiplier": 1.0,
+                    "reasoning": "정상 운영",
+                    "top_risks_json": None,
+                    "confidence": "medium",
+                    "next_review_hint": None,
+                    "generated_at": None,
+                }
+            ],
+            "FROM index_daily_prices": [
+                {"index_code": "KOSPI", "price_date": date(2026, 4, 23), "close_price": 6200.0},
+                {"index_code": "KOSPI", "price_date": date(2026, 4, 22), "close_price": 6100.0},
+                {"index_code": "KOSDAQ", "price_date": date(2026, 4, 23), "close_price": 1170.0},
+                {"index_code": "KOSDAQ", "price_date": date(2026, 4, 22), "close_price": 1160.0},
+            ],
+            "FROM daily_macro_insights": [
+                {
+                    "insight_date": date(2026, 4, 22),  # 전날, 신선
+                    "vix_value": 17.5,
+                    "vix_regime": "normal",
+                    "usd_krw": 1450.2,
+                    "sectors_to_favor": "반도체, 자동차",
+                    "sectors_to_avoid": "건설",
+                    "council_consensus": "agree",
+                    "key_themes_json": '["AI 랠리", "금리 인하 기대"]',
+                }
+            ],
+        }
+    )
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 23))
+
+    m = data["macro"]
+    assert m["kospi_index"] == 6200.0
+    assert m["kospi_change_pct"] == pytest.approx((6200 - 6100) / 6100 * 100)
+    assert m["kosdaq_index"] == 1170.0
+    assert m["vix_value"] == 17.5
+    assert m["usd_krw"] == 1450.2
+    assert m["sectors_to_favor"] == "반도체, 자동차"
+    assert m["council_consensus"] == "agree"
+    assert m["key_themes"] == ["AI 랠리", "금리 인하 기대"]
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_assets_from_recent_snapshot():
+    conn = _FakeConn(
+        rows_by_prefix={
+            "FROM daily_asset_snapshots": [
+                {
+                    "snapshot_date": date(2026, 4, 22),
+                    "total_asset": 200_000_000,
+                    "cash_balance": 500_000,
+                    "stock_eval_amount": 199_500_000,
+                    "position_count": 3,
+                }
+            ]
+        }
+    )
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 23))
+
+    assert data["assets"] == {
+        "total_asset": 200_000_000,
+        "cash_balance": 500_000,
+        "stock_eval": 199_500_000,
+        "position_count": 3,
+    }
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_assets_none_when_snapshot_stale():
+    """daily_asset_snapshots 쿼리에 WHERE snapshot_date >= :since 가 걸려 있어
+    fake conn 이 행을 반환해도 SQL fresh window 밖이면 None 이 되어야 한다.
+    (여기서는 0 행 반환 simulation — 7일 이전 snapshot 만 존재하는 상황 근사)"""
+    conn = _FakeConn()  # no rows for any prefix
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 23))
+    assert data["assets"] is None
 
 
 @pytest.mark.asyncio
@@ -173,7 +263,38 @@ async def test_collect_briefing_data_watchlist_failure_returns_empty():
 
 @pytest.mark.asyncio
 async def test_collect_briefing_data_news_failure_returns_empty():
-    conn = _FakeConn(raise_on_prefix={"FROM news_sentiments"})
+    conn = _FakeConn(raise_on_prefix={"FROM news_events"})
     engine = _FakeEngine(conn)
     data = await collect_briefing_data(engine, as_of=date(2026, 4, 17))
     assert data["news"] == []
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_macro_side_tables_failure_are_nonfatal():
+    """index_daily_prices / daily_macro_insights / daily_asset_snapshots 장애는
+    브리핑 본체(trades/positions/macro_runs/watchlist/news) 에 영향 없어야 한다."""
+    conn = _FakeConn(
+        rows_by_prefix={
+            "FROM macro_runs": [
+                {
+                    "gate": "open",
+                    "size_multiplier": 1.0,
+                    "reasoning": "정상",
+                    "top_risks_json": None,
+                    "confidence": "medium",
+                    "next_review_hint": None,
+                    "generated_at": None,
+                }
+            ]
+        },
+        raise_on_prefix={
+            "FROM index_daily_prices",
+            "FROM daily_macro_insights",
+            "FROM daily_asset_snapshots",
+        },
+    )
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 23))
+    assert data["macro"]["sentiment"] == "open"
+    assert data["macro"]["kospi_index"] is None
+    assert data["assets"] is None

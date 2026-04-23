@@ -47,9 +47,10 @@ async def collect_briefing_data(
     async with engine.connect() as conn:
         trades = await _collect_trades(conn, today)
         positions = await _collect_positions(conn)
-        macro = await _collect_macro(conn)
+        macro = await _collect_macro(conn, today)
         watchlist = await _collect_watchlist(conn)
         news = await _collect_news(conn, today)
+        assets = await _collect_assets(conn, today)
 
     return {
         "date": today.isoformat(),
@@ -58,7 +59,7 @@ async def collect_briefing_data(
         "trade_summary": compute_trade_summary(trades),
         "macro": macro,
         "watchlist": watchlist,
-        "assets": None,  # v3 에 asset_snapshots 없음 — Track B KIS sync 이후 채움
+        "assets": assets,
         "news": news,
     }
 
@@ -159,11 +160,13 @@ async def _collect_positions(conn) -> list[dict]:
     return positions
 
 
-async def _collect_macro(conn) -> dict | None:
-    """최신 macro_runs → v2 MacroInsight 스키마 호환 dict.
+async def _collect_macro(conn, today: date) -> dict | None:
+    """최신 macro_runs + index_daily_prices + (신선할 때만) daily_macro_insights 병합.
 
-    v2 가 기대하는 확장 필드(kospi_index, vix, council_consensus 등)는 v3 에 없음.
-    현재는 gate/size_multiplier + reasoning 만 채운다.
+    - gate/size/reasoning: macro_runs 최신
+    - KOSPI/KOSDAQ index + change_pct: index_daily_prices 최근 2일 (가장 신선)
+    - VIX/USD-KRW/sectors/council_consensus/themes: daily_macro_insights 가 7일 이내만 차용
+      (insight_date 보다 오래된 데이터는 "불러오지 못함" 보다 차라리 None 으로 숨김)
     """
     stmt = text(
         """
@@ -187,24 +190,140 @@ async def _collect_macro(conn) -> dict | None:
             elif isinstance(r, str):
                 risk_descriptions.append(r)
 
+    indices = await _fetch_latest_indices(conn, today)
+    # daily_macro_insights 는 장 개장일 아침에 갱신되므로 3일(주말 커버) 이내만 차용.
+    # 그 이상 오래되면 오래된 VIX/FX 가 "오늘의 시장" 으로 오인되는 걸 피하려 None.
+    insight = await _fetch_fresh_insight(conn, today, max_age_days=3)
+
     return {
         "sentiment": row["gate"],  # open/closed 를 심리로 노출
         "sentiment_score": float(row["size_multiplier"]) if row["size_multiplier"] else None,
         "regime_hint": row["confidence"],
-        "kospi_index": None,
-        "kospi_change_pct": None,
-        "kosdaq_index": None,
-        "kosdaq_change_pct": None,
-        "vix_value": None,
-        "vix_regime": None,
-        "usd_krw": None,
-        "council_consensus": None,
+        "kospi_index": indices.get("kospi_index"),
+        "kospi_change_pct": indices.get("kospi_change_pct"),
+        "kosdaq_index": indices.get("kosdaq_index"),
+        "kosdaq_change_pct": indices.get("kosdaq_change_pct"),
+        "vix_value": insight.get("vix_value"),
+        "vix_regime": insight.get("vix_regime"),
+        "usd_krw": insight.get("usd_krw"),
+        "council_consensus": insight.get("council_consensus"),
         "risk_factors": risk_descriptions or None,
-        "key_themes": None,
+        "key_themes": insight.get("key_themes"),
         "trading_reasoning": row["reasoning"],
-        "sectors_to_favor": None,
-        "sectors_to_avoid": None,
+        "sectors_to_favor": insight.get("sectors_to_favor"),
+        "sectors_to_avoid": insight.get("sectors_to_avoid"),
         "next_review_hint": row["next_review_hint"],
+    }
+
+
+async def _fetch_latest_indices(conn, today: date) -> dict:
+    """index_daily_prices 에서 KOSPI/KOSDAQ 최신 종가 + 전일 대비 % 를 구한다.
+
+    change_pct 컬럼이 비어있을 수 있어 이전 영업일 close 와 직접 계산.
+    7일 이상 오래된 데이터면 None (장기 미수집 상태면 차라리 숨긴다).
+    """
+    stmt = text(
+        """
+        SELECT index_code, price_date, close_price
+        FROM index_daily_prices
+        WHERE index_code IN ('KOSPI', 'KOSDAQ')
+          AND price_date >= :since
+        ORDER BY index_code, price_date DESC
+        """
+    )
+    since = today - timedelta(days=7)
+    try:
+        rows = (await conn.execute(stmt, {"since": since})).mappings().all()
+    except Exception:
+        logger.warning("index_daily_prices 조회 실패 — KOSPI/KOSDAQ 생략", exc_info=True)
+        return {}
+
+    by_code: dict[str, list[dict]] = {}
+    for r in rows:
+        by_code.setdefault(r["index_code"], []).append(r)
+
+    out: dict = {}
+    for code, entries in by_code.items():
+        if not entries:
+            continue
+        latest = entries[0]
+        prev_close = entries[1]["close_price"] if len(entries) > 1 else None
+        change_pct: float | None = None
+        if prev_close and prev_close != 0:
+            change_pct = (latest["close_price"] - prev_close) / prev_close * 100.0
+        if code == "KOSPI":
+            out["kospi_index"] = float(latest["close_price"])
+            out["kospi_change_pct"] = change_pct
+        elif code == "KOSDAQ":
+            out["kosdaq_index"] = float(latest["close_price"])
+            out["kosdaq_change_pct"] = change_pct
+    return out
+
+
+async def _fetch_fresh_insight(conn, today: date, *, max_age_days: int) -> dict:
+    """daily_macro_insights 에서 신선한(=today 로부터 max_age_days 이내) 항목 차용.
+
+    테이블이 현재 4-17 까지만 갱신되고 있으므로 너무 오래된 데이터가 나가면 오해 소지.
+    max_age_days 초과면 빈 dict.
+    """
+    since = today - timedelta(days=max_age_days)
+    stmt = text(
+        """
+        SELECT insight_date, vix_value, vix_regime, usd_krw,
+               sectors_to_favor, sectors_to_avoid, council_consensus,
+               key_themes_json
+        FROM daily_macro_insights
+        WHERE insight_date >= :since
+        ORDER BY insight_date DESC
+        LIMIT 1
+        """
+    )
+    try:
+        row = (await conn.execute(stmt, {"since": since})).mappings().first()
+    except Exception:
+        logger.warning("daily_macro_insights 조회 실패 — VIX/FX/consensus 생략", exc_info=True)
+        return {}
+    if row is None:
+        return {}
+    themes = _parse_json_field(row["key_themes_json"]) if row["key_themes_json"] else None
+    return {
+        "vix_value": float(row["vix_value"]) if row["vix_value"] is not None else None,
+        "vix_regime": row["vix_regime"],
+        "usd_krw": float(row["usd_krw"]) if row["usd_krw"] is not None else None,
+        "sectors_to_favor": row["sectors_to_favor"],
+        "sectors_to_avoid": row["sectors_to_avoid"],
+        "council_consensus": row["council_consensus"],
+        "key_themes": themes if isinstance(themes, list) else None,
+    }
+
+
+async def _collect_assets(conn, today: date) -> dict | None:
+    """daily_asset_snapshots 에서 최근 7일 이내 최신 snapshot.
+
+    너무 오래된 데이터 (예: 수집 job 이 멈춘 기간) 가 그대로 노출되는 것을 피한다.
+    """
+    since = today - timedelta(days=7)
+    stmt = text(
+        """
+        SELECT snapshot_date, total_asset, cash_balance, stock_eval_amount, position_count
+        FROM daily_asset_snapshots
+        WHERE snapshot_date >= :since
+        ORDER BY snapshot_date DESC
+        LIMIT 1
+        """
+    )
+    try:
+        row = (await conn.execute(stmt, {"since": since})).mappings().first()
+    except Exception:
+        logger.warning("daily_asset_snapshots 조회 실패 — 자산 현황 생략", exc_info=True)
+        return None
+    if row is None:
+        return None
+    return {
+        "total_asset": int(row["total_asset"] or 0),
+        "cash_balance": int(row["cash_balance"] or 0),
+        "stock_eval": int(row["stock_eval_amount"] or 0),
+        "position_count": int(row["position_count"] or 0),
     }
 
 

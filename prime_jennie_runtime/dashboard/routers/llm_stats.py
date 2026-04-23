@@ -41,7 +41,7 @@ _SERVICES = [
 # News extractor 는 Qwen3-30B-A3B MoE (2026-04-21 EXAONE 4.0-32B 에서 교체).
 # - news_analysis: vLLM Qwen3 (VLLM_LLM_MODEL)
 # - scout / macro: DeepSeek chat (DEEPSEEK_MODEL)
-# - briefing: Claude Opus (ANTHROPIC_MODEL) — langchain-anthropic 직접
+# - briefing: DeepSeek chat (DEEPSEEK_MODEL) — 2026-04-24 Opus 에서 전환
 _FEATURE_MAP = [
     {
         "service": "news_analysis",
@@ -97,8 +97,9 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
         model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
         return model, "Anthropic"
     if service == "briefing":
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-        return model, "Anthropic"
+        # 2026-04-24: briefing 도 DeepSeek 로 전환 (Opus 월 ~$30-50 절감).
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        return model, "DeepSeek"
     return "unknown", "unknown"
 
 

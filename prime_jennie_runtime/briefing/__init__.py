@@ -14,7 +14,7 @@ from .prompts import JENNIE_SYSTEM_PROMPT
 from .reporter import (
     BriefingResult,
     LLMCaller,
-    build_claude_llm_caller,
+    build_chat_llm_caller,
     generate_briefing,
 )
 
@@ -22,7 +22,7 @@ __all__ = [
     "BriefingResult",
     "JENNIE_SYSTEM_PROMPT",
     "LLMCaller",
-    "build_claude_llm_caller",
+    "build_chat_llm_caller",
     "build_llm_context",
     "collect_briefing_data",
     "compute_trade_summary",

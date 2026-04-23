@@ -64,15 +64,15 @@ async def generate_briefing(
     return BriefingResult(html=format_fallback_html(data), source="fallback", data=data)
 
 
-def build_claude_llm_caller(
+def build_chat_llm_caller(
     model: Any,
     *,
     max_tokens: int = 4000,
 ) -> LLMCaller:
-    """langchain-anthropic `ChatAnthropic` 인스턴스 → LLMCaller 어댑터.
+    """langchain ChatModel (ChatOpenAI/ChatAnthropic 등) → LLMCaller 어댑터.
 
-    slow_loop 이 쓰는 Claude Opus 4.7 모델을 그대로 재사용 가능.
-    Track B 는 `_try_build_tiered_router` 로 만든 `reasoning` tier 를 넘겨 쓰면 된다.
+    DeepSeek (ChatOpenAI base_url=deepseek) 와 Claude (ChatAnthropic) 둘 다 지원.
+    invoke 인터페이스(.ainvoke + .content) 만 맞으면 동작.
     """
 
     async def _call(system: str, prompt: str) -> str | None:
@@ -83,16 +83,11 @@ def build_claude_llm_caller(
             return None
 
         messages = [SystemMessage(content=system), HumanMessage(content=prompt)]
-        # langchain ChatAnthropic 은 max_tokens 를 생성자 또는 invoke kwargs 로 받음.
         invoke_fn = getattr(model, "ainvoke", None)
         if invoke_fn is None:
             logger.warning("model.ainvoke 가 없음 — briefing LLM skip")
             return None
         response = await invoke_fn(messages, max_tokens=max_tokens)
-        # TODO(llm-stats): briefing 호출도 `prime_jennie_runtime.infra.llm_stats.record_llm_call`
-        # 로 service="briefing" 누적. 현재 jobs/app.py 가 llm_caller=None 으로 주입해
-        # dead path 라 후행 작업 — llm_caller 주입 활성화 시 response.usage_metadata 로
-        # tokens/cost 추출 후 기록.
         content = getattr(response, "content", None)
         if isinstance(content, str):
             return content
@@ -107,6 +102,6 @@ def build_claude_llm_caller(
 __all__ = [
     "BriefingResult",
     "LLMCaller",
-    "build_claude_llm_caller",
+    "build_chat_llm_caller",
     "generate_briefing",
 ]

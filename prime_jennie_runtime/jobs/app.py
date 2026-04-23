@@ -26,7 +26,7 @@ import httpx
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from prime_jennie_runtime.briefing.reporter import LLMCaller, build_claude_llm_caller
+from prime_jennie_runtime.briefing.reporter import LLMCaller, build_chat_llm_caller
 from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
@@ -75,21 +75,27 @@ logger = logging.getLogger(__name__)
 
 
 def _build_briefing_llm_caller() -> LLMCaller | None:
-    """daily_briefing_report 용 Claude Opus LLMCaller. 키/패키지 누락 시 None."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    """daily_briefing_report / wsj_gmail_ingest 용 LLMCaller.
+
+    DeepSeek chat (openai-compatible). DEEPSEEK_API_KEY 없으면 None → briefing 은
+    fallback HTML, WSJ 요약은 skip.
+    """
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not api_key:
-        logger.info("ANTHROPIC_API_KEY 없음 — daily_briefing 은 fallback HTML 사용")
+        logger.info("DEEPSEEK_API_KEY 없음 — briefing/WSJ 는 fallback/skip")
         return None
     try:
-        from langchain_anthropic import ChatAnthropic
+        from langchain_openai import ChatOpenAI
     except ImportError:
-        logger.warning("langchain_anthropic 미설치 — daily_briefing 은 fallback HTML")
+        logger.warning("langchain_openai 미설치 — briefing/WSJ 는 fallback/skip")
         return None
-    model = ChatAnthropic(
-        model=os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7"),
+    model = ChatOpenAI(
+        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
         api_key=api_key,
+        base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+        temperature=0.3,
     )
-    return build_claude_llm_caller(model)
+    return build_chat_llm_caller(model)
 
 
 def build_handlers(

@@ -429,15 +429,13 @@ services:
       # 비어 있으면 jobs/app.py 가 None 으로 전달 → fallback 경로만 동작.
       BOK_ECOS_API_KEY: ${BOK_ECOS_API_KEY:-}
       DART_API_KEY: ${DART_API_KEY:-}
-      # Phase 2.13-1: global_news_digest 의 DeepSeek 요약. 없으면 fallback 동작.
+      # DeepSeek chat: global_news_digest 요약 + daily_briefing_report + wsj_gmail_ingest 요약.
+      # 2026-04-24 briefing/WSJ 도 Opus → DeepSeek 전환 (월 ~$30-50 추가 절감).
+      # 키 누락 시 briefing 은 fallback HTML, WSJ 요약은 skip.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
       DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
       MACRO_DIGEST_SUMMARIZER_MODEL: ${MACRO_DIGEST_SUMMARIZER_MODEL:-}
-      # daily_briefing_report: Claude Opus 로 브리핑 본문 생성 + Telegram 발송.
-      # 키/토큰 누락 시 reporter 가 fallback HTML, telegram_sent=False 로 자동 축퇴.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       TELEGRAM_DRY_RUN: ${TELEGRAM_DRY_RUN:-false}

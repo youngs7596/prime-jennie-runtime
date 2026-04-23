@@ -82,16 +82,14 @@ async def test_daily_asset_snapshot_upserts_with_pnl():
         async with httpx.AsyncClient() as client:
             await daily_asset_snapshot(pool, client, GATEWAY)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO daily_asset_snapshots" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO daily_asset_snapshots" in c[0]]
     assert len(inserts) == 1
     args = inserts[0][1]
     assert args[0] == date.today()
     assert args[1] == 10_000_000  # total
-    assert args[2] == 2_000_000   # cash
-    assert args[3] == 8_000_000   # stock_eval
-    assert args[4] == 1            # position_count
+    assert args[2] == 2_000_000  # cash
+    assert args[3] == 8_000_000  # stock_eval
+    assert args[4] == 1  # position_count
     # total_pnl = unrealized (7,500,000 - 7,000,000 = 500,000) + realized (500,000) = 1,000,000
     assert args[5] == 1_000_000
     assert args[6] == 500_000
@@ -123,3 +121,49 @@ async def test_daily_asset_snapshot_handles_empty_positions():
     args = pool.conn.execute_calls[0][1]
     assert args[5] == 0  # total_pnl
     assert args[6] == 0  # realized_pnl
+
+
+@pytest.mark.asyncio
+async def test_daily_asset_snapshot_retries_on_connect_error(monkeypatch):
+    """장 마감 직후 kis-gateway 일시 장애 — 1~2차 ConnectError 후 3차 성공."""
+    # 실제 sleep 을 건너뛰어 테스트 즉시
+    monkeypatch.setattr(
+        "prime_jennie_runtime.jobs.asset_snapshot.asyncio.sleep",
+        lambda _s: _noop(),
+    )
+    pool = _FakePool(realized=0)
+    payload = _bal(total=1_000_000, cash=1_000_000, eval_=0, positions=[])
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(url__regex=_BAL_RE)
+        route.side_effect = [
+            httpx.ConnectError("refused"),
+            httpx.ConnectError("refused"),
+            httpx.Response(200, json=payload),
+        ]
+        async with httpx.AsyncClient() as client:
+            await daily_asset_snapshot(pool, client, GATEWAY)
+
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO daily_asset_snapshots" in c[0]]
+    assert len(inserts) == 1
+    assert route.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_daily_asset_snapshot_gives_up_after_max_retries(monkeypatch):
+    """3회 모두 실패하면 끝내 예외 — 상위 scheduler 가 failed 로 기록."""
+    monkeypatch.setattr(
+        "prime_jennie_runtime.jobs.asset_snapshot.asyncio.sleep",
+        lambda _s: _noop(),
+    )
+    pool = _FakePool(realized=0)
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(url__regex=_BAL_RE)
+        route.side_effect = [httpx.ConnectError("x") for _ in range(5)]
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(httpx.ConnectError):
+                await daily_asset_snapshot(pool, client, GATEWAY)
+    assert route.call_count == 3
+
+
+async def _noop() -> None:
+    return None

@@ -11,6 +11,7 @@ v3 어댑터:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date
 from typing import Any
@@ -18,6 +19,46 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# 장 마감 직후(15:30~16:00)에 KIS gateway 가 일시 멈춤/재시작을 겪으면
+# ConnectError 로 떨어지는 케이스가 반복됨 (4-20 ~ 4-23 관측).
+# 3회 exponential backoff 로 internal 일시장애 흡수.
+_RETRY_WAITS: tuple[float, ...] = (5.0, 15.0)
+_RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+)
+
+
+async def _fetch_balance_with_retry(
+    http: httpx.AsyncClient,
+    gateway_url: str,
+) -> dict:
+    """장 마감 직후 kis-gateway 의 일시 장애를 견디는 retry wrapper."""
+    last_exc: Exception | None = None
+    attempts = len(_RETRY_WAITS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = await http.get(f"{gateway_url}/api/balance", timeout=15.0)
+            resp.raise_for_status()
+            return resp.json()
+        except _RETRYABLE_EXCEPTIONS as e:
+            last_exc = e
+            if attempt >= attempts:
+                break
+            wait = _RETRY_WAITS[attempt - 1]
+            logger.warning(
+                "kis-gateway balance 조회 실패 (%d/%d) %s — %.0fs 재시도",
+                attempt,
+                attempts,
+                type(e).__name__,
+                wait,
+            )
+            await asyncio.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
 
 
 async def daily_asset_snapshot(
@@ -28,13 +69,12 @@ async def daily_asset_snapshot(
     """v2 `/jobs/daily-asset-snapshot` 포팅.
 
     1) KIS gateway `/api/balance` → total_asset / cash / stock_eval / positions
+       (장 마감 직후 일시 장애 대응으로 3회 retry)
     2) 미실현 PnL = sum(current_value - total_buy_amount) over positions
     3) 실현 PnL = sum(outcomes.pnl_krw WHERE closed_at::date = today)
     4) daily_asset_snapshots UPSERT (PK=snapshot_date)
     """
-    resp = await http.get(f"{gateway_url}/api/balance", timeout=15.0)
-    resp.raise_for_status()
-    balance = resp.json()
+    balance = await _fetch_balance_with_retry(http, gateway_url)
 
     positions = balance.get("positions", []) or []
     total = int(balance.get("total_asset") or 0)

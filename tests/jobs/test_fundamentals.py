@@ -76,9 +76,7 @@ async def test_collect_consensus_upserts_with_source(monkeypatch):
     async with httpx.AsyncClient() as client:
         await fmod.collect_consensus(pool, client, throttle_sec=0.0)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_consensus" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_consensus" in c[0]]
     assert len(inserts) == 2
     samsung = next(c for c in inserts if c[1][0] == "005930")
     assert samsung[1][1] == date.today()
@@ -115,9 +113,7 @@ async def test_collect_naver_roe_upserts_only_roe(monkeypatch):
     async with httpx.AsyncClient() as client:
         await fmod.collect_naver_roe(pool, client, throttle_sec=0.0)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_fundamentals" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_fundamentals" in c[0]]
     assert len(inserts) == 1
     args = inserts[0][1]
     assert args[0] == "005930"
@@ -144,9 +140,7 @@ async def test_collect_quarterly_financials_upserts_per_pbr_roe(monkeypatch):
     async with httpx.AsyncClient() as client:
         await fmod.collect_quarterly_financials(pool, client, throttle_sec=0.0)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_fundamentals" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_fundamentals" in c[0]]
     assert len(inserts) == 1
     args = inserts[0][1]
     assert args[2] == 12.5
@@ -173,8 +167,6 @@ async def test_collect_quarterly_financials_handles_partial_none(monkeypatch):
     async with httpx.AsyncClient() as client:
         await fmod.collect_quarterly_financials(pool, client, throttle_sec=0.0)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_fundamentals" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_fundamentals" in c[0]]
     args = inserts[0][1]
     assert args[3] is None  # pbr → COALESCE 가 기존값 보존

@@ -72,9 +72,7 @@ async def test_collect_full_market_data_upserts_for_all_targets():
     with respx.mock(assert_all_called=False) as mock:
         mock.post(url__regex=_DAILY_RE).respond(200, json=_daily_payload("X", n=5))
         async with httpx.AsyncClient() as client:
-            result = await collect_full_market_data(
-                pool, client, GATEWAY, top_n=3, days=30
-            )
+            result = await collect_full_market_data(pool, client, GATEWAY, top_n=3, days=30)
 
     assert result["target"] == 3
     assert result["upserted"] == 15  # 3 종목 × 5 봉
@@ -109,9 +107,7 @@ async def test_collect_full_market_data_continues_on_failure():
     with respx.mock(assert_all_called=False) as mock:
         mock.post(url__regex=_DAILY_RE).mock(side_effect=_side)
         async with httpx.AsyncClient() as client:
-            result = await collect_full_market_data(
-                pool, client, GATEWAY, top_n=2
-            )
+            result = await collect_full_market_data(pool, client, GATEWAY, top_n=2)
 
     assert result["failed"] == 1
     assert result["upserted"] == 2

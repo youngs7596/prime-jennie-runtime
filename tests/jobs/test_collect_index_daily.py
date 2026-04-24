@@ -12,10 +12,7 @@ _FCHART_URL_RE = r"https://fchart\.stock\.naver\.com/sise\.nhn.*"
 
 
 def _fchart_xml(bars: list[tuple[str, float, float, float, float, int]]) -> str:
-    items = "".join(
-        f'<item data="{d}|{o}|{hi}|{lo}|{c}|{v}" />'
-        for d, o, hi, lo, c, v in bars
-    )
+    items = "".join(f'<item data="{d}|{o}|{hi}|{lo}|{c}|{v}" />' for d, o, hi, lo, c, v in bars)
     return f'<?xml version="1.0" encoding="UTF-8"?><protocol>{items}</protocol>'
 
 

@@ -56,9 +56,7 @@ async def collect_dart_filings(
         return
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT stock_code FROM stock_masters WHERE is_active = TRUE"
-        )
+        rows = await conn.fetch("SELECT stock_code FROM stock_masters WHERE is_active = TRUE")
         active_codes = {r["stock_code"] for r in rows}
 
         inserted = 0

@@ -96,9 +96,7 @@ async def test_collect_dart_filings_inserts_only_active_codes():
         async with httpx.AsyncClient() as client:
             await collect_dart_filings(pool, client, api_key="dummy", days=7)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_disclosures" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_disclosures" in c[0]]
     assert len(inserts) == 2
     codes = sorted(c[1][0] for c in inserts)
     assert codes == ["000660", "005930"]
@@ -171,9 +169,7 @@ async def test_collect_dart_filings_paginates():
         async with httpx.AsyncClient() as client:
             await collect_dart_filings(pool, client, api_key="dummy", days=7)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_disclosures" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_disclosures" in c[0]]
     assert len(inserts) == 2
     receipt_nos = sorted(c[1][4] for c in inserts)
     assert receipt_nos == ["20260417000001", "20260418000002"]
@@ -200,8 +196,6 @@ async def test_collect_dart_filings_invalid_rcept_dt_falls_back_to_today():
         async with httpx.AsyncClient() as client:
             await collect_dart_filings(pool, client, api_key="dummy", days=7)
 
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_disclosures" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_disclosures" in c[0]]
     assert len(inserts) == 1
     assert inserts[0][1][1] == date.today()

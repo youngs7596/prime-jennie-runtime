@@ -19,17 +19,15 @@ _SECTOR_DETAIL_URL = r"https://finance\.naver\.com/sise/sise_group_detail\.naver
 _SECTOR_LIST_HTML = (
     '<html><body><table class="type_1">'
     '<tr><td><a href="/sise/sise_group_detail.naver?type=upjong&no=001">'
-    '반도체와반도체장비</a></td></tr>'
+    "반도체와반도체장비</a></td></tr>"
     '<tr><td><a href="/sise/sise_group_detail.naver?type=upjong&no=002">'
-    '은행</a></td></tr>'
+    "은행</a></td></tr>"
     "</table></body></html>"
 )
 
 
 def _detail_html(codes: list[str]) -> str:
-    rows = "".join(
-        f'<tr><td><a href="/item/main.naver?code={c}">x</a></td></tr>' for c in codes
-    )
+    rows = "".join(f'<tr><td><a href="/item/main.naver?code={c}">x</a></td></tr>' for c in codes)
     return f'<html><body><table class="type_5">{rows}</table></body></html>'
 
 
@@ -103,9 +101,7 @@ async def test_update_naver_sectors_maps_and_updates():
 async def test_update_naver_sectors_skips_on_empty_mapping(caplog):
     pool = _FakePool()
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_SECTOR_LIST_URL).respond(
-            200, content=b"<html><body></body></html>"
-        )
+        mock.get(url__regex=_SECTOR_LIST_URL).respond(200, content=b"<html><body></body></html>")
         async with httpx.AsyncClient() as client:
             await update_naver_sectors(pool, client)
 

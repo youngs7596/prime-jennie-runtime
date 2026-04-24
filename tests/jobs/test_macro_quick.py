@@ -48,22 +48,16 @@ async def test_macro_quick_delegates_to_collect_global(fake_redis):
             side_effect=[
                 httpx.Response(
                     200,
-                    json=_index_payload(
-                        "3,050.00", "0.5", f"{today.isoformat()}T15:30:00+09:00"
-                    ),
+                    json=_index_payload("3,050.00", "0.5", f"{today.isoformat()}T15:30:00+09:00"),
                 ),
                 httpx.Response(
                     200,
-                    json=_index_payload(
-                        "920.00", "-0.2", f"{today.isoformat()}T15:30:00+09:00"
-                    ),
+                    json=_index_payload("920.00", "-0.2", f"{today.isoformat()}T15:30:00+09:00"),
                 ),
             ]
         )
         mock.get(url__regex=_INVESTOR_URL_RE).respond(200, text="<html/>")
-        mock.get(url__regex=_YAHOO_URL_RE).respond(
-            200, json=_yahoo_payload([17.0, 17.5, 18.0])
-        )
+        mock.get(url__regex=_YAHOO_URL_RE).respond(200, json=_yahoo_payload([17.0, 17.5, 18.0]))
         async with httpx.AsyncClient() as client:
             snapshot = await macro_quick(fake_redis, client)
 

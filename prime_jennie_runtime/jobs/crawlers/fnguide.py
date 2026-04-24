@@ -40,9 +40,7 @@ class ConsensusData:
     source: str = "FNGUIDE"
 
 
-async def crawl_consensus(
-    client: httpx.AsyncClient, stock_code: str
-) -> ConsensusData | None:
+async def crawl_consensus(client: httpx.AsyncClient, stock_code: str) -> ConsensusData | None:
     """FnGuide → Naver 순서로 시도, 성공한 쪽 반환."""
     result = await crawl_fnguide_consensus(client, stock_code)
     source = "FNGUIDE"
@@ -162,9 +160,7 @@ def _parse_fnguide_target_price(soup: BeautifulSoup, result: ConsensusData) -> N
                     result.analyst_count = int(val)
 
 
-async def crawl_naver_consensus(
-    client: httpx.AsyncClient, stock_code: str
-) -> ConsensusData | None:
+async def crawl_naver_consensus(client: httpx.AsyncClient, stock_code: str) -> ConsensusData | None:
     url = f"https://navercomp.wisereport.co.kr/v2/company/c1010001.aspx?cmp_cd={stock_code}"
     try:
         resp = await client.get(url, headers=_HEADERS, timeout=15, follow_redirects=True)

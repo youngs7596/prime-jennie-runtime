@@ -73,15 +73,12 @@ def _sector_detail_html(include_sentinel: bool, extra_count: int) -> str:
     rows = []
     if include_sentinel:
         rows.append(
-            f'<tr><td><a href="/item/main.naver?code={CONTRACT_SMOKE_SENTINEL}">s</a>'
-            "</td></tr>"
+            f'<tr><td><a href="/item/main.naver?code={CONTRACT_SMOKE_SENTINEL}">s</a></td></tr>'
         )
     for i in range(extra_count):
         code = f"{100000 + i:06d}"
         rows.append(f'<tr><td><a href="/item/main.naver?code={code}">x</a></td></tr>')
-    return (
-        '<html><body><table class="type_5">' + "".join(rows) + "</table></body></html>"
-    )
+    return '<html><body><table class="type_5">' + "".join(rows) + "</table></body></html>"
 
 
 def _investor_html(bizdate: str) -> str:
@@ -114,9 +111,7 @@ class _FakeNewsCrawler:
 async def test_contract_smoke_passes_when_all_contracts_intact():
     today_bizdate = date.today().strftime("%Y%m%d")
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_MAIN_URL_RE).respond(
-            200, content=_MAIN_HTML.encode("euc-kr")
-        )
+        mock.get(url__regex=_MAIN_URL_RE).respond(200, content=_MAIN_HTML.encode("euc-kr"))
         mock.get(url__regex=_SECTOR_LIST_URL).respond(
             200, content=_sector_list_html().encode("euc-kr")
         )
@@ -139,9 +134,7 @@ async def test_contract_smoke_passes_when_all_contracts_intact():
 async def test_contract_smoke_raises_when_news_empty():
     today_bizdate = date.today().strftime("%Y%m%d")
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_MAIN_URL_RE).respond(
-            200, content=_MAIN_HTML.encode("euc-kr")
-        )
+        mock.get(url__regex=_MAIN_URL_RE).respond(200, content=_MAIN_HTML.encode("euc-kr"))
         mock.get(url__regex=_SECTOR_LIST_URL).respond(
             200, content=_sector_list_html().encode("euc-kr")
         )

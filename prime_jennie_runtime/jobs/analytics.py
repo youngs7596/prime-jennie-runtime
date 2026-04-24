@@ -142,9 +142,7 @@ async def analyst_feedback(redis_client: aioredis.Redis) -> str:
     """
     raw = await redis_client.get(_PERF_KEY)
     if not raw:
-        raise RuntimeError(
-            "No AI performance data available. Run analyze_ai_performance first."
-        )
+        raise RuntimeError("No AI performance data available. Run analyze_ai_performance first.")
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8")
     perf = json.loads(raw)
@@ -204,9 +202,7 @@ async def analyst_feedback(redis_client: aioredis.Redis) -> str:
 
     report = "\n".join(lines)
     await redis_client.set(_FEEDBACK_KEY, report, ex=_FEEDBACK_TTL)
-    await redis_client.set(
-        _FEEDBACK_UPDATED_KEY, datetime.now().isoformat(), ex=_FEEDBACK_TTL
-    )
+    await redis_client.set(_FEEDBACK_UPDATED_KEY, datetime.now().isoformat(), ex=_FEEDBACK_TTL)
     logger.info("analyst_feedback: %d lines", len(lines))
     return report
 

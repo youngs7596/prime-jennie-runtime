@@ -61,9 +61,7 @@ async def test_seed_stock_masters_inserts_and_updates(monkeypatch):
         result = await smod.seed_stock_masters(pool, client, market="KOSPI")
 
     assert result == {"inserted": 1, "updated": 1, "total": 2, "failed": 0}
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_masters" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_masters" in c[0]]
     assert len(inserts) == 2
     samsung = next(c for c in inserts if c[1][0] == "005930")
     assert samsung[1][2] == "KOSPI"
@@ -88,9 +86,7 @@ async def test_seed_stock_masters_handles_missing_sector(monkeypatch):
         result = await smod.seed_stock_masters(pool, client, market="KOSDAQ")
 
     assert result["inserted"] == 1
-    inserts = [
-        c for c in pool.conn.execute_calls if "INSERT INTO stock_masters" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_masters" in c[0]]
     args = inserts[0][1]
     assert args[3] is None  # market_cap=0 → None
     assert args[4] is None  # sector 없음

@@ -57,8 +57,7 @@ async def collect_minute_chart(
         top_count = len(target_codes)
 
         latest_date = await conn.fetchval(
-            "SELECT snapshot_date FROM watchlist_histories "
-            "ORDER BY snapshot_date DESC LIMIT 1"
+            "SELECT snapshot_date FROM watchlist_histories ORDER BY snapshot_date DESC LIMIT 1"
         )
         watchlist_added = 0
         if latest_date is not None:

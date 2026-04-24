@@ -105,9 +105,7 @@ def compare_positions(
     }
 
 
-async def _cleanup_redis_position_state(
-    redis_client: aioredis.Redis, stock_code: str
-) -> None:
+async def _cleanup_redis_position_state(redis_client: aioredis.Redis, stock_code: str) -> None:
     """v2 `_cleanup_redis_position_state` 포팅. 키 4종 삭제."""
     try:
         pipe = redis_client.pipeline()
@@ -134,9 +132,7 @@ async def _resolve_sector(conn: Any, stock_code: str) -> str | None:
 
 async def _ensure_stock_master(conn: Any, stock_code: str, stock_name: str) -> None:
     """stock_masters FK 위반 방지. 없으면 KOSPI placeholder 로 생성."""
-    existing = await conn.fetchrow(
-        "SELECT 1 FROM stock_masters WHERE stock_code = $1", stock_code
-    )
+    existing = await conn.fetchrow("SELECT 1 FROM stock_masters WHERE stock_code = $1", stock_code)
     if existing:
         return
     await conn.execute(

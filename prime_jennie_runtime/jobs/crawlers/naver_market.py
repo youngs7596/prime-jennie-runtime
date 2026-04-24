@@ -64,9 +64,7 @@ class IndexDailyOHLCV:
     volume: int
 
 
-async def fetch_index_data(
-    client: httpx.AsyncClient, index_code: str
-) -> IndexData | None:
+async def fetch_index_data(client: httpx.AsyncClient, index_code: str) -> IndexData | None:
     url = f"https://m.stock.naver.com/api/index/{index_code}/basic"
     try:
         resp = await client.get(url, headers=NAVER_HEADERS, timeout=10)
@@ -259,9 +257,7 @@ async def fetch_index_daily_prices(
             if len(parts) < 6:
                 continue
             try:
-                price_date = date(
-                    int(parts[0][:4]), int(parts[0][4:6]), int(parts[0][6:8])
-                )
+                price_date = date(int(parts[0][:4]), int(parts[0][4:6]), int(parts[0][6:8]))
                 items.append(
                     IndexDailyOHLCV(
                         index_code=index_code.upper(),

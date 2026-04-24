@@ -61,9 +61,7 @@ async def test_fetch_index_daily_prices_parses_and_sorts():
 async def test_fetch_investor_flows_parses_target_date():
     # 크롤러가 resp.encoding="euc-kr" 강제라서 응답 body 도 euc-kr bytes 로 내려야 일치
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_INVESTOR_URL_RE).respond(
-            200, content=_INVESTOR_HTML.encode("euc-kr")
-        )
+        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, content=_INVESTOR_HTML.encode("euc-kr"))
         async with httpx.AsyncClient() as client:
             flows = await fetch_investor_flows(client, "kospi", "20260227")
     assert flows is not None
@@ -76,9 +74,7 @@ async def test_fetch_investor_flows_parses_target_date():
 @pytest.mark.asyncio
 async def test_fetch_investor_flows_returns_none_on_missing_date():
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_INVESTOR_URL_RE).respond(
-            200, content=_INVESTOR_HTML.encode("euc-kr")
-        )
+        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, content=_INVESTOR_HTML.encode("euc-kr"))
         async with httpx.AsyncClient() as client:
             flows = await fetch_investor_flows(client, "kospi", "20260101")
     assert flows is None

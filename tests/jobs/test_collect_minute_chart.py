@@ -106,9 +106,7 @@ async def test_collect_minute_chart_fetches_top_n_and_watchlist():
 
 @pytest.mark.asyncio
 async def test_collect_minute_chart_handles_no_watchlist():
-    conn = _FakeConn(
-        top_codes=["005930"], watchlist_date=None, watchlist_codes=[]
-    )
+    conn = _FakeConn(top_codes=["005930"], watchlist_date=None, watchlist_codes=[])
     pool = _FakePool(conn)
 
     with respx.mock(assert_all_called=False) as mock:
@@ -123,9 +121,7 @@ async def test_collect_minute_chart_handles_no_watchlist():
 
 @pytest.mark.asyncio
 async def test_collect_minute_chart_continues_on_per_stock_failure():
-    conn = _FakeConn(
-        top_codes=["005930", "000660"], watchlist_date=None, watchlist_codes=[]
-    )
+    conn = _FakeConn(top_codes=["005930", "000660"], watchlist_date=None, watchlist_codes=[])
     pool = _FakePool(conn)
 
     # 첫 종목은 500, 두 번째는 OK

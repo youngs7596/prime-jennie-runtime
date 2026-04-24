@@ -90,11 +90,7 @@ async def test_collect_investor_trading_sums_recent_seven_bars():
         async with httpx.AsyncClient() as client:
             await collect_investor_trading(pool, client, throttle_sec=0.0)
 
-    inserts = [
-        c
-        for c in pool.conn.execute_calls
-        if "INSERT INTO stock_investor_tradings" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_investor_tradings" in c[0]]
     assert len(inserts) == 1
     args = inserts[0][1]
     assert args[0] == "005930"
@@ -120,11 +116,7 @@ async def test_collect_foreign_holding_uses_latest_row_date():
         async with httpx.AsyncClient() as client:
             await collect_foreign_holding(pool, client, throttle_sec=0.0)
 
-    inserts = [
-        c
-        for c in pool.conn.execute_calls
-        if "INSERT INTO stock_investor_tradings" in c[0]
-    ]
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_investor_tradings" in c[0]]
     assert len(inserts) == 1
     args = inserts[0][1]
     assert args[0] == "005930"

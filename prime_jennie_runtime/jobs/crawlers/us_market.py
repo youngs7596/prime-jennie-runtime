@@ -101,9 +101,7 @@ async def fetch_us_daily(
                 )
             )
             prev_close = c
-        logger.info(
-            "yahoo %s: %d daily rows (range=%s)", ticker_name, len(rows), yrange
-        )
+        logger.info("yahoo %s: %d daily rows (range=%s)", ticker_name, len(rows), yrange)
         return rows
     except Exception as e:
         logger.warning("yahoo %s fetch failed: %s", ticker_name, e)

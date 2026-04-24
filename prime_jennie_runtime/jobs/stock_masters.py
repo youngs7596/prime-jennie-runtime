@@ -63,8 +63,7 @@ async def seed_stock_masters(
 
     async with pool.acquire() as conn:
         existing_codes = {
-            r["stock_code"]
-            for r in await conn.fetch("SELECT stock_code FROM stock_masters")
+            r["stock_code"] for r in await conn.fetch("SELECT stock_code FROM stock_masters")
         }
         logger.info("seed_stock_masters: existing in DB=%d", len(existing_codes))
 

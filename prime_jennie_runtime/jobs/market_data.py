@@ -72,9 +72,7 @@ async def refresh_market_caps(
             last_request = time.monotonic()
 
             try:
-                resp = await http.get(
-                    f"{gateway_url}/api/snapshot/{code}", timeout=10.0
-                )
+                resp = await http.get(f"{gateway_url}/api/snapshot/{code}", timeout=10.0)
                 resp.raise_for_status()
                 snap = resp.json()
                 market_cap = snap.get("market_cap")

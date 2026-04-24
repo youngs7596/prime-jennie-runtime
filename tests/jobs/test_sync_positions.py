@@ -150,10 +150,10 @@ def test_compare_positions_5_way():
 
     kis = [p("A", 100, 1000), p("B", 200, 2000), p("C", 50, 5000), p("D", 10, 10_000)]
     db = [
-        p("B", 100, 2000),   # quantity_mismatch
-        p("C", 50, 4900),    # price_mismatch
+        p("B", 100, 2000),  # quantity_mismatch
+        p("C", 50, 4900),  # price_mismatch
         p("D", 10, 10_000),  # matched
-        p("E", 20, 3000),    # only_in_db
+        p("E", 20, 3000),  # only_in_db
     ]
     diff = compare_positions(kis, db)
     assert [p["stock_code"] for p in diff["only_in_kis"]] == ["A"]
@@ -185,17 +185,14 @@ async def test_sync_positions_dry_run_returns_diff_no_writes():
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_BAL_RE).respond(200, json=payload)
         async with httpx.AsyncClient() as client:
-            result = await sync_positions(
-                pool, client, redis_client, GATEWAY, dry_run=True
-            )
+            result = await sync_positions(pool, client, redis_client, GATEWAY, dry_run=True)
 
     assert result["dry_run"] is True
     assert result["actions"] == []
     assert len(result["diff"]["quantity_mismatch"]) == 1
     # dry_run 은 INSERT/UPDATE/DELETE 호출 없음
     assert not any(
-        "INSERT" in c[0] or "UPDATE" in c[0] or "DELETE" in c[0]
-        for c in conn.execute_calls
+        "INSERT" in c[0] or "UPDATE" in c[0] or "DELETE" in c[0] for c in conn.execute_calls
     )
 
 
@@ -231,16 +228,14 @@ async def test_sync_positions_apply_writes_insert_update_delete():
     payload = _bal(
         [
             _kis_pos("A", "Aco", 100, 1000, cur=1100),  # only_in_kis → INSERT
-            _kis_pos("B", "Bco", 200, 2000),            # qty mismatch → UPDATE
+            _kis_pos("B", "Bco", 200, 2000),  # qty mismatch → UPDATE
         ]
     )
 
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_BAL_RE).respond(200, json=payload)
         async with httpx.AsyncClient() as client:
-            result = await sync_positions(
-                pool, client, redis_client, GATEWAY, dry_run=False
-            )
+            result = await sync_positions(pool, client, redis_client, GATEWAY, dry_run=False)
 
     assert result["dry_run"] is False
     actions = result["actions"]
@@ -282,13 +277,10 @@ async def test_sync_positions_all_matched_short_circuits():
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_BAL_RE).respond(200, json=payload)
         async with httpx.AsyncClient() as client:
-            result = await sync_positions(
-                pool, client, redis_client, GATEWAY, dry_run=False
-            )
+            result = await sync_positions(pool, client, redis_client, GATEWAY, dry_run=False)
 
     assert result["actions"] == []
     assert "All positions matched" in result["summary"]
     assert not any(
-        "INSERT" in c[0] or "UPDATE" in c[0] or "DELETE" in c[0]
-        for c in conn.execute_calls
+        "INSERT" in c[0] or "UPDATE" in c[0] or "DELETE" in c[0] for c in conn.execute_calls
     )

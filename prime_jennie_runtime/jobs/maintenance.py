@@ -173,9 +173,7 @@ async def contract_smoke_test(
         articles = await news_crawler.crawl([sentinel])
         if not articles:
             failed.append("news: no articles returned")
-        elif not getattr(articles[0], "title", None) and not getattr(
-            articles[0], "headline", None
-        ):
+        elif not getattr(articles[0], "title", None) and not getattr(articles[0], "headline", None):
             failed.append("news: empty headline")
         else:
             passed.append(f"news: {len(articles)} articles")
@@ -201,9 +199,7 @@ async def contract_smoke_test(
         elif consensus.forward_per is None or not (
             _PER_RANGE[0] < consensus.forward_per < _PER_RANGE[1]
         ):
-            failed.append(
-                f"fnguide_consensus: forward_per out of range ({consensus.forward_per})"
-            )
+            failed.append(f"fnguide_consensus: forward_per out of range ({consensus.forward_per})")
         else:
             passed.append(
                 f"fnguide_consensus: fwd_PER={consensus.forward_per}, "
@@ -223,11 +219,7 @@ async def contract_smoke_test(
         if test_flows is None:
             failed.append("investor_flows: no data in last 7 days")
         else:
-            total = (
-                test_flows.foreign_net
-                + test_flows.institutional_net
-                + test_flows.retail_net
-            )
+            total = test_flows.foreign_net + test_flows.institutional_net + test_flows.retail_net
             if abs(total) > _INVESTOR_FLOW_TOLERANCE_EOK:
                 failed.append(
                     f"investor_flows: cross-check failed "
@@ -261,9 +253,7 @@ async def contract_smoke_test(
     if failed:
         detail = "\n".join([f"  ✗ {f}" for f in failed])
         logger.warning("contract_smoke_test failures:\n%s", detail)
-        raise ContractSmokeError(
-            f"{len(failed)} contract(s) broken: " + "; ".join(failed)
-        )
+        raise ContractSmokeError(f"{len(failed)} contract(s) broken: " + "; ".join(failed))
 
 
 __all__ = [

@@ -105,9 +105,7 @@ async def collect_consensus(
                     naver_ok += 1
 
             if idx % PROGRESS_EVERY == 0:
-                logger.info(
-                    "consensus progress: %d/%d updated=%d", idx, len(codes), updated
-                )
+                logger.info("consensus progress: %d/%d updated=%d", idx, len(codes), updated)
             await asyncio.sleep(throttle_sec)
 
     logger.info(
@@ -161,14 +159,10 @@ async def collect_naver_roe(
                 updated += 1
 
             if idx % PROGRESS_EVERY == 0:
-                logger.info(
-                    "naver_roe progress: %d/%d updated=%d", idx, len(codes), updated
-                )
+                logger.info("naver_roe progress: %d/%d updated=%d", idx, len(codes), updated)
             await asyncio.sleep(throttle_sec)
 
-    logger.info(
-        "collect_naver_roe: updated=%d errors=%d of %d", updated, errors, len(codes)
-    )
+    logger.info("collect_naver_roe: updated=%d errors=%d of %d", updated, errors, len(codes))
 
 
 async def collect_quarterly_financials(
@@ -221,9 +215,7 @@ async def collect_quarterly_financials(
                 updated += 1
 
             if idx % PROGRESS_EVERY == 0:
-                logger.info(
-                    "quarterly progress: %d/%d updated=%d", idx, len(codes), updated
-                )
+                logger.info("quarterly progress: %d/%d updated=%d", idx, len(codes), updated)
             await asyncio.sleep(throttle_sec)
 
     logger.info(

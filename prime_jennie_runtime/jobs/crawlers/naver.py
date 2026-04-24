@@ -178,9 +178,7 @@ async def crawl_naver_fundamentals(
     if per_val is None and pbr_val is None and roe_val is None:
         return None
 
-    return NaverFundamentals(
-        per=per_val, pbr=pbr_val, roe=roe_val, quarter_name=quarter_name
-    )
+    return NaverFundamentals(per=per_val, pbr=pbr_val, roe=roe_val, quarter_name=quarter_name)
 
 
 async def _get_sector_stocks(client: httpx.AsyncClient, sector_no: str) -> list[str]:

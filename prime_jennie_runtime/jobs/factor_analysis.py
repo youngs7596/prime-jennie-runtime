@@ -163,9 +163,7 @@ async def weekly_factor_analysis(
         "updated_at": datetime.now().isoformat(),
     }
 
-    await redis_client.set(
-        _CACHE_KEY, json.dumps(result, ensure_ascii=False), ex=_CACHE_TTL
-    )
+    await redis_client.set(_CACHE_KEY, json.dumps(result, ensure_ascii=False), ex=_CACHE_TTL)
     top = max(ic_results.items(), key=lambda x: abs(x[1]), default=("none", 0))
     logger.info(
         "weekly_factor_analysis: samples=%d top_ic=%s(%s)",

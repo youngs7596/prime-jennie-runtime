@@ -27,9 +27,7 @@ class _FakeSystemState:
 
 
 def _blocking_snapshot() -> SystemStateSnapshot:
-    return SystemStateSnapshot(
-        stopped=True, pause_reason=None, dryrun=False, liquidate_armed=False
-    )
+    return SystemStateSnapshot(stopped=True, pause_reason=None, dryrun=False, liquidate_armed=False)
 
 
 def _open_snapshot() -> SystemStateSnapshot:
@@ -52,9 +50,7 @@ async def test_postgres_sheet_fetcher_invalid_json_returns_empty():
 
 async def test_balance_sizer_returns_zero_when_stopped():
     kis = AsyncMock()
-    sizer = fast_app.BalanceAwareSizer(
-        kis=kis, system_state=_FakeSystemState(_blocking_snapshot())
-    )
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_blocking_snapshot()))
     sheet = _minimal_sheet()
     qty = await sizer(sheet)
     assert qty == 0
@@ -66,9 +62,7 @@ async def test_balance_sizer_returns_zero_on_zero_price():
     kis = AsyncMock()
     kis.get_balance.return_value = _fake_portfolio(10_000_000)
     kis.get_snapshot.return_value = _fake_stock(price=0)
-    sizer = fast_app.BalanceAwareSizer(
-        kis=kis, system_state=_FakeSystemState(_open_snapshot())
-    )
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
     assert await sizer(_minimal_sheet()) == 0
 
 
@@ -76,9 +70,7 @@ async def test_balance_sizer_computes_quantity():
     kis = AsyncMock()
     kis.get_balance.return_value = _fake_portfolio(10_000_000)  # 1천만원
     kis.get_snapshot.return_value = _fake_stock(price=20_000)  # 주당 2만원
-    sizer = fast_app.BalanceAwareSizer(
-        kis=kis, system_state=_FakeSystemState(_open_snapshot())
-    )
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
     sheet = _minimal_sheet(final_pct=0.1)  # 10% → 100만원 → 50주
     assert await sizer(sheet) == 50
 

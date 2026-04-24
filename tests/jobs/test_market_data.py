@@ -46,9 +46,7 @@ class _FakePool:
 
 @pytest.mark.asyncio
 async def test_refresh_market_caps_updates_from_snapshot():
-    pool = _FakePool(
-        rows=[{"stock_code": "005930"}, {"stock_code": "000660"}]
-    )
+    pool = _FakePool(rows=[{"stock_code": "005930"}, {"stock_code": "000660"}])
     base = "http://kis-gateway:8080"
     with respx.mock(assert_all_called=False) as mock:
         mock.get(f"{base}/api/snapshot/005930").respond(
@@ -59,9 +57,7 @@ async def test_refresh_market_caps_updates_from_snapshot():
         )
         async with httpx.AsyncClient() as client:
             # rate_per_sec 큰 값으로 sleep 회피
-            await refresh_market_caps(
-                pool, client, base, top_n=2, rate_per_sec=1000.0
-            )
+            await refresh_market_caps(pool, client, base, top_n=2, rate_per_sec=1000.0)
 
     updates = [c for c in pool.conn.calls if "UPDATE stock_masters" in c[0]]
     assert len(updates) == 2
@@ -72,21 +68,18 @@ async def test_refresh_market_caps_updates_from_snapshot():
 
 @pytest.mark.asyncio
 async def test_refresh_market_caps_skips_zero_or_missing():
-    pool = _FakePool(
-        rows=[{"stock_code": "005930"}, {"stock_code": "000660"}]
-    )
+    pool = _FakePool(rows=[{"stock_code": "005930"}, {"stock_code": "000660"}])
     base = "http://kis-gateway:8080"
     with respx.mock(assert_all_called=False) as mock:
         mock.get(f"{base}/api/snapshot/005930").respond(
             200, json={"stock_code": "005930", "market_cap": 0}
         )
         mock.get(f"{base}/api/snapshot/000660").respond(
-            200, json={"stock_code": "000660"}  # missing market_cap
+            200,
+            json={"stock_code": "000660"},  # missing market_cap
         )
         async with httpx.AsyncClient() as client:
-            await refresh_market_caps(
-                pool, client, base, top_n=2, rate_per_sec=1000.0
-            )
+            await refresh_market_caps(pool, client, base, top_n=2, rate_per_sec=1000.0)
 
     updates = [c for c in pool.conn.calls if "UPDATE stock_masters" in c[0]]
     assert updates == []
@@ -94,9 +87,7 @@ async def test_refresh_market_caps_skips_zero_or_missing():
 
 @pytest.mark.asyncio
 async def test_refresh_market_caps_tolerates_gateway_errors():
-    pool = _FakePool(
-        rows=[{"stock_code": "005930"}, {"stock_code": "000660"}]
-    )
+    pool = _FakePool(rows=[{"stock_code": "005930"}, {"stock_code": "000660"}])
     base = "http://kis-gateway:8080"
     with respx.mock(assert_all_called=False) as mock:
         mock.get(f"{base}/api/snapshot/005930").respond(500)
@@ -104,9 +95,7 @@ async def test_refresh_market_caps_tolerates_gateway_errors():
             200, json={"stock_code": "000660", "market_cap": 100}
         )
         async with httpx.AsyncClient() as client:
-            await refresh_market_caps(
-                pool, client, base, top_n=2, rate_per_sec=1000.0
-            )
+            await refresh_market_caps(pool, client, base, top_n=2, rate_per_sec=1000.0)
 
     updates = [c for c in pool.conn.calls if "UPDATE stock_masters" in c[0]]
     assert len(updates) == 1

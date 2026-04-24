@@ -12,17 +12,25 @@
     "trades": [{"stock_code", "stock_name", "trade_type", "quantity", "price",
                 "total_amount", "reason", "profit_pct", "profit_amount"}, ...],
     "trade_summary": {...},
-    "macro": {"sentiment", "sentiment_score", "regime_hint",
-              "kospi_index", "kospi_change_pct", "kosdaq_index", "kosdaq_change_pct",
-              "risk_factors", "trading_reasoning", "next_review_hint"} | None,
+    "macro": {
+        # 항상 존재
+        "sentiment", "sentiment_score", "regime_hint",
+        "kospi_index", "kospi_change_pct", "kosdaq_index", "kosdaq_change_pct",
+        "risk_factors", "trading_reasoning", "next_review_hint",
+        # Redis snapshot 에서 병합 (없으면 key 자체 생략):
+        "vix", "vix_regime",
+        "sox_close", "sox_change_pct", "nvda_close", "nvda_change_pct",
+        "nikkei_close", "nikkei_change_pct", "hsi_close", "hsi_change_pct",
+        "usd_jpy", "usd_jpy_change_pct", "usd_krw",  # usd_krw 는 BOK 키 있을 때만
+        "crude_oil", "crude_oil_change_pct", "gold", "gold_change_pct",
+        "kospi_foreign_net", "kospi_institutional_net", "kospi_retail_net",
+    } | None,
     "watchlist": [{"stock_code", "stock_name", "hybrid_score", "trade_tier", "rank"}, ...],
     "assets": {"total_asset", "cash_balance", "stock_eval", "position_count"} | None,
     "news": [{"stock_code", "headline", "score"}, ...],
   }
 
-VIX/USD-KRW/sectors/council_consensus/key_themes 는 v3 에 수집 경로가 없어 제외
-(2026-04-24 C-2). 복원 필요 시 global_macro_snapshots 수집 포팅 후 macro dict 에
-재추가.
+sectors/council_consensus/key_themes 는 v3 에 수집 경로가 없어 여전히 제외.
 """
 
 from __future__ import annotations
@@ -33,6 +41,27 @@ import html
 def _safe(value: object) -> str:
     """HTML 특수문자 이스케이프."""
     return html.escape(str(value))
+
+
+def _indexish(name: str, close: float | None, change_pct: float | None) -> str:
+    """'이름: 1,234.56 (+0.12%)' 형태. change 없으면 변동률 생략."""
+    change = f" ({change_pct:+.2f}%)" if change_pct is not None else ""
+    return f"{name}: {close:,.2f}{change}"
+
+
+def _format_kospi_flows(m: dict) -> str:
+    """KOSPI 외국인/기관/개인 수급 한 줄 요약. 단위: 억원 (Naver 원본 동일)."""
+    parts: list[str] = []
+    foreign = m.get("kospi_foreign_net")
+    inst = m.get("kospi_institutional_net")
+    retail = m.get("kospi_retail_net")
+    if foreign is not None:
+        parts.append(f"외국인 {foreign:+,.0f}")
+    if inst is not None:
+        parts.append(f"기관 {inst:+,.0f}")
+    if retail is not None:
+        parts.append(f"개인 {retail:+,.0f}")
+    return " | ".join(parts)
 
 
 def compute_trade_summary(trade_data: list[dict]) -> dict:
@@ -144,6 +173,44 @@ def build_llm_context(data: dict) -> str:
                 else ""
             )
             lines.append(f"코스닥: {m['kosdaq_index']:,.2f}{change}")
+        if m.get("vix") is not None:
+            regime = f" [{m['vix_regime']}]" if m.get("vix_regime") else ""
+            lines.append(f"VIX: {m['vix']:.2f}{regime}")
+        us_parts: list[str] = []
+        if m.get("sox_close"):
+            us_parts.append(_indexish("SOX", m.get("sox_close"), m.get("sox_change_pct")))
+        if m.get("nvda_close"):
+            us_parts.append(_indexish("NVDA", m.get("nvda_close"), m.get("nvda_change_pct")))
+        if us_parts:
+            lines.append(" | ".join(us_parts))
+        asia_parts: list[str] = []
+        if m.get("nikkei_close"):
+            asia_parts.append(
+                _indexish("닛케이", m.get("nikkei_close"), m.get("nikkei_change_pct"))
+            )
+        if m.get("hsi_close"):
+            asia_parts.append(_indexish("항셍", m.get("hsi_close"), m.get("hsi_change_pct")))
+        if asia_parts:
+            lines.append(" | ".join(asia_parts))
+        fx_parts: list[str] = []
+        if m.get("usd_krw"):
+            fx_parts.append(f"USD/KRW: {m['usd_krw']:,.1f}")
+        if m.get("usd_jpy"):
+            fx_parts.append(f"USD/JPY: {m['usd_jpy']:,.2f}")
+        if fx_parts:
+            lines.append(" | ".join(fx_parts))
+        commodity_parts: list[str] = []
+        if m.get("crude_oil"):
+            commodity_parts.append(
+                _indexish("원유", m.get("crude_oil"), m.get("crude_oil_change_pct"))
+            )
+        if m.get("gold"):
+            commodity_parts.append(_indexish("금", m.get("gold"), m.get("gold_change_pct")))
+        if commodity_parts:
+            lines.append(" | ".join(commodity_parts))
+        flows = _format_kospi_flows(m)
+        if flows:
+            lines.append(f"외국인 수급(KOSPI): {flows}")
         if m.get("sentiment") is not None:
             lines.append(f"심리: {m['sentiment']} (점수: {m.get('sentiment_score', '-')})")
         if m.get("regime_hint"):
@@ -239,8 +306,38 @@ def format_fallback_html(data: dict) -> str:
                 else ""
             )
             parts.append(f"코스닥: {m['kosdaq_index']:,.2f}{change}")
+        if m.get("vix") is not None:
+            regime = f" [{_safe(m['vix_regime'])}]" if m.get("vix_regime") else ""
+            parts.append(f"VIX: {m['vix']:.2f}{regime}")
         if parts:
             lines.append(" | ".join(parts))
+        asia_us_parts: list[str] = []
+        if m.get("nikkei_close"):
+            asia_us_parts.append(
+                _indexish("닛케이", m.get("nikkei_close"), m.get("nikkei_change_pct"))
+            )
+        if m.get("hsi_close"):
+            asia_us_parts.append(_indexish("항셍", m.get("hsi_close"), m.get("hsi_change_pct")))
+        if m.get("sox_close"):
+            asia_us_parts.append(_indexish("SOX", m.get("sox_close"), m.get("sox_change_pct")))
+        if m.get("nvda_close"):
+            asia_us_parts.append(_indexish("NVDA", m.get("nvda_close"), m.get("nvda_change_pct")))
+        if asia_us_parts:
+            lines.append(" | ".join(asia_us_parts))
+        fx_cmd_parts: list[str] = []
+        if m.get("usd_krw"):
+            fx_cmd_parts.append(f"USD/KRW: {m['usd_krw']:,.1f}")
+        if m.get("usd_jpy"):
+            fx_cmd_parts.append(f"USD/JPY: {m['usd_jpy']:,.2f}")
+        if m.get("crude_oil"):
+            fx_cmd_parts.append(_indexish("원유", m["crude_oil"], m.get("crude_oil_change_pct")))
+        if m.get("gold"):
+            fx_cmd_parts.append(_indexish("금", m["gold"], m.get("gold_change_pct")))
+        if fx_cmd_parts:
+            lines.append(" | ".join(fx_cmd_parts))
+        flows = _format_kospi_flows(m)
+        if flows:
+            lines.append(f"수급(KOSPI, 억): {flows}")
         if m.get("sentiment") is not None:
             lines.append(
                 f"심리: {_safe(m['sentiment'])} "

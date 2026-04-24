@@ -1,7 +1,11 @@
-"""v3 Postgres → 브리핑 데이터 dict 어댑터.
+"""v3 Postgres + Redis → 브리핑 데이터 dict 어댑터.
 
 v2 repo 를 직접 포팅할 수 없는 부분(Position/Watchlist/Asset 등)은 v3 테이블 기반
 대체로 채운다. 테이블이 없거나 비어있으면 None/[] 로 통일 (fallback HTML 이 섹션 자체를 생략).
+
+매크로 지표(VIX/닛케이/항셍/SOX/NVDA/원자재/환율/수급)는 Redis `macro:data:snapshot:{YYYY-MM-DD}`
+에서 읽는다. `macro_collect_global` cron 이 하루 2회 (07:40/22:40 KST) 갱신, TTL 7일.
+redis_client 미주입 시 macro dict 엔 KOSPI/KOSDAQ + macro_runs 값만 채워진다.
 
 포팅 원본: prime-jennie/prime_jennie/services/briefing/reporter.py `collect_report_data`
 """
@@ -11,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -18,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from .formatters import compute_trade_summary
 
 logger = logging.getLogger(__name__)
+
+MACRO_SNAPSHOT_KEY_PREFIX = "macro:data:snapshot:"
 
 
 def _parse_json_field(raw: str | dict | list | None) -> list | dict | None:
@@ -36,8 +43,12 @@ async def collect_briefing_data(
     engine: AsyncEngine,
     *,
     as_of: date | None = None,
+    redis_client: Any | None = None,
 ) -> dict:
-    """v3 DB 를 읽어 브리핑 데이터 dict 를 만든다.
+    """v3 DB + Redis 를 읽어 브리핑 데이터 dict 를 만든다.
+
+    redis_client 는 optional — 없으면 매크로 dict 에 VIX/닛케이/항셍/SOX/NVDA/환율/수급
+    필드가 채워지지 않는다.
 
     Returns:
         formatters.build_llm_context / format_fallback_html 이 소비하는 dict.
@@ -47,7 +58,7 @@ async def collect_briefing_data(
     async with engine.connect() as conn:
         trades = await _collect_trades(conn, today)
         positions = await _collect_positions(conn)
-        macro = await _collect_macro(conn, today)
+        macro = await _collect_macro(conn, today, redis_client=redis_client)
         watchlist = await _collect_watchlist(conn)
         news = await _collect_news(conn, today)
         assets = await _collect_assets(conn, today)
@@ -160,15 +171,13 @@ async def _collect_positions(conn) -> list[dict]:
     return positions
 
 
-async def _collect_macro(conn, today: date) -> dict | None:
-    """최신 macro_runs + KOSPI/KOSDAQ (index_daily_prices) 병합.
+async def _collect_macro(conn, today: date, *, redis_client: Any | None = None) -> dict | None:
+    """최신 macro_runs + KOSPI/KOSDAQ (index_daily_prices) + Redis macro snapshot 병합.
 
     - gate/size/reasoning: macro_runs 최신
     - KOSPI/KOSDAQ index + change_pct: index_daily_prices 최근 2일
-
-    VIX/USD-KRW/sectors_to_favor/council_consensus/key_themes 는 v3 에 수집 경로가
-    없어 필드 자체 미제공. 복원 시 global_macro_snapshots 수집 job 포팅 + 이 함수
-    확장이 함께 필요 (2026-04-24 C-2 결정).
+    - VIX/닛케이/항셍/SOX/NVDA/환율/원자재/수급: Redis `macro:data:snapshot:{today}`
+      (redis_client 미주입 또는 key 부재 시 해당 필드 생략)
     """
     stmt = text(
         """
@@ -193,19 +202,80 @@ async def _collect_macro(conn, today: date) -> dict | None:
                 risk_descriptions.append(r)
 
     indices = await _fetch_latest_indices(conn, today)
+    snapshot = await _fetch_macro_snapshot(redis_client, today)
 
-    return {
+    # DB index 가 없으면 Redis snapshot 의 kospi/kosdaq 로 fallback
+    kospi_index = indices.get("kospi_index") or snapshot.get("kospi_index")
+    kospi_change = indices.get("kospi_change_pct")
+    if kospi_change is None:
+        kospi_change = snapshot.get("kospi_change_pct")
+    kosdaq_index = indices.get("kosdaq_index") or snapshot.get("kosdaq_index")
+    kosdaq_change = indices.get("kosdaq_change_pct")
+    if kosdaq_change is None:
+        kosdaq_change = snapshot.get("kosdaq_change_pct")
+
+    macro: dict[str, Any] = {
         "sentiment": row["gate"],  # open/closed 를 심리로 노출
         "sentiment_score": float(row["size_multiplier"]) if row["size_multiplier"] else None,
         "regime_hint": row["confidence"],
-        "kospi_index": indices.get("kospi_index"),
-        "kospi_change_pct": indices.get("kospi_change_pct"),
-        "kosdaq_index": indices.get("kosdaq_index"),
-        "kosdaq_change_pct": indices.get("kosdaq_change_pct"),
+        "kospi_index": kospi_index,
+        "kospi_change_pct": kospi_change,
+        "kosdaq_index": kosdaq_index,
+        "kosdaq_change_pct": kosdaq_change,
         "risk_factors": risk_descriptions or None,
         "trading_reasoning": row["reasoning"],
         "next_review_hint": row["next_review_hint"],
     }
+
+    # Redis snapshot 에서 가져온 글로벌 매크로/수급 필드를 병합.
+    # macro_collect_global cron(07:40/22:40 KST) 이 실패했거나 필드가 비면 그냥 생략.
+    for key in (
+        "vix",
+        "vix_regime",
+        "sox_close",
+        "sox_change_pct",
+        "nvda_close",
+        "nvda_change_pct",
+        "nikkei_close",
+        "nikkei_change_pct",
+        "hsi_close",
+        "hsi_change_pct",
+        "usd_jpy",
+        "usd_jpy_change_pct",
+        "usd_krw",  # BOK_ECOS_API_KEY 있을 때만 채워짐
+        "crude_oil",
+        "crude_oil_change_pct",
+        "gold",
+        "gold_change_pct",
+        "kospi_foreign_net",
+        "kospi_institutional_net",
+        "kospi_retail_net",
+    ):
+        if key in snapshot and snapshot[key] is not None:
+            macro[key] = snapshot[key]
+
+    return macro
+
+
+async def _fetch_macro_snapshot(redis_client: Any | None, today: date) -> dict:
+    """`macro:data:snapshot:{today}` → dict. 실패/부재 시 빈 dict."""
+    if redis_client is None:
+        return {}
+    key = f"{MACRO_SNAPSHOT_KEY_PREFIX}{today.isoformat()}"
+    try:
+        raw = await redis_client.get(key)
+    except Exception:
+        logger.warning("macro snapshot Redis 조회 실패 — VIX/아시아 지수 생략", exc_info=True)
+        return {}
+    if raw is None:
+        return {}
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+        logger.warning("macro snapshot JSON 파싱 실패 — 생략")
+        return {}
 
 
 async def _fetch_latest_indices(conn, today: date) -> dict:

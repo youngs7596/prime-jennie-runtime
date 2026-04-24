@@ -16,6 +16,7 @@ import logging
 from datetime import date
 
 import httpx
+import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from prime_jennie_runtime.briefing.reporter import LLMCaller, generate_briefing
@@ -32,10 +33,12 @@ async def daily_briefing_report(
     telegram_config: TelegramConfig | None,
     llm_caller: LLMCaller | None = None,
     as_of: date | None = None,
+    redis_client: aioredis.Redis | None = None,
 ) -> dict:
     """v2 `/report` 포팅 — Track D briefing 호출.
 
-    1) collect_briefing_data(engine) → data dict
+    1) collect_briefing_data(engine, redis_client) → data dict
+       redis_client 가 있으면 macro dict 에 VIX/닛케이/항셍/SOX/NVDA/환율/수급 병합
     2) generate_briefing(data, llm_caller=...) → BriefingResult
     3) telegram_config 있으면 TelegramBot.send_message (HTML)
 
@@ -44,7 +47,7 @@ async def daily_briefing_report(
     # 지연 import: briefing.context_builder 가 없는 환경 (테스트) 에서 import 실패 방지.
     from prime_jennie_runtime.briefing.context_builder import collect_briefing_data
 
-    data = await collect_briefing_data(engine, as_of=as_of)
+    data = await collect_briefing_data(engine, as_of=as_of, redis_client=redis_client)
     result = await generate_briefing(data, llm_caller=llm_caller)
 
     telegram_sent = False

@@ -138,6 +138,62 @@ def test_build_llm_context_includes_all_sections():
     assert "위험 요인: 미국 금리 인상, 반도체 수요 둔화" in ctx
 
 
+def test_build_llm_context_renders_redis_snapshot_fields():
+    """VIX/닛케이/항셍/SOX/NVDA/환율/원자재/수급 필드가 LLM 컨텍스트에 나타나야 한다."""
+    data = _sample_data()
+    data["macro"].update(
+        {
+            "vix": 19.31,
+            "vix_regime": "normal",
+            "sox_close": 10078.57,
+            "sox_change_pct": 1.71,
+            "nvda_close": 199.64,
+            "nvda_change_pct": -1.41,
+            "nikkei_close": 59716.18,
+            "nikkei_change_pct": 0.97,
+            "hsi_close": 25975.94,
+            "hsi_change_pct": 0.23,
+            "usd_jpy": 159.68,
+            "crude_oil": 95.99,
+            "crude_oil_change_pct": 0.15,
+            "gold": 4688.6,
+            "gold_change_pct": -0.35,
+            "kospi_foreign_net": -19497.0,
+            "kospi_institutional_net": 8074.0,
+            "kospi_retail_net": 11810.0,
+        }
+    )
+    ctx = build_llm_context(data)
+    assert "VIX: 19.31 [normal]" in ctx
+    assert "SOX: 10,078.57 (+1.71%)" in ctx
+    assert "NVDA: 199.64 (-1.41%)" in ctx
+    assert "닛케이: 59,716.18 (+0.97%)" in ctx
+    assert "항셍: 25,975.94 (+0.23%)" in ctx
+    assert "USD/JPY: 159.68" in ctx
+    assert "원유: 95.99" in ctx
+    assert "외국인 수급(KOSPI)" in ctx
+    assert "외국인 -19,497" in ctx
+
+
+def test_format_fallback_html_renders_redis_snapshot_fields():
+    data = _sample_data()
+    data["macro"].update(
+        {
+            "vix": 19.31,
+            "vix_regime": "normal",
+            "nikkei_close": 59716.18,
+            "nikkei_change_pct": 0.97,
+            "usd_jpy": 159.68,
+            "kospi_foreign_net": -19497.0,
+        }
+    )
+    html_out = format_fallback_html(data)
+    assert "VIX: 19.31" in html_out
+    assert "닛케이: 59,716.18" in html_out
+    assert "USD/JPY: 159.68" in html_out
+    assert "수급(KOSPI, 억)" in html_out
+
+
 def test_build_llm_context_handles_empty_data():
     """macro=None, positions=[], watchlist=[], assets=None 인 최소 dict 도 깨지지 않는다."""
     empty = {

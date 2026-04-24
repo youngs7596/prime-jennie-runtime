@@ -51,3 +51,4 @@ uv.lock
 
 # Secrets (Gmail OAuth 등)
 infra/secrets/
+reports/

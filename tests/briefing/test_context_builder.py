@@ -12,7 +12,10 @@ from typing import Any
 
 import pytest
 
-from prime_jennie_runtime.briefing.context_builder import collect_briefing_data
+from prime_jennie_runtime.briefing.context_builder import (
+    MACRO_SNAPSHOT_KEY_PREFIX,
+    collect_briefing_data,
+)
 
 
 @dataclass
@@ -59,6 +62,17 @@ class _FakeEngine:
 
     def connect(self) -> _FakeConn:
         return self.conn
+
+
+@dataclass
+class _FakeRedis:
+    payloads: dict[str, str] = field(default_factory=dict)
+    raise_on_get: bool = False
+
+    async def get(self, key: str) -> str | None:
+        if self.raise_on_get:
+            raise RuntimeError("simulated redis failure")
+        return self.payloads.get(key)
 
 
 @pytest.mark.asyncio
@@ -162,9 +176,10 @@ async def test_collect_briefing_data_macro_maps_gate_and_risks():
     assert data["macro"]["regime_hint"] == "high"
     # 인덱스 별도 테이블 행이 없으니 None 으로 수렴
     assert data["macro"]["kospi_index"] is None
-    # VIX/USD-KRW/sectors/consensus/themes 필드는 C-2 결정으로 context 에서 제거됨
-    assert "vix_value" not in data["macro"]
-    assert "usd_krw" not in data["macro"]
+    # redis_client 미주입 — Redis snapshot 필드는 생략돼야 함
+    for key in ("vix", "vix_regime", "nikkei_close", "hsi_close", "sox_close", "usd_jpy"):
+        assert key not in data["macro"]
+    # sectors/consensus/themes 는 수집 경로 자체가 없어 여전히 제외
     assert "sectors_to_favor" not in data["macro"]
 
 
@@ -253,6 +268,100 @@ async def test_collect_briefing_data_news_failure_returns_empty():
     engine = _FakeEngine(conn)
     data = await collect_briefing_data(engine, as_of=date(2026, 4, 17))
     assert data["news"] == []
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_macro_merges_redis_snapshot():
+    """Redis `macro:data:snapshot:{today}` → VIX/닛케이/항셍/SOX/NVDA/환율/원자재/수급 병합."""
+    import json
+
+    snapshot_payload = {
+        "kospi_index": 6475.63,
+        "kospi_change_pct": 0.12,
+        "kosdaq_index": 1203.84,
+        "kosdaq_change_pct": 2.51,
+        "vix": 19.31,
+        "vix_regime": "normal",
+        "sox_close": 10078.57,
+        "sox_change_pct": 1.71,
+        "nvda_close": 199.64,
+        "nvda_change_pct": -1.41,
+        "nikkei_close": 59716.18,
+        "nikkei_change_pct": 0.97,
+        "hsi_close": 25975.94,
+        "hsi_change_pct": 0.23,
+        "usd_jpy": 159.68,
+        "usd_jpy_change_pct": 0.12,
+        "crude_oil": 95.99,
+        "crude_oil_change_pct": 0.15,
+        "gold": 4688.6,
+        "gold_change_pct": -0.35,
+        "kospi_foreign_net": -19497.0,
+        "kospi_institutional_net": 8074.0,
+        "kospi_retail_net": 11810.0,
+    }
+    as_of = date(2026, 4, 24)
+    redis = _FakeRedis(
+        payloads={f"{MACRO_SNAPSHOT_KEY_PREFIX}{as_of.isoformat()}": json.dumps(snapshot_payload)}
+    )
+    conn = _FakeConn(
+        rows_by_prefix={
+            "FROM macro_runs": [
+                {
+                    "gate": "open",
+                    "size_multiplier": 1.0,
+                    "reasoning": "정상",
+                    "top_risks_json": None,
+                    "confidence": "medium",
+                    "next_review_hint": None,
+                    "generated_at": None,
+                }
+            ]
+        }
+    )
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=as_of, redis_client=redis)
+
+    m = data["macro"]
+    assert m["vix"] == 19.31
+    assert m["vix_regime"] == "normal"
+    assert m["nikkei_close"] == 59716.18
+    assert m["hsi_close"] == 25975.94
+    assert m["sox_close"] == 10078.57
+    assert m["usd_jpy"] == 159.68
+    assert m["crude_oil"] == 95.99
+    assert m["gold"] == 4688.6
+    assert m["kospi_foreign_net"] == -19497.0
+    # DB 에 index 행이 없으므로 Redis kospi_index 로 fallback
+    assert m["kospi_index"] == 6475.63
+    assert m["kosdaq_index"] == 1203.84
+    # BOK 키 없어서 usd_krw 는 Redis 에도 없음
+    assert "usd_krw" not in m
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_macro_redis_failure_is_nonfatal():
+    """Redis 장애가 나도 macro_runs + DB index 기반 macro 는 여전히 정상 반환."""
+    redis = _FakeRedis(raise_on_get=True)
+    conn = _FakeConn(
+        rows_by_prefix={
+            "FROM macro_runs": [
+                {
+                    "gate": "open",
+                    "size_multiplier": 1.0,
+                    "reasoning": "정상",
+                    "top_risks_json": None,
+                    "confidence": "medium",
+                    "next_review_hint": None,
+                    "generated_at": None,
+                }
+            ]
+        }
+    )
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 24), redis_client=redis)
+    assert data["macro"]["sentiment"] == "open"
+    assert "vix" not in data["macro"]
 
 
 @pytest.mark.asyncio

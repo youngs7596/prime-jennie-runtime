@@ -202,7 +202,11 @@ def build_handlers(
 
     async def h_daily_briefing_report() -> None:
         await daily_briefing_report(
-            engine, http, telegram_config=telegram_config, llm_caller=briefing_llm_caller
+            engine,
+            http,
+            telegram_config=telegram_config,
+            llm_caller=briefing_llm_caller,
+            redis_client=redis_client,
         )
 
     async def h_global_news_crawl() -> None:

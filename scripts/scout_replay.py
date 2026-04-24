@@ -54,7 +54,6 @@ from sqlalchemy import text
 from prime_jennie_runtime.infra.config import PostgresConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
-from prime_jennie_runtime.slow_loop.app import _try_build_tiered_router
 from prime_jennie_runtime.slow_loop.pipeline import _run_pipeline_with_retry, _scout_pipeline
 from prime_jennie_runtime.slow_loop.scout.context_builder import ScoutContextBuilder
 from prime_jennie_runtime.slow_loop.scout.feeders.real import (
@@ -71,6 +70,34 @@ from prime_jennie_runtime.slow_loop.scout.schemas import (
 )
 
 logger = logging.getLogger("scout_replay")
+
+
+def _build_deepseek_only_tiers() -> dict[str, Any]:
+    """replay 전용 — DeepSeek 만으로 strong/reasoning 채움. shadow 없음.
+
+    ``_try_build_tiered_router`` 는 DEEPSEEK + ANTHROPIC 둘 다 요구하는데 (shadow 용)
+    job-worker 엔 ANTHROPIC 안 깔려있을 수 있음. replay 는 primary 만 필요하므로
+    가벼운 버전.
+    """
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not deepseek_key:
+        raise RuntimeError("DEEPSEEK_API_KEY 누락 — 컨테이너 안에서 실행 필요")
+    try:
+        from langchain_openai import ChatOpenAI
+    except ImportError as e:
+        raise RuntimeError("langchain_openai 미설치 — slow_loop extras 필요") from e
+
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+
+    class _DeepSeekChatOpenAI(ChatOpenAI):
+        def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
+            return super().with_structured_output(
+                schema, method=method or "function_calling", **kwargs
+            )
+
+    chat = _DeepSeekChatOpenAI(model=model, api_key=deepseek_key, base_url=base, temperature=0.1)
+    return {"strong": chat, "reasoning": chat, "default": chat}
 
 
 # ---------------------------------------------------------------- load
@@ -317,12 +344,8 @@ async def _amain(args: argparse.Namespace) -> None:
             return
         logger.info("target scout_runs: %d", len(rows))
 
-        # Orchestrator 구성 (실 LLM 호출). app.py 의 helper 재사용.
-        tiers = _try_build_tiered_router()
-        if tiers is None:
-            raise RuntimeError(
-                "DEEPSEEK_API_KEY / ANTHROPIC_API_KEY 누락 — 컨테이너 안에서 실행 필요"
-            )
+        # Orchestrator 구성 — replay 전용 DeepSeek-only tiers (shadow 없음)
+        tiers = _build_deepseek_only_tiers()
         orch = Orchestrator(
             role_registry=RoleRegistry.of(ScoutRole()),
             tool_registry=ToolRegistry(),

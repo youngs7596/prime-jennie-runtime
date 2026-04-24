@@ -1,335 +1,138 @@
-"""성과 지표 — 총수익률, MDD, Sharpe, 전략별·매도사유별 분석 + 리포트 출력.
+"""시트 단위 백테스트 결과 집계.
 
-포팅 원본: prime-jennie/prime_jennie/services/backtest/metrics.py
-v2 와 1:1. 출력 포맷 (BacktestMetrics, CSV 컬럼) 은 dashboard 참조용 안정 보증.
+Portfolio 단위 MDD/Sharpe 는 시트가 중첩되기 때문에 별도 equity curve 구축이
+필요 — v1 에선 시트 단위 분포만 집계한다. 포트폴리오 레벨은 driver 가
+별도 합성한다.
 """
 
 from __future__ import annotations
 
-import csv
 import math
-import os
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date
-from pathlib import Path
 
-from .models import DailySnapshot, TradeLog
+from .domain import SheetBacktestResult
 
 
 @dataclass
-class BacktestMetrics:
-    """백테스트 성과 요약."""
-
-    # 기본 성과
-    initial_capital: int = 0
-    final_value: int = 0
-    total_return_pct: float = 0.0
-    annualized_return_pct: float = 0.0
-    trading_days: int = 0
-
-    # 리스크
-    max_drawdown_pct: float = 0.0
-    max_drawdown_start: date | None = None
-    max_drawdown_end: date | None = None
-
-    # 거래 통계
-    total_trades: int = 0
-    total_buys: int = 0
-    total_sells: int = 0
-    win_count: int = 0
-    loss_count: int = 0
-    win_rate_pct: float = 0.0
-    profit_factor: float = 0.0
-    avg_profit_pct: float = 0.0
-    avg_loss_pct: float = 0.0
-    avg_holding_days: float = 0.0
-    max_profit_pct: float = 0.0
-    max_loss_pct: float = 0.0
-
-    # 비율 지표
-    sharpe_ratio: float = 0.0
-    total_fees: int = 0
-
-    # 상세 분석
-    strategy_stats: dict[str, dict] = field(default_factory=dict)
-    exit_reason_stats: dict[str, dict] = field(default_factory=dict)
+class ReasonStats:
+    count: int = 0
+    avg_pnl_pct: float = 0.0
+    total_net_pnl_krw: float = 0.0
 
 
-def calculate_metrics(
-    snapshots: list[DailySnapshot],
-    trade_logs: list[TradeLog],
-    initial_capital: int,
-) -> BacktestMetrics:
-    """스냅샷과 거래 로그에서 성과 지표 계산."""
-    m = BacktestMetrics()
-    m.initial_capital = initial_capital
-    m.trading_days = len(snapshots)
+@dataclass
+class BacktestSummary:
+    """다수 시트 결과 집계."""
 
-    if not snapshots:
-        return m
+    n_total: int = 0
+    n_filled: int = 0
+    n_unfilled: int = 0
 
-    # --- 기본 성과 ---
-    m.final_value = snapshots[-1].total_value
-    m.total_return_pct = (m.final_value - initial_capital) / initial_capital * 100
+    avg_pnl_pct: float = 0.0  # filled 시트 평균
+    median_pnl_pct: float = 0.0
+    std_pnl_pct: float = 0.0
+    hit_rate: float = 0.0  # filled 중 pnl_pct > 0 비율
+    sharpe_like: float = 0.0  # 시트별 pnl_pct 로 산출한 mean/std (엄밀한 Sharpe 아님)
 
-    if m.trading_days > 0:
-        years = m.trading_days / 252  # 한국 거래일 기준
-        if years > 0:
-            ratio = m.final_value / initial_capital
-            if ratio > 0:
-                m.annualized_return_pct = (ratio ** (1 / years) - 1) * 100
+    total_gross_pnl_krw: float = 0.0
+    total_fees_krw: float = 0.0
+    total_net_pnl_krw: float = 0.0
 
-    # --- MDD ---
-    peak = initial_capital
-    max_dd = 0.0
-    dd_start: date | None = None
-    curr_dd_start: date | None = None
-
-    for snap in snapshots:
-        if snap.total_value > peak:
-            peak = snap.total_value
-            curr_dd_start = snap.snapshot_date
-        dd = (peak - snap.total_value) / peak * 100
-        if dd > max_dd:
-            max_dd = dd
-            dd_start = curr_dd_start
-            m.max_drawdown_end = snap.snapshot_date
-
-    m.max_drawdown_pct = max_dd
-    m.max_drawdown_start = dd_start
-
-    # --- 거래 통계 ---
-    sells = [t for t in trade_logs if t.trade_type == "SELL"]
-    buys = [t for t in trade_logs if t.trade_type == "BUY"]
-    m.total_buys = len(buys)
-    m.total_sells = len(sells)
-    m.total_trades = m.total_buys + m.total_sells
-    m.total_fees = sum(t.fee for t in trade_logs)
-
-    if sells:
-        profits = [t.profit_pct for t in sells if t.profit_pct is not None]
-        winners = [p for p in profits if p > 0]
-        losers = [p for p in profits if p <= 0]
-
-        m.win_count = len(winners)
-        m.loss_count = len(losers)
-        m.win_rate_pct = m.win_count / len(profits) * 100 if profits else 0
-
-        m.avg_profit_pct = sum(winners) / len(winners) if winners else 0
-        m.avg_loss_pct = sum(losers) / len(losers) if losers else 0
-        m.max_profit_pct = max(profits) if profits else 0
-        m.max_loss_pct = min(profits) if profits else 0
-
-        gross_profit = sum(
-            t.profit_amount for t in sells if t.profit_amount and t.profit_amount > 0
-        )
-        gross_loss = abs(
-            sum(t.profit_amount for t in sells if t.profit_amount and t.profit_amount < 0)
-        )
-        m.profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
-
-        holding_days = [t.holding_days for t in sells if t.holding_days is not None]
-        m.avg_holding_days = sum(holding_days) / len(holding_days) if holding_days else 0
-
-    # --- Sharpe Ratio ---
-    if len(snapshots) >= 2:
-        daily_returns = [s.daily_return_pct for s in snapshots]
-        avg_ret = sum(daily_returns) / len(daily_returns)
-        if len(daily_returns) > 1:
-            variance = sum((r - avg_ret) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
-            std_ret = math.sqrt(variance) if variance > 0 else 0
-            if std_ret > 0:
-                m.sharpe_ratio = (avg_ret / std_ret) * math.sqrt(252)
-
-    m.strategy_stats = _analyze_by_strategy(sells)
-    m.exit_reason_stats = _analyze_by_exit_reason(sells)
-
-    return m
+    by_exit_reason: dict[str, ReasonStats] = field(default_factory=dict)
+    by_strategy_tag: dict[str, ReasonStats] = field(default_factory=dict)
+    by_unfilled_reason: dict[str, int] = field(default_factory=dict)
 
 
-def print_report(m: BacktestMetrics) -> None:
-    """콘솔 리포트 출력."""
-    sep = "=" * 60
-
-    print(f"\n{sep}")
-    print("  BACKTEST REPORT")
-    print(sep)
-
-    print(f"\n{'Initial Capital':<25} {m.initial_capital:>15,} KRW")
-    print(f"{'Final Value':<25} {m.final_value:>15,} KRW")
-    print(f"{'Total Return':<25} {m.total_return_pct:>14.2f}%")
-    print(f"{'Annualized Return':<25} {m.annualized_return_pct:>14.2f}%")
-    print(f"{'Max Drawdown':<25} {m.max_drawdown_pct:>14.2f}%")
-    if m.max_drawdown_start and m.max_drawdown_end:
-        print(f"{'  MDD Period':<25} {m.max_drawdown_start} ~ {m.max_drawdown_end}")
-    print(f"{'Sharpe Ratio':<25} {m.sharpe_ratio:>14.2f}")
-    print(f"{'Trading Days':<25} {m.trading_days:>15d}")
-    print(f"{'Total Fees':<25} {m.total_fees:>15,} KRW")
-
-    print(f"\n{'-' * 60}")
-    print("  TRADE STATISTICS")
-    print(f"{'-' * 60}")
-    print(f"{'Total Buys':<25} {m.total_buys:>15d}")
-    print(f"{'Total Sells':<25} {m.total_sells:>15d}")
-    print(f"{'Win Rate':<25} {m.win_rate_pct:>14.1f}%")
-    print(f"{'Wins / Losses':<25} {m.win_count:>7d} / {m.loss_count}")
-    print(f"{'Profit Factor':<25} {m.profit_factor:>14.2f}")
-    print(f"{'Avg Profit (wins)':<25} {m.avg_profit_pct:>14.2f}%")
-    print(f"{'Avg Loss (losses)':<25} {m.avg_loss_pct:>14.2f}%")
-    print(f"{'Max Profit':<25} {m.max_profit_pct:>14.2f}%")
-    print(f"{'Max Loss':<25} {m.max_loss_pct:>14.2f}%")
-    print(f"{'Avg Holding Days':<25} {m.avg_holding_days:>14.1f}")
-
-    if m.strategy_stats:
-        print(f"\n{'-' * 60}")
-        print("  BY STRATEGY")
-        print(f"{'-' * 60}")
-        print(f"  {'Strategy':<25} {'Count':>6} {'Win%':>7} {'AvgPnL':>8}")
-        for name, s in sorted(m.strategy_stats.items(), key=lambda x: x[1]["count"], reverse=True):
-            print(f"  {name:<25} {s['count']:>6} {s['win_rate']:>6.1f}% {s['avg_pnl']:>7.2f}%")
-
-    if m.exit_reason_stats:
-        print(f"\n{'-' * 60}")
-        print("  BY EXIT REASON")
-        print(f"{'-' * 60}")
-        print(f"  {'Reason':<25} {'Count':>6} {'Win%':>7} {'AvgPnL':>8}")
-        for name, s in sorted(
-            m.exit_reason_stats.items(), key=lambda x: x[1]["count"], reverse=True
-        ):
-            print(f"  {name:<25} {s['count']:>6} {s['win_rate']:>6.1f}% {s['avg_pnl']:>7.2f}%")
-
-    print(f"\n{sep}\n")
+def _stats_for_subset(results: list[SheetBacktestResult]) -> ReasonStats:
+    if not results:
+        return ReasonStats()
+    total_pnl = sum(r.net_pnl_krw for r in results)
+    avg_pct = sum(r.pnl_pct for r in results) / len(results)
+    return ReasonStats(
+        count=len(results),
+        avg_pnl_pct=avg_pct,
+        total_net_pnl_krw=total_pnl,
+    )
 
 
-def export_csv(
-    trade_logs: list[TradeLog],
-    snapshots: list[DailySnapshot],
-    output_dir: str,
-) -> None:
-    """거래 로그와 스냅샷을 CSV로 내보내기."""
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
+def summarize(results: list[SheetBacktestResult]) -> BacktestSummary:
+    """시트 결과 리스트 → 전체 집계."""
+    summary = BacktestSummary(n_total=len(results))
 
-    trades_path = os.path.join(output_dir, "trades.csv")
-    with open(trades_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "date",
-                "stock_code",
-                "stock_name",
-                "type",
-                "quantity",
-                "price",
-                "total_amount",
-                "fee",
-                "signal",
-                "tier",
-                "sell_reason",
-                "profit_pct",
-                "profit_amount",
-                "holding_days",
-                "regime",
-            ]
-        )
-        for t in trade_logs:
-            writer.writerow(
-                [
-                    t.trade_date,
-                    t.stock_code,
-                    t.stock_name,
-                    t.trade_type,
-                    t.quantity,
-                    t.price,
-                    t.total_amount,
-                    t.fee,
-                    t.signal_type or "",
-                    t.trade_tier or "",
-                    t.sell_reason or "",
-                    f"{t.profit_pct:.2f}" if t.profit_pct is not None else "",
-                    t.profit_amount or "",
-                    t.holding_days or "",
-                    t.regime or "",
-                ]
+    filled = [r for r in results if r.filled]
+    unfilled = [r for r in results if not r.filled]
+    summary.n_filled = len(filled)
+    summary.n_unfilled = len(unfilled)
+
+    for r in unfilled:
+        reason = r.exit_reason or "unknown"
+        summary.by_unfilled_reason[reason] = summary.by_unfilled_reason.get(reason, 0) + 1
+
+    if not filled:
+        return summary
+
+    pnl_pcts = sorted(r.pnl_pct for r in filled)
+    summary.avg_pnl_pct = sum(pnl_pcts) / len(pnl_pcts)
+    summary.median_pnl_pct = pnl_pcts[len(pnl_pcts) // 2]
+    summary.hit_rate = sum(1 for p in pnl_pcts if p > 0) / len(pnl_pcts)
+
+    if len(pnl_pcts) > 1:
+        mean = summary.avg_pnl_pct
+        var = sum((p - mean) ** 2 for p in pnl_pcts) / (len(pnl_pcts) - 1)
+        summary.std_pnl_pct = math.sqrt(var)
+        if summary.std_pnl_pct > 0:
+            summary.sharpe_like = summary.avg_pnl_pct / summary.std_pnl_pct
+
+    summary.total_gross_pnl_krw = sum(r.gross_pnl_krw for r in filled)
+    summary.total_fees_krw = sum(r.fees_krw for r in filled)
+    summary.total_net_pnl_krw = sum(r.net_pnl_krw for r in filled)
+
+    by_reason: dict[str, list[SheetBacktestResult]] = defaultdict(list)
+    by_tag: dict[str, list[SheetBacktestResult]] = defaultdict(list)
+    for r in filled:
+        by_reason[r.exit_reason or "unknown"].append(r)
+        by_tag[r.strategy_tag].append(r)
+
+    summary.by_exit_reason = {k: _stats_for_subset(v) for k, v in by_reason.items()}
+    summary.by_strategy_tag = {k: _stats_for_subset(v) for k, v in by_tag.items()}
+    return summary
+
+
+def format_report(summary: BacktestSummary) -> str:
+    """콘솔/로그 친화 텍스트 리포트."""
+    lines = [
+        "=== Backtest Summary ===",
+        f"sheets: {summary.n_total} (filled={summary.n_filled}, unfilled={summary.n_unfilled})",
+    ]
+    if summary.n_filled:
+        lines += [
+            f"avg pnl: {summary.avg_pnl_pct:+.2f}%  median: {summary.median_pnl_pct:+.2f}%  "
+            f"std: {summary.std_pnl_pct:.2f}%  sharpe-like: {summary.sharpe_like:+.2f}",
+            f"hit rate: {summary.hit_rate * 100:.1f}%",
+            f"gross: {summary.total_gross_pnl_krw:+,.0f}  fees: {summary.total_fees_krw:,.0f}  "
+            f"net: {summary.total_net_pnl_krw:+,.0f}",
+        ]
+        lines.append("")
+        lines.append("-- by exit_reason --")
+        for reason, s in sorted(summary.by_exit_reason.items(), key=lambda kv: -kv[1].count):
+            lines.append(
+                f"  {reason:<20} n={s.count:<4} avg={s.avg_pnl_pct:+.2f}%  "
+                f"net={s.total_net_pnl_krw:+,.0f}"
             )
-
-    snapshots_path = os.path.join(output_dir, "daily_snapshots.csv")
-    with open(snapshots_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "date",
-                "cash",
-                "portfolio_value",
-                "total_value",
-                "position_count",
-                "daily_return_pct",
-                "regime",
-            ]
-        )
-        for s in snapshots:
-            writer.writerow(
-                [
-                    s.snapshot_date,
-                    s.cash,
-                    s.portfolio_value,
-                    s.total_value,
-                    s.position_count,
-                    f"{s.daily_return_pct:.4f}",
-                    s.regime,
-                ]
+        lines.append("")
+        lines.append("-- by strategy_tag --")
+        for tag, s in sorted(summary.by_strategy_tag.items(), key=lambda kv: -kv[1].count):
+            lines.append(
+                f"  {tag:<25} n={s.count:<4} avg={s.avg_pnl_pct:+.2f}%  "
+                f"net={s.total_net_pnl_krw:+,.0f}"
             )
-
-    print(f"Exported: {trades_path}")
-    print(f"Exported: {snapshots_path}")
-
-
-# --- Internal helpers ---
-
-
-def _analyze_by_strategy(sells: list[TradeLog]) -> dict[str, dict]:
-    """전략별 성과 분석."""
-    groups: dict[str, list[TradeLog]] = defaultdict(list)
-    for t in sells:
-        key = str(t.signal_type) if t.signal_type else "UNKNOWN"
-        groups[key].append(t)
-
-    result = {}
-    for name, trades in groups.items():
-        profits = [t.profit_pct for t in trades if t.profit_pct is not None]
-        wins = [p for p in profits if p > 0]
-        result[name] = {
-            "count": len(trades),
-            "win_rate": len(wins) / len(profits) * 100 if profits else 0,
-            "avg_pnl": sum(profits) / len(profits) if profits else 0,
-            "total_pnl": sum(t.profit_amount for t in trades if t.profit_amount),
-        }
-    return result
+    if summary.n_unfilled:
+        lines.append("")
+        lines.append("-- unfilled --")
+        for reason, n in sorted(summary.by_unfilled_reason.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {reason:<20} n={n}")
+    return "\n".join(lines)
 
 
-def _analyze_by_exit_reason(sells: list[TradeLog]) -> dict[str, dict]:
-    """매도 사유별 성과 분석."""
-    groups: dict[str, list[TradeLog]] = defaultdict(list)
-    for t in sells:
-        key = str(t.sell_reason) if t.sell_reason else "UNKNOWN"
-        groups[key].append(t)
-
-    result = {}
-    for name, trades in groups.items():
-        profits = [t.profit_pct for t in trades if t.profit_pct is not None]
-        wins = [p for p in profits if p > 0]
-        result[name] = {
-            "count": len(trades),
-            "win_rate": len(wins) / len(profits) * 100 if profits else 0,
-            "avg_pnl": sum(profits) / len(profits) if profits else 0,
-            "total_pnl": sum(t.profit_amount for t in trades if t.profit_amount),
-        }
-    return result
-
-
-__all__ = [
-    "BacktestMetrics",
-    "calculate_metrics",
-    "export_csv",
-    "print_report",
-]
+__all__ = ["BacktestSummary", "ReasonStats", "format_report", "summarize"]

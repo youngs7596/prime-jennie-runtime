@@ -1,76 +1,70 @@
-"""v2 domain.enums 로부터 백테스트가 참조하는 6종 enum 로컬 복사.
+"""v3 백테스트 도메인 타입.
 
-v2 값과 1:1 (StrEnum). 새 값 추가 금지 — v2 DB row 와 호환.
-포팅 원본: prime-jennie/prime_jennie/domain/enums.py
+fast_loop.exit_evaluator 를 재사용하는 얇은 시뮬레이터가 사용하는 입력/결과
+객체만 정의한다. v2 engine 의 MarketRegime/TradeTier/SignalType 같은 v2 전용
+enum 은 전부 제거 — v3 는 PositionSheet + PositionState 로 충분하다.
 """
 
 from __future__ import annotations
 
-from enum import StrEnum
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Any, Literal
 
 
-class MarketRegime(StrEnum):
-    STRONG_BULL = "STRONG_BULL"
-    BULL = "BULL"
-    SIDEWAYS = "SIDEWAYS"
-    BEAR = "BEAR"
-    STRONG_BEAR = "STRONG_BEAR"
+@dataclass(frozen=True)
+class DailyBar:
+    """일봉 하나."""
+
+    ticker: str
+    price_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int = 0
 
 
-class TradeTier(StrEnum):
-    TIER1 = "TIER1"
-    TIER2 = "TIER2"
-    BLOCKED = "BLOCKED"
+@dataclass(frozen=True)
+class Trade:
+    """백테스트 체결 1건 — entry 또는 exit. scale_out 시 동일 sheet 에 exit 여러 개."""
+
+    sheet_id: str
+    ticker: str
+    side: Literal["buy", "sell"]
+    qty: int
+    price: float  # 슬리피지 반영 체결가
+    fee: float
+    ts: datetime
+    # entry: "market"|"limit"|"limit_unfilled"; exit: ExitDecision.reason | "data_end"
+    reason: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class SignalType(StrEnum):
-    GOLDEN_CROSS = "GOLDEN_CROSS"
-    RSI_REBOUND = "RSI_REBOUND"
-    MOMENTUM = "MOMENTUM"
-    MOMENTUM_CONTINUATION = "MOMENTUM_CONTINUATION"
-    DIP_BUY = "DIP_BUY"
-    VOLUME_BREAKOUT = "VOLUME_BREAKOUT"
-    WATCHLIST_CONVICTION = "WATCHLIST_CONVICTION"
-    ORB_BREAKOUT = "ORB_BREAKOUT"
-    GAP_UP_REBOUND = "GAP_UP_REBOUND"
+@dataclass
+class SheetBacktestResult:
+    """단일 PositionSheet 시뮬레이션 결과."""
+
+    sheet_id: str
+    ticker: str
+    strategy_tag: str
+    filled: bool  # 진입 체결 여부
+    trades: list[Trade]
+    entry_ts: datetime | None = None
+    exit_ts: datetime | None = None  # 마지막 exit. 부분 청산이면 마지막 부분 청산 시각
+    entry_price: float = 0.0  # 슬리피지 반영
+    total_qty: int = 0  # 진입 당시 최대 보유 수량
+    gross_pnl_krw: float = 0.0  # 수수료 제외 (exit 가액 − entry 가액)
+    fees_krw: float = 0.0  # 매수 수수료 + 매도 수수료 합
+    net_pnl_krw: float = 0.0  # gross_pnl − fees
+    pnl_pct: float = 0.0  # net_pnl / (entry_price × total_qty) × 100
+    exit_reason: str | None = None  # 최종 full-close Trade 의 reason. unfilled 면 entry 실패 사유
 
 
-class SellReason(StrEnum):
-    PROFIT_TARGET = "PROFIT_TARGET"
-    STOP_LOSS = "STOP_LOSS"
-    TRAILING_STOP = "TRAILING_STOP"
-    BREAKEVEN_STOP = "BREAKEVEN_STOP"
-    RSI_OVERBOUGHT = "RSI_OVERBOUGHT"
-    TIME_EXIT = "TIME_EXIT"
-    PROFIT_FLOOR = "PROFIT_FLOOR"
-    DEATH_CROSS = "DEATH_CROSS"
-    RISK_OFF = "RISK_OFF"
-    MANUAL = "MANUAL"
-    FORCED_LIQUIDATION = "FORCED_LIQUIDATION"
+@dataclass
+class BacktestConfig:
+    """시뮬레이션 파라미터. 시트별로 공유."""
 
-
-class SectorGroup(StrEnum):
-    SEMICONDUCTOR_IT = "반도체/IT"
-    BIO_HEALTH = "바이오/헬스케어"
-    SECONDARY_BATTERY = "2차전지/소재"
-    FINANCE = "금융"
-    AUTOMOBILE = "자동차"
-    CONSTRUCTION = "건설/부동산"
-    CHEMICAL = "화학/에너지"
-    STEEL_MATERIAL = "철강/소재"
-    FOOD_CONSUMER = "음식료/생활"
-    MEDIA_ENTERTAINMENT = "미디어/엔터"
-    LOGISTICS_TRANSPORT = "운송/물류"
-    TELECOM = "통신"
-    UTILITY = "유틸리티"
-    DEFENSE_SHIPBUILDING = "조선/방산"
-    ETC = "기타"
-
-
-__all__ = [
-    "MarketRegime",
-    "SectorGroup",
-    "SellReason",
-    "SignalType",
-    "TradeTier",
-]
+    buy_fee_pct: float = 0.015  # 매수 수수료 % (0.015 = 0.015%)
+    sell_fee_pct: float = 0.195  # 매도 수수료+세금 %
+    slippage_pct: float = 0.1  # 체결 가격 슬리피지 % (매수: +, 매도: −)

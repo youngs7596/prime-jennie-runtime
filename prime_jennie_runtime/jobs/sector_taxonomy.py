@@ -8,7 +8,28 @@ v2 원본: `prime_jennie/domain/sector_taxonomy.py`. 포트폴리오 분산/섹�
 
 from __future__ import annotations
 
-from prime_jennie_runtime.backtest.domain import SectorGroup
+from enum import StrEnum
+
+
+class SectorGroup(StrEnum):
+    """포트폴리오 섹터 분산 집계 단위. v2 taxonomy 그대로."""
+
+    SEMICONDUCTOR_IT = "반도체/IT"
+    BIO_HEALTH = "바이오/헬스케어"
+    SECONDARY_BATTERY = "2차전지/소재"
+    FINANCE = "금융"
+    AUTOMOBILE = "자동차"
+    CONSTRUCTION = "건설/부동산"
+    CHEMICAL = "화학/에너지"
+    STEEL_MATERIAL = "철강/소재"
+    FOOD_CONSUMER = "음식료/생활"
+    MEDIA_ENTERTAINMENT = "미디어/엔터"
+    LOGISTICS_TRANSPORT = "운송/물류"
+    TELECOM = "통신"
+    UTILITY = "유틸리티"
+    DEFENSE_SHIPBUILDING = "조선/방산"
+    ETC = "기타"
+
 
 # 네이버 세분류 → SectorGroup. v2 mapping 그대로 복사 (재튜닝 금지).
 NAVER_TO_GROUP: dict[str, SectorGroup] = {
@@ -114,9 +135,7 @@ STOCK_SECTOR_OVERRIDE: dict[str, SectorGroup] = {
 }
 
 
-def get_sector_group(
-    naver_sector: str, stock_code: str | None = None
-) -> SectorGroup:
+def get_sector_group(naver_sector: str, stock_code: str | None = None) -> SectorGroup:
     """네이버 세분류 → SectorGroup. stock_code override 우선."""
     if stock_code and stock_code in STOCK_SECTOR_OVERRIDE:
         return STOCK_SECTOR_OVERRIDE[stock_code]

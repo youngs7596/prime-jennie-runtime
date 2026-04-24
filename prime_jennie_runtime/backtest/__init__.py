@@ -1,56 +1,29 @@
-"""Prime Jennie v3 백테스트 엔진.
+"""Prime Jennie v3 백테스트.
 
-Phase 2.10 에선 인프라 계층 (시뮬레이션/지표/데이터 로더) 만 포팅. 전략 결정 로직은
-v3 `slow_loop/strategy/` 와의 정렬이 필요해 Phase 3 로 이관 (AGENTS.md 참조).
+v2 engine (monolith SimulatedPortfolio) 은 제거됨. v3 는 실시간 운영에 쓰이는
+`fast_loop.exit_evaluator` 를 **그대로** 일봉 시퀀스에 먹여서 시뮬한다 — 운영
+로직과 백테스트 로직이 단일 소스 (drift 방지).
+
+공개 API
+    - simulate_sheet: 단일 PositionSheet → 체결/청산 시뮬
+    - summarize / format_report: 다수 시트 결과 집계
+    - load_daily_bars: v3 daily_prices → DailyBar 시퀀스
 """
 
-from .data_loader import (
-    get_trading_dates,
-    load_macro_days,
-    load_prices,
-    load_quant_scores,
-    load_watchlists,
-)
-from .domain import MarketRegime, SectorGroup, SellReason, SignalType, TradeTier
-from .metrics import BacktestMetrics, calculate_metrics, export_csv, print_report
-from .models import (
-    BacktestConfig,
-    DailyOHLCV,
-    DailySnapshot,
-    MacroDay,
-    PriceCache,
-    RiskParams,
-    SellParams,
-    SimPosition,
-    TradeLog,
-    WatchlistEntry,
-)
-from .portfolio import SimulatedPortfolio
+from .data_loader import load_daily_bars
+from .domain import BacktestConfig, DailyBar, SheetBacktestResult, Trade
+from .metrics import BacktestSummary, ReasonStats, format_report, summarize
+from .runner import simulate_sheet
 
 __all__ = [
     "BacktestConfig",
-    "BacktestMetrics",
-    "DailyOHLCV",
-    "DailySnapshot",
-    "MacroDay",
-    "MarketRegime",
-    "PriceCache",
-    "RiskParams",
-    "SectorGroup",
-    "SellParams",
-    "SellReason",
-    "SignalType",
-    "SimPosition",
-    "SimulatedPortfolio",
-    "TradeLog",
-    "TradeTier",
-    "WatchlistEntry",
-    "calculate_metrics",
-    "export_csv",
-    "get_trading_dates",
-    "load_macro_days",
-    "load_prices",
-    "load_quant_scores",
-    "load_watchlists",
-    "print_report",
+    "BacktestSummary",
+    "DailyBar",
+    "ReasonStats",
+    "SheetBacktestResult",
+    "Trade",
+    "format_report",
+    "load_daily_bars",
+    "simulate_sheet",
+    "summarize",
 ]

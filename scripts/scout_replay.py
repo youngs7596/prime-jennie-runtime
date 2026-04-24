@@ -304,7 +304,7 @@ async def _amain(args: argparse.Namespace) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    engine = create_engine(PostgresConfig.from_env())
+    engine = create_engine(PostgresConfig())
     try:
         rows = await _load_scout_runs(
             engine,

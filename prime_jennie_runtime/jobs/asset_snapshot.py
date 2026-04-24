@@ -20,9 +20,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# 장 마감 직후(15:30~16:00)에 KIS gateway 가 일시 멈춤/재시작을 겪으면
-# ConnectError 로 떨어지는 케이스가 반복됨 (4-20 ~ 4-23 관측).
-# 3회 exponential backoff 로 internal 일시장애 흡수.
+# 장 마감 직후(15:30~16:00)에 kis-gateway 호출이 ConnectError 로 떨어지는
+# 패턴이 4-20 월 부터 매일 재현. 원인: job-worker 의 공유 httpx.AsyncClient
+# pool 에 쌓인 stale keepalive 커넥션을 retry 3회가 모두 재사용해 실패.
+# → 이 job 은 하루 한 번만 돌므로 공유 pool 을 피해 호출 시점에 전용 client 생성.
 _RETRY_WAITS: tuple[float, ...] = (5.0, 15.0)
 _RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     httpx.ConnectError,
@@ -36,7 +37,7 @@ async def _fetch_balance_with_retry(
     http: httpx.AsyncClient,
     gateway_url: str,
 ) -> dict:
-    """장 마감 직후 kis-gateway 의 일시 장애를 견디는 retry wrapper."""
+    """kis-gateway 의 일시 장애를 견디는 retry wrapper."""
     last_exc: Exception | None = None
     attempts = len(_RETRY_WAITS) + 1
     for attempt in range(1, attempts + 1):
@@ -63,18 +64,18 @@ async def _fetch_balance_with_retry(
 
 async def daily_asset_snapshot(
     pool: Any,
-    http: httpx.AsyncClient,
     gateway_url: str,
 ) -> None:
     """v2 `/jobs/daily-asset-snapshot` 포팅.
 
     1) KIS gateway `/api/balance` → total_asset / cash / stock_eval / positions
-       (장 마감 직후 일시 장애 대응으로 3회 retry)
+       (장 마감 직후 일시 장애 대응으로 3회 retry, 공유 pool 과 격리된 전용 client 사용)
     2) 미실현 PnL = sum(current_value - total_buy_amount) over positions
     3) 실현 PnL = sum(outcomes.pnl_krw WHERE closed_at::date = today)
     4) daily_asset_snapshots UPSERT (PK=snapshot_date)
     """
-    balance = await _fetch_balance_with_retry(http, gateway_url)
+    async with httpx.AsyncClient() as http:
+        balance = await _fetch_balance_with_retry(http, gateway_url)
 
     positions = balance.get("positions", []) or []
     total = int(balance.get("total_asset") or 0)

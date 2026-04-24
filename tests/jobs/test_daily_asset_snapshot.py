@@ -1,4 +1,9 @@
-"""`daily_asset_snapshot` 스모크 — KIS gateway + outcomes 모킹."""
+"""`daily_asset_snapshot` 스모크 — KIS gateway + outcomes 모킹.
+
+v3 asset_snapshot 은 함수 내부에서 전용 httpx.AsyncClient 를 열어 씀 (공유 pool 의
+stale keepalive 격리). 그래서 respx.mock 만 활성화되어 있으면 내부 client 도
+transport 레벨에서 가로채진다.
+"""
 
 from __future__ import annotations
 
@@ -79,8 +84,7 @@ async def test_daily_asset_snapshot_upserts_with_pnl():
     )
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_BAL_RE).respond(200, json=payload)
-        async with httpx.AsyncClient() as client:
-            await daily_asset_snapshot(pool, client, GATEWAY)
+        await daily_asset_snapshot(pool, GATEWAY)
 
     inserts = [c for c in pool.conn.execute_calls if "INSERT INTO daily_asset_snapshots" in c[0]]
     assert len(inserts) == 1
@@ -101,8 +105,7 @@ async def test_daily_asset_snapshot_falls_back_when_total_zero():
     payload = _bal(total=0, cash=3_000_000, eval_=4_000_000, positions=[])
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_BAL_RE).respond(200, json=payload)
-        async with httpx.AsyncClient() as client:
-            await daily_asset_snapshot(pool, client, GATEWAY)
+        await daily_asset_snapshot(pool, GATEWAY)
 
     args = pool.conn.execute_calls[0][1]
     assert args[1] == 7_000_000  # cash + stock_eval fallback
@@ -115,8 +118,7 @@ async def test_daily_asset_snapshot_handles_empty_positions():
     payload = _bal(total=5_000_000, cash=5_000_000, eval_=0, positions=[])
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_BAL_RE).respond(200, json=payload)
-        async with httpx.AsyncClient() as client:
-            await daily_asset_snapshot(pool, client, GATEWAY)
+        await daily_asset_snapshot(pool, GATEWAY)
 
     args = pool.conn.execute_calls[0][1]
     assert args[5] == 0  # total_pnl
@@ -126,7 +128,6 @@ async def test_daily_asset_snapshot_handles_empty_positions():
 @pytest.mark.asyncio
 async def test_daily_asset_snapshot_retries_on_connect_error(monkeypatch):
     """장 마감 직후 kis-gateway 일시 장애 — 1~2차 ConnectError 후 3차 성공."""
-    # 실제 sleep 을 건너뛰어 테스트 즉시
     monkeypatch.setattr(
         "prime_jennie_runtime.jobs.asset_snapshot.asyncio.sleep",
         lambda _s: _noop(),
@@ -140,8 +141,7 @@ async def test_daily_asset_snapshot_retries_on_connect_error(monkeypatch):
             httpx.ConnectError("refused"),
             httpx.Response(200, json=payload),
         ]
-        async with httpx.AsyncClient() as client:
-            await daily_asset_snapshot(pool, client, GATEWAY)
+        await daily_asset_snapshot(pool, GATEWAY)
 
     inserts = [c for c in pool.conn.execute_calls if "INSERT INTO daily_asset_snapshots" in c[0]]
     assert len(inserts) == 1
@@ -159,9 +159,8 @@ async def test_daily_asset_snapshot_gives_up_after_max_retries(monkeypatch):
     with respx.mock(assert_all_called=False) as mock:
         route = mock.get(url__regex=_BAL_RE)
         route.side_effect = [httpx.ConnectError("x") for _ in range(5)]
-        async with httpx.AsyncClient() as client:
-            with pytest.raises(httpx.ConnectError):
-                await daily_asset_snapshot(pool, client, GATEWAY)
+        with pytest.raises(httpx.ConnectError):
+            await daily_asset_snapshot(pool, GATEWAY)
     assert route.call_count == 3
 
 

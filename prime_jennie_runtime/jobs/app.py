@@ -170,7 +170,8 @@ def build_handlers(
         await seed_stock_masters(pool, http, market=market)
 
     async def h_daily_asset_snapshot() -> None:
-        await daily_asset_snapshot(pool, http, kis_gateway_url)
+        # 전용 httpx.AsyncClient 는 함수 내부에서 생성 — stale keepalive 격리.
+        await daily_asset_snapshot(pool, kis_gateway_url)
 
     async def h_sync_positions(dry_run: bool = True, stop_loss_pct: float = 6.0) -> None:
         await sync_positions(

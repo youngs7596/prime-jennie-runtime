@@ -26,6 +26,7 @@ from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.consumer import PositionSheetConsumer
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
+from prime_jennie_runtime.fast_loop.gateway_subscriber import subscribe_on_startup
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
@@ -167,6 +168,10 @@ async def run() -> None:
             sheet_fetcher=sheet_fetcher,
         )
         await tick_loop.ensure_group()
+
+        # gateway 에 실시간 체결가 구독 요청 (v2 monitor/scanner 포팅).
+        # 실패해도 tick_loop 은 계속 구동 — price-scheduler 폴링이 fallback.
+        await subscribe_on_startup(pool, cfg.kis.gateway_url)
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()

@@ -1,69 +1,66 @@
-"""Scout 공급 — Track B의 ``NewsScoreFeeder`` Protocol 실 구현.
+"""Scout 공급 — Track B의 ``NewsEventFeeder`` Protocol 실 구현.
 
-2026-04-21 이후: ``EventRepo`` 기반. 신규 쓰기 경로가 news_events 이므로 ticker 별
-최근 N시간 ``sentiment_score`` 평균으로 Scout 호환 NewsScoreEntry 를 계산.
-추후 Scout 프롬프트가 event_type/impact 를 직접 활용하도록 확장할 수 있다.
+2026-04-25 재설계: 과거 ``sentiment_score`` 평균 기반 ``NewsScoreEntry`` 에서
+Qwen3 메타데이터 기반 ``NewsEventEntry`` 로 교체. ticker 별로 impact × event_type
+분포를 그대로 노출하고, ``positive_events`` / ``risk_events`` 편의 리스트를 함께
+제공해서 Scout 코드가 규칙 조합으로 판단할 수 있도록 함.
 
 설계 명세 (SCOUT_CODE_GENERATION §2.4):
-- staleness_hours > 48 이면 Scout 코드가 제외 권장 (판단은 Scout)
+- staleness_hours > 48 이면 Scout 코드가 뉴스 시그널 제외 권장
 - 기사 0건 ticker 도 명시적 0건 entry 로 포함
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
-from prime_jennie_runtime.slow_loop.scout.schemas import NewsScoreEntry
+from prime_jennie_runtime.slow_loop.scout.schemas import (
+    POSITIVE_EVENT_TYPES,
+    RISK_EVENT_TYPES,
+    NewsEventEntry,
+)
 
 from .storage import EventRepo, lookback_since
 
 
 @dataclass
 class NewsPipelineScoutFeeder:
-    """EventRepo 기반 NewsScoreFeeder."""
+    """EventRepo 기반 NewsEventFeeder."""
 
     event_repo: EventRepo
     lookback_hours: float = 24.0
 
-    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsScoreEntry]:
+    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsEventEntry]:
         now = self._now_for(as_of)
         since = lookback_since(now, self.lookback_hours)
 
-        out: dict[str, NewsScoreEntry] = {}
+        out: dict[str, NewsEventEntry] = {}
         for ticker in universe:
             events = await self.event_repo.recent_for_ticker(ticker, since=since, now=now)
             if not events:
-                out[ticker] = NewsScoreEntry(
-                    score=0.0,
-                    timestamp=now,
+                out[ticker] = NewsEventEntry(
                     article_count=0,
+                    latest_at=None,
                     staleness_hours=self.lookback_hours,
                 )
                 continue
-            avg = sum(e.sentiment_score for e in events) / len(events)
             latest = max(e.analyzed_at for e in events)
             staleness = max(0.0, (now - latest).total_seconds() / 3600.0)
-            high_impact_count = sum(1 for e in events if e.impact_level == "high")
-            event_types: dict[str, int] = {}
+            events_by_impact: dict[str, dict[str, int]] = {}
             for e in events:
-                event_types[e.event_type] = event_types.get(e.event_type, 0) + 1
-            out[ticker] = NewsScoreEntry(
-                score=_clamp(avg, -1.0, 1.0),
-                timestamp=latest,
+                bucket = events_by_impact.setdefault(e.impact_level, {})
+                bucket[e.event_type] = bucket.get(e.event_type, 0) + 1
+            high_types = set(events_by_impact.get("high", {}).keys())
+            out[ticker] = NewsEventEntry(
                 article_count=len(events),
+                latest_at=latest,
                 staleness_hours=staleness,
-                high_impact_count=high_impact_count,
-                event_types=event_types,
+                events_by_impact=events_by_impact,
+                positive_events=sorted(high_types & POSITIVE_EVENT_TYPES),
+                risk_events=sorted(high_types & RISK_EVENT_TYPES),
             )
         return out
 
     def _now_for(self, as_of: date) -> datetime:
         return datetime.combine(as_of, time(23, 59, 59))
-
-
-def _clamp(x: float, lo: float, hi: float) -> float:
-    if math.isnan(x):
-        return 0.0
-    return max(lo, min(hi, x))

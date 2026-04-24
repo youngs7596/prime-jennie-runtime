@@ -10,7 +10,7 @@ from prime_jennie_runtime.position_sheet.schema import ALLOWED_STRATEGY_TAGS
 from prime_jennie_runtime.slow_loop.scout.context_builder import ScoutContextBuilder
 from prime_jennie_runtime.slow_loop.scout.feeders.stub import (
     StubMarketSummaryFeeder,
-    StubNewsScoreFeeder,
+    StubNewsEventFeeder,
     StubSectorMomentumFeeder,
     StubUniverseFeeder,
 )
@@ -21,7 +21,7 @@ from prime_jennie_runtime.slow_loop.scout.schemas import MacroStateForScout
 async def test_builder_assembles_context():
     builder = ScoutContextBuilder(
         universe=StubUniverseFeeder(),
-        news=StubNewsScoreFeeder(),
+        news=StubNewsEventFeeder(),
         sector=StubSectorMomentumFeeder(),
         market=StubMarketSummaryFeeder(),
     )
@@ -34,8 +34,8 @@ async def test_builder_assembles_context():
 
     assert len(ctx.universe) == 5
     assert "005930" in ctx.universe
-    # 모든 universe ticker에 대해 뉴스 점수 존재
-    assert set(ctx.news_scores.keys()) == set(ctx.universe)
+    # 모든 universe ticker에 대해 뉴스 이벤트 entry 존재
+    assert set(ctx.news_events.keys()) == set(ctx.universe)
     assert ctx.macro_state.gate == "open"
     assert set(ctx.strategy_tags_available) == ALLOWED_STRATEGY_TAGS
     assert ctx.trigger_reason == "scheduled_0830"
@@ -45,7 +45,7 @@ async def test_builder_assembles_context():
 async def test_custom_trigger_reason():
     builder = ScoutContextBuilder(
         universe=StubUniverseFeeder(),
-        news=StubNewsScoreFeeder(),
+        news=StubNewsEventFeeder(),
         sector=StubSectorMomentumFeeder(),
         market=StubMarketSummaryFeeder(),
     )

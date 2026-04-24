@@ -59,25 +59,31 @@ from prime_jennie_runtime.slow_loop.strategy.risk_throttle import NoOpRiskThrott
 
 from ._stubs import StubChatModel
 
-# Scout 코드: context.universe 와 context.news_scores 를 읽고 score >= 0.3 ticker만
-# 후보로 만든다. 실 subprocess 에서 exec 되어야 통과.
+# Scout 코드: context.universe 와 context.news_events 를 읽고 positive_events 가
+# 있는 ticker 를 후보로 만든다. 실 subprocess 에서 exec 되어야 통과.
 REAL_SCREEN_CODE = """
 def screen(market_data, context):
     universe = context.get("universe", [])
-    news = context.get("news_scores", {})
+    news = context.get("news_events", {})
     out = []
     for ticker in universe:
         entry = news.get(ticker, {})
-        score = float(entry.get("score", 0.0))
-        if score >= 0.3:
-            out.append({
-                "ticker": ticker,
-                "strategy_tag": "SECTOR_MOMENTUM",
-                "conviction": 0.6 + min(score, 0.3),
-                "entry_hint": {"trigger": "market"},
-                "factors": {"news_score": score},
-                "notes": "real-e2e",
-            })
+        if entry.get("risk_events"):
+            continue
+        positive = entry.get("positive_events", [])
+        if not positive:
+            continue
+        high_events = entry.get("events_by_impact", {}).get("high", {})
+        earnings_cnt = high_events.get("earnings", 0)
+        conviction = 0.6 + 0.1 * min(earnings_cnt, 3)
+        out.append({
+            "ticker": ticker,
+            "strategy_tag": "SECTOR_MOMENTUM",
+            "conviction": min(conviction, 1.0),
+            "entry_hint": {"trigger": "market"},
+            "factors": {"high_earnings": float(earnings_cnt)},
+            "notes": "real-e2e",
+        })
     return out
 """
 
@@ -105,16 +111,28 @@ def _macro_output_open() -> MacroGateOutput:
     )
 
 
-def _score(ticker: str, article_id: str, score: float, when: datetime) -> NewsEvent:
-    sentiment = "positive" if score > 0.2 else ("negative" if score < -0.2 else "neutral")
+def _event(
+    ticker: str,
+    article_id: str,
+    when: datetime,
+    *,
+    event_type: str = "other",
+    impact_level: str = "medium",
+    sentiment_score: float = 0.0,
+) -> NewsEvent:
+    sentiment = (
+        "positive"
+        if sentiment_score > 0.2
+        else ("negative" if sentiment_score < -0.2 else "neutral")
+    )
     return NewsEvent(
         article_id=article_id,
         ticker=ticker,
         published_at=when,
-        event_type="other",
-        impact_level="medium",
+        event_type=event_type,  # type: ignore[arg-type]
+        impact_level=impact_level,  # type: ignore[arg-type]
         sentiment=sentiment,  # type: ignore[arg-type]
-        sentiment_score=score,
+        sentiment_score=sentiment_score,
         time_horizon="short",
         keywords=[],
         sector_tags=[],
@@ -186,13 +204,28 @@ async def test_real_feeder_and_subprocess_adapter_publish_sheets(fake_redis):
     t = datetime.combine(as_of, datetime.min.time()).replace(hour=12)
 
     repo = InMemoryEventRepo()
-    # 005930, 000660 → score > 0.3 (발행 대상)
-    await repo.upsert(_score("005930", "a1", 0.8, t))
-    await repo.upsert(_score("005930", "a2", 0.6, t - timedelta(hours=2)))
-    await repo.upsert(_score("000660", "b1", 0.5, t))
-    # 035420 → 낮은 score (통과 X)
-    await repo.upsert(_score("035420", "c1", 0.1, t))
-    # 207940, 005380 → 기사 0건 (feeder가 score=0으로 채움, 통과 X)
+    # 005930, 000660 → high earnings (positive_events 존재, 발행 대상)
+    await repo.upsert(
+        _event("005930", "a1", t, event_type="earnings", impact_level="high", sentiment_score=0.8)
+    )
+    await repo.upsert(
+        _event(
+            "005930",
+            "a2",
+            t - timedelta(hours=2),
+            event_type="earnings",
+            impact_level="high",
+            sentiment_score=0.6,
+        )
+    )
+    await repo.upsert(
+        _event("000660", "b1", t, event_type="earnings", impact_level="high", sentiment_score=0.5)
+    )
+    # 035420 → impact=medium 이라 positive_events 리스트에 안 잡힘 (통과 X)
+    await repo.upsert(
+        _event("035420", "c1", t, event_type="earnings", impact_level="medium", sentiment_score=0.1)
+    )
+    # 207940, 005380 → 기사 0건 (feeder가 빈 entry 로 채움, 통과 X)
 
     observer = CollectingObserver()
     adapter = ScreeningToolAdapter(backend="subprocess", timeout_s=30.0)
@@ -281,7 +314,9 @@ async def test_real_adapter_handles_json_unsafe_context_via_pipeline(fake_redis)
     t = datetime.combine(as_of, datetime.min.time()).replace(hour=12)
 
     repo = InMemoryEventRepo()
-    await repo.upsert(_score("005930", "a1", 0.9, t))  # 높은 score
+    await repo.upsert(
+        _event("005930", "a1", t, event_type="earnings", impact_level="high", sentiment_score=0.9)
+    )
 
     observer = CollectingObserver()
     adapter = ScreeningToolAdapter(backend="subprocess", timeout_s=30.0)

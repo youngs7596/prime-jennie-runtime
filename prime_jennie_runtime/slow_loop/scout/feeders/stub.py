@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from ..schemas import MarketSummary, NewsScoreEntry
+from ..schemas import MarketSummary, NewsEventEntry
 
 
 @dataclass(frozen=True)
@@ -26,17 +26,18 @@ class StubUniverseFeeder:
 
 
 @dataclass(frozen=True)
-class StubNewsScoreFeeder:
-    base_score: float = 0.2
+class StubNewsEventFeeder:
     base_timestamp: datetime = field(default_factory=datetime.now)
 
-    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsScoreEntry]:
+    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsEventEntry]:
         return {
-            t: NewsScoreEntry(
-                score=self.base_score,
-                timestamp=self.base_timestamp,
+            t: NewsEventEntry(
                 article_count=3,
+                latest_at=self.base_timestamp,
                 staleness_hours=2.0,
+                events_by_impact={"medium": {"other": 3}},
+                positive_events=[],
+                risk_events=[],
             )
             for t in universe
         }

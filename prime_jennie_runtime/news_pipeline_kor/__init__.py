@@ -3,7 +3,7 @@
 v2 ``prime_jennie/services/news`` 포팅. 핵심 산출물:
 - 2-stage Redis Stream 소비 ``NewsPipeline`` (collect_and_publish / extract_stream_once).
   app.py 가 2 async loop 로 상시 구동.
-- Scout 공급 ``NewsPipelineScoutFeeder`` (Track B ``NewsScoreFeeder`` Protocol 구현).
+- Scout 공급 ``NewsPipelineScoutFeeder`` (Track B ``NewsEventFeeder`` Protocol 구현).
 
 2026-04-21: sentiment → metadata 추출 전환. Qdrant/kure-v1 archiver 제거.
 """
@@ -23,7 +23,6 @@ from .models import (
     ImpactLevel,
     NewsArticle,
     NewsEvent,
-    NewsScoreSnapshot,
     SentimentLabel,
     SentimentScore,
     SignalDirection,
@@ -63,7 +62,6 @@ __all__ = [
     "NewsEvent",
     "NewsPipeline",
     "NewsPipelineScoutFeeder",
-    "NewsScoreSnapshot",
     "RedisDeduplicator",
     "SentimentAnalyzer",
     "SentimentLabel",

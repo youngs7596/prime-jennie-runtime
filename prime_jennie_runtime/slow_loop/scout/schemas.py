@@ -18,20 +18,28 @@ from pydantic import BaseModel, Field
 # =====================================================================
 
 
-class NewsScoreEntry(BaseModel):
-    """ticker별 뉴스 감성 스냅샷 (SCOUT §2.4).
+POSITIVE_EVENT_TYPES = frozenset(
+    {"earnings", "contract", "product", "investment", "shareholder_return"}
+)
+RISK_EVENT_TYPES = frozenset({"geopolitical", "regulation", "strike", "lawsuit", "bankruptcy"})
 
-    2026-04-21 확장: news_events 메타데이터 기반 보강 필드. Scout 코드가
-    `if news_scores[t]['high_impact_count'] >= 1 and 'earnings' in news_scores[t]['event_types']`
-    같은 조건식으로 직접 필터링할 수 있도록.
+
+class NewsEventEntry(BaseModel):
+    """ticker별 뉴스 이벤트 분포 스냅샷 (SCOUT §2.4, 2026-04-25 재설계).
+
+    Qwen3 메타데이터 기반. "점수 평균" 을 쓰지 않고 임팩트 × 이벤트 종류별 건수를
+    그대로 넘겨서 Scout 코드가 규칙 조합으로 판단. ``positive_events`` /
+    ``risk_events`` 는 ``events_by_impact['high']`` 중 긍정·리스크 카테고리 이벤트
+    종류를 미리 추출해둔 리스트 — scout code 가 간단히 boolean 체크하도록.
     """
 
-    score: Annotated[float, Field(ge=-1.0, le=1.0)]
-    timestamp: datetime
     article_count: Annotated[int, Field(ge=0)]
+    latest_at: datetime | None = None  # 기사 0건이면 None
     staleness_hours: Annotated[float, Field(ge=0.0)]
-    high_impact_count: Annotated[int, Field(ge=0)] = 0
-    event_types: dict[str, int] = Field(default_factory=dict)
+    events_by_impact: dict[str, dict[str, int]] = Field(default_factory=dict)
+    # events_by_impact["high"|"medium"|"low"] = {event_type: count}
+    positive_events: list[str] = Field(default_factory=list)
+    risk_events: list[str] = Field(default_factory=list)
 
 
 class MacroStateForScout(BaseModel):
@@ -76,7 +84,7 @@ class ScoutContext(BaseModel):
     universe: list[str]
     market_summary: MarketSummary
     macro_state: MacroStateForScout
-    news_scores: dict[str, NewsScoreEntry]
+    news_events: dict[str, NewsEventEntry]
     sector_momentum: dict[str, float]
     previous_scout_runs: list[ScoutRunSummary] = Field(default_factory=list)
     strategy_tags_available: list[str]

@@ -31,7 +31,7 @@ def _context() -> ScoutContext:
         macro_state=MacroStateForScout(
             gate="open", size_multiplier=0.75, gate_run_id="macro_20260416_0800"
         ),
-        news_scores={},
+        news_events={},
         sector_momentum={"반도체": 0.04},
         strategy_tags_available=["SECTOR_MOMENTUM"],
     )

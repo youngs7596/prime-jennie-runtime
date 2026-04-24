@@ -68,7 +68,7 @@ from .pipeline import SlowLoopComponents, run_slow_loop
 from .scout.context_builder import ScoutContextBuilder
 from .scout.feeders.stub import (
     StubMarketSummaryFeeder,
-    StubNewsScoreFeeder,
+    StubNewsEventFeeder,
     StubSectorMomentumFeeder,
     StubUniverseFeeder,
 )
@@ -205,21 +205,21 @@ def _build_slow_loop_components(
     if db_engine is not None:
         from prime_jennie_runtime.slow_loop.scout.feeders.real import (
             RealMarketSummaryFeeder,
-            RealNewsScoreFeeder,
+            RealNewsEventFeeder,
             RealSectorMomentumFeeder,
             RealUniverseFeeder,
         )
 
         scout_builder = ScoutContextBuilder(
             universe=RealUniverseFeeder(engine=db_engine),
-            news=RealNewsScoreFeeder(engine=db_engine),
+            news=RealNewsEventFeeder(engine=db_engine),
             sector=RealSectorMomentumFeeder(engine=db_engine),
             market=RealMarketSummaryFeeder(engine=db_engine),
         )
     else:
         scout_builder = ScoutContextBuilder(
             universe=StubUniverseFeeder(),
-            news=StubNewsScoreFeeder(),
+            news=StubNewsEventFeeder(),
             sector=StubSectorMomentumFeeder(),
             market=StubMarketSummaryFeeder(),
         )

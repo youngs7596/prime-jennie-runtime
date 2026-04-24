@@ -4,9 +4,11 @@ Phase 2.12 Track D. `stub.py` 4종을 교체.
 
 - RealUniverseFeeder: stock_masters 에서 market_cap 상위 N개 종목 코드 반환
   (N 은 env `SCOUT_UNIVERSE_SIZE`, default 200).
-- RealNewsScoreFeeder: news_articles × news_sentiments 조인 → ticker 별 48h 내
-  mean score + staleness_hours. 기사 0건 ticker 는 zero entry 로 포함 (Scout
-  가 missing 보다 명시적 0건을 선호한다는 `NewsPipelineScoutFeeder` 컨벤션).
+- RealNewsEventFeeder: news_events 를 ticker × impact_level × event_type 로 집계
+  → events_by_impact dict + positive/risk_events 플래그 리스트. 기사 0건 ticker
+  는 zero entry 로 포함 (Scout 가 missing 보다 명시적 0건을 선호한다는
+  `NewsPipelineScoutFeeder` 컨벤션). 점수 평균은 계산하지 않음 — Qwen3 메타데이터
+  체계로 넘어온 뒤 단일 숫자 점수가 주요 신호를 대표하지 못함.
 - RealSectorMomentumFeeder: daily_prices × stock_masters.sector_group 로 섹터별
   20 영업일 평균 수익률. daily_prices 가 비어 있으면 `{}` + WARNING log.
 - RealMarketSummaryFeeder: index_daily_prices 에서 KOSPI/KOSDAQ 최신 close
@@ -22,7 +24,12 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from ..schemas import MarketSummary, NewsScoreEntry
+from ..schemas import (
+    POSITIVE_EVENT_TYPES,
+    RISK_EVENT_TYPES,
+    MarketSummary,
+    NewsEventEntry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,15 +77,16 @@ class RealUniverseFeeder:
         return [r[0] for r in rows]
 
 
-# ---------------------------------------------------------------- NewsScore
+# ---------------------------------------------------------------- NewsEvents
 
 
-class RealNewsScoreFeeder:
-    """news_events ticker 별 최근 48h 평균 sentiment_score + 메타데이터 집계.
+class RealNewsEventFeeder:
+    """news_events ticker × impact_level × event_type 분포 집계.
 
-    2026-04-21 전환: news_sentiments → news_events.
-    확장: `high_impact_count` + `event_types` (ticker × event_type 집계) 를 Scout
-    코드가 직접 조건식으로 쓸 수 있도록 실어준다.
+    2026-04-25 재설계: 기존 ``AVG(sentiment_score)`` 기반 점수 평균을 제거하고,
+    Qwen3 가 추출한 임팩트 × 이벤트 종류 분포를 그대로 노출. Scout 코드가
+    "고임팩트 호재 이벤트가 있는가" 같은 규칙을 쉽게 쓸 수 있도록
+    ``positive_events`` / ``risk_events`` 편의 리스트도 함께 제공.
     """
 
     def __init__(
@@ -89,20 +97,17 @@ class RealNewsScoreFeeder:
         self._engine = engine
         self._lookback_hours = lookback_hours
 
-    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsScoreEntry]:
+    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsEventEntry]:
         if not universe:
             return {}
         now = datetime.combine(as_of, datetime.min.time()).replace(hour=23, minute=59, second=59)
         since = now - timedelta(hours=self._lookback_hours)
 
         async with self._engine.begin() as conn:
+            # ticker 별 총 기사 수 + 최신 analyzed_at.
             res = await conn.execute(
                 text(
-                    "SELECT ticker, "
-                    "AVG(sentiment_score)::float AS avg_score, "
-                    "COUNT(*)::int AS cnt, "
-                    "COUNT(*) FILTER (WHERE impact_level = 'high')::int AS high_impact_count, "
-                    "MAX(analyzed_at) AS latest "
+                    "SELECT ticker, COUNT(*)::int AS cnt, MAX(analyzed_at) AS latest "
                     "FROM news_events "
                     "WHERE ticker = ANY(:tickers) AND analyzed_at >= :since "
                     "GROUP BY ticker"
@@ -111,23 +116,26 @@ class RealNewsScoreFeeder:
             )
             agg_rows = res.mappings().all()
 
-            # event_type 분포: (ticker, event_type) → count.
+            # ticker × impact × event_type 분포.
             res = await conn.execute(
                 text(
-                    "SELECT ticker, event_type, COUNT(*)::int AS cnt "
+                    "SELECT ticker, impact_level, event_type, COUNT(*)::int AS cnt "
                     "FROM news_events "
                     "WHERE ticker = ANY(:tickers) AND analyzed_at >= :since "
-                    "GROUP BY ticker, event_type"
+                    "GROUP BY ticker, impact_level, event_type"
                 ),
                 {"tickers": list(universe), "since": since},
             )
-            type_rows = res.mappings().all()
+            dist_rows = res.mappings().all()
 
-        event_types_by_ticker: dict[str, dict[str, int]] = {}
-        for r in type_rows:
-            event_types_by_ticker.setdefault(r["ticker"], {})[r["event_type"]] = int(r["cnt"])
+        # {ticker: {impact: {event_type: count}}} 누적.
+        by_ticker_dist: dict[str, dict[str, dict[str, int]]] = {}
+        for r in dist_rows:
+            t_dist = by_ticker_dist.setdefault(r["ticker"], {})
+            impact_bucket = t_dist.setdefault(r["impact_level"], {})
+            impact_bucket[r["event_type"]] = int(r["cnt"])
 
-        by_ticker: dict[str, NewsScoreEntry] = {}
+        by_ticker: dict[str, NewsEventEntry] = {}
         for r in agg_rows:
             latest: datetime = r["latest"]
             staleness = max(
@@ -137,34 +145,29 @@ class RealNewsScoreFeeder:
                 ).total_seconds()
                 / 3600.0,
             )
-            by_ticker[r["ticker"]] = NewsScoreEntry(
-                score=_clamp(float(r["avg_score"]), -1.0, 1.0),
-                timestamp=latest,
+            events_by_impact = by_ticker_dist.get(r["ticker"], {})
+            high_types = set(events_by_impact.get("high", {}).keys())
+            by_ticker[r["ticker"]] = NewsEventEntry(
                 article_count=int(r["cnt"]),
+                latest_at=latest,
                 staleness_hours=staleness,
-                high_impact_count=int(r.get("high_impact_count") or 0),
-                event_types=event_types_by_ticker.get(r["ticker"], {}),
+                events_by_impact=events_by_impact,
+                positive_events=sorted(high_types & POSITIVE_EVENT_TYPES),
+                risk_events=sorted(high_types & RISK_EVENT_TYPES),
             )
 
         # 기사 0건 ticker 를 zero entry 로 채움 (NewsPipelineScoutFeeder 컨벤션).
-        out: dict[str, NewsScoreEntry] = {}
+        out: dict[str, NewsEventEntry] = {}
         for ticker in universe:
             if ticker in by_ticker:
                 out[ticker] = by_ticker[ticker]
             else:
-                out[ticker] = NewsScoreEntry(
-                    score=0.0,
-                    timestamp=now,
+                out[ticker] = NewsEventEntry(
                     article_count=0,
+                    latest_at=None,
                     staleness_hours=self._lookback_hours,
                 )
         return out
-
-
-def _clamp(x: float, lo: float, hi: float) -> float:
-    if x != x:  # NaN
-        return 0.0
-    return max(lo, min(hi, x))
 
 
 # ---------------------------------------------------------------- SectorMomentum

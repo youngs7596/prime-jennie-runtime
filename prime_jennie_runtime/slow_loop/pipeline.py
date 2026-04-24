@@ -437,7 +437,7 @@ async def run_slow_loop(
         "trigger_reason": scout_trigger,
         "universe_size": len(scout_ctx.universe),
         "universe_hash": _hashlib.sha256(_universe_raw.encode("utf-8")).hexdigest(),
-        "news_scores": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_scores.items()},
+        "news_events": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_events.items()},
         "sector_momentum": dict(scout_ctx.sector_momentum),
         "macro_size_multiplier": float(post.output.size_multiplier),
         "macro_gate": post.output.gate,
@@ -483,7 +483,7 @@ async def run_slow_loop(
     screening_context = {
         "as_of": as_of_date.isoformat(),
         "universe": scout_ctx.universe,
-        "news_scores": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_scores.items()},
+        "news_events": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_events.items()},
         "sector_momentum": scout_ctx.sector_momentum,
         "macro_size_multiplier": post.output.size_multiplier,
         "market_data_records": market_data_records,
@@ -644,7 +644,7 @@ async def run_slow_loop(
         scout_code_hash=compute_code_hash(scout_out.screening_code),
         scout_hypothesis=scout_out.hypothesis,
         generated_at=as_of_dt,
-        news_score=None,  # Phase 2: scout_ctx.news_scores에서 per-ticker로
+        news_score=None,  # Phase 2: scout_ctx.news_events에서 per-ticker로
     )
 
     published: list[str] = []

@@ -82,29 +82,41 @@ market_data 구조 (반드시 이 구조를 가정):
 context dict 구조:
 - `as_of`: str ISO date (e.g. "2026-04-20")
 - `universe`: list[str]                — 6자리 종목 코드
-- `news_scores`: dict[str, dict]       — ticker → 뉴스 감성/이벤트 집계. 키:
-    - `score` float -1~+1                — 48h 가중 감성 평균
-    - `staleness_hours` float            — 가장 최근 기사 이후 경과
+- `news_events`: dict[str, dict]       — ticker → 뉴스 이벤트 분포 (48h). 키:
     - `article_count` int                — 48h 기사 수
-    - `high_impact_count` int            — impact_level='high' 기사 수 (48h)
-    - `event_types` dict[str,int]        — {{event_type: count}} (48h 분포). 가능한 event_type:
-        earnings, mna, lawsuit, product, personnel, contract, strike,
-        shareholder_return, investment, bankruptcy, market_movement, geopolitical,
-        regulation, fund_product, analyst_rating, other
-    - `timestamp` str
+    - `staleness_hours` float            — 가장 최근 기사 이후 경과
+    - `events_by_impact` dict            — {{"high"|"medium"|"low": {{event_type: count}}}}
+       예: {{"high": {{"earnings": 2, "regulation": 1}}, "medium": {{"analyst_rating": 5}}}}
+    - `positive_events` list[str]        — high 임팩트 호재 이벤트 종류 리스트
+       (earnings, contract, product, investment, shareholder_return 중 존재하는 것)
+    - `risk_events` list[str]            — high 임팩트 리스크 이벤트 종류 리스트
+       (geopolitical, regulation, strike, lawsuit, bankruptcy 중 존재하는 것)
+    - `latest_at` str | null             — 가장 최근 analyzed_at ISO, 0건이면 null
 - `sector_momentum`: dict[str, float]  — 섹터명(str) → 20일 수익률 (decimal, e.g. 0.05 = +5%)
 - `macro_size_multiplier`: float       — 참고용 (Strategy Engine 이 실제 size 계산)
 
-news_scores 활용 힌트 (단일 팩터에 그치지 말고 결합):
-- strong positive earnings:  `score>=0.3 and 'earnings' in event_types and high_impact_count>=1`
-- 단순 noise 제외:           `article_count>=2 and staleness_hours<=24`
-- 지정학/규제 리스크 회피:   `not ({{'geopolitical','regulation'}} & event_types.keys() and high_impact_count>=1)`
-- MOMENTUM 진입 확정:        `high_impact_count>=1` 이면서 sector_momentum 도 양수
-- event_types 는 없을 수도 있음 (기사 0건). 반드시 `.get()` 이나 `in` 으로 안전 접근
+가능한 event_type (Qwen3 가 부여):
+    earnings, mna, lawsuit, product, personnel, contract, strike,
+    shareholder_return, investment, bankruptcy, market_movement, geopolitical,
+    regulation, fund_product, analyst_rating, other
+
+news_events 활용 원칙 — 점수 비교 대신 이벤트 조합으로 판단:
+- **호재 후보**:            `positive_events` 가 비어있지 않으면 매수 후보군
+                             (예: `ne.get('positive_events')` truthy 이고 `risk_events` 없음)
+- **리스크 제외**:          `risk_events` 가 있으면 후보에서 제외
+                             (예: `if ne.get('risk_events'): continue`)
+- **노이즈/저신뢰 필터**:   `article_count < 2` 이면 뉴스 시그널 미사용 (다른 팩터로만 판단)
+- **신선도 필터**:          `staleness_hours > 48` 이면 뉴스 시그널 미사용
+- **이벤트 가중**:          `events_by_impact.get('high', {{}})` 에서 특정 event_type 건수로
+                             conviction 보정. 예:
+                               high = ne.get('events_by_impact', {{}}).get('high', {{}})
+                               conviction += 0.15 * min(high.get('earnings', 0), 3)
+- **news_events[ticker]** 는 항상 존재하지만 0건 entry 일 수 있음. `.get()` 방어적 접근 필수
 
 품질 기준:
 - 최소 2개 이상의 독립 팩터 결합 (가격 + 뉴스, 또는 섹터 + 기술지표 등)
-- 뉴스 감성은 `news_scores[ticker]['staleness_hours'] <= 48` 인 경우만 사용
+- 뉴스 팩터는 `staleness_hours <= 48` 인 경우만 사용 (그 외는 뉴스 비중 0)
+- 점수 평균 비교 금지 (sentiment_score 평균은 제공되지 않음) — 이벤트 존재성·카운트 기반
 - 한 종목에 다 걸지 말고 섹터 분산 고려
 - fallback_strategy 명시 (통과 종목 0개 대응)
 - market_data 가 짧은 종목 (예: 20일 미만) 은 장기 지표 계산에서 제외
@@ -136,12 +148,17 @@ def screen(market_data, context):
 """
 
 
-def _fmt_event_types(mapping: dict[str, int]) -> str:
-    """event_type dict 를 사람이 읽기 좋은 요약 문자열로. 상위 3종."""
-    if not mapping:
+def _fmt_high_events(events_by_impact: dict[str, dict[str, int]]) -> str:
+    """high 임팩트 event_type 분포를 요약 문자열로. 상위 3종."""
+    high = events_by_impact.get("high", {})
+    if not high:
         return "-"
-    top = sorted(mapping.items(), key=lambda x: x[1], reverse=True)[:3]
+    top = sorted(high.items(), key=lambda x: x[1], reverse=True)[:3]
     return ",".join(f"{et}:{cnt}" for et, cnt in top)
+
+
+def _high_total(events_by_impact: dict[str, dict[str, int]]) -> int:
+    return sum(events_by_impact.get("high", {}).values())
 
 
 def build_user_prompt(ctx: ScoutContext) -> str:
@@ -152,30 +169,30 @@ def build_user_prompt(ctx: ScoutContext) -> str:
     sector_top_str = "\n".join(f"  - {s}: {m:+.2%}" for s, m in top_sectors) or "  (없음)"
     sector_bot_str = "\n".join(f"  - {s}: {m:+.2%}" for s, m in bottom_sectors) or "  (없음)"
 
-    # 뉴스 상위 20 (high_impact 우선, 그다음 score 내림차순)
+    # 뉴스 상위 20: high 이벤트 총 건수 우선, 그다음 총 기사 수
     news_items = sorted(
-        ctx.news_scores.items(),
-        key=lambda x: (x[1].high_impact_count, x[1].score),
+        ctx.news_events.items(),
+        key=lambda x: (_high_total(x[1].events_by_impact), x[1].article_count),
         reverse=True,
     )[:20]
     news_str = (
         "\n".join(
             (
-                f"  - {t}: score={e.score:+.2f} impact_high={e.high_impact_count} "
-                f"cnt={e.article_count} stale={e.staleness_hours:.1f}h "
-                f"events={_fmt_event_types(e.event_types)}"
+                f"  - {t}: cnt={e.article_count} stale={e.staleness_hours:.1f}h "
+                f"high=[{_fmt_high_events(e.events_by_impact)}] "
+                f"pos={e.positive_events or '-'} risk={e.risk_events or '-'}"
             )
             for t, e in news_items
         )
         or "  (뉴스 없음)"
     )
 
-    # 전체 universe 의 high-impact event_type 분포 (Macro/Scout 공통 시그널)
-    total_event_types: dict[str, int] = {}
-    for entry in ctx.news_scores.values():
-        for et, cnt in entry.event_types.items():
-            total_event_types[et] = total_event_types.get(et, 0) + cnt
-    top_events = sorted(total_event_types.items(), key=lambda x: x[1], reverse=True)[:8]
+    # universe 전체의 high-impact event_type 분포
+    total_high_events: dict[str, int] = {}
+    for entry in ctx.news_events.values():
+        for et, cnt in entry.events_by_impact.get("high", {}).items():
+            total_high_events[et] = total_high_events.get(et, 0) + cnt
+    top_events = sorted(total_high_events.items(), key=lambda x: x[1], reverse=True)[:8]
     events_summary = ", ".join(f"{et}:{cnt}" for et, cnt in top_events) if top_events else "(없음)"
 
     prev_str = (
@@ -207,10 +224,10 @@ Trigger: {ctx.trigger_reason}
 ---
 {sector_bot_str}
 
-## 뉴스 감성 상위 20종목 (impact_high 우선 · event_type 포함)
+## 뉴스 이벤트 상위 20종목 (high 이벤트 우선 · positive/risk 플래그 포함)
 {news_str}
 
-## 48h 이벤트 타입 분포 (universe 전체 집계, 상위 8종)
+## 48h high-impact 이벤트 분포 (universe 전체, 상위 8종)
 {events_summary}
 
 ## 최근 Scout run 요약 (최신 5개)

@@ -13,7 +13,7 @@ from prime_jennie_runtime.position_sheet.schema import ALLOWED_STRATEGY_TAGS
 
 from .feeders.base import (
     MarketSummaryFeeder,
-    NewsScoreFeeder,
+    NewsEventFeeder,
     SectorMomentumFeeder,
     UniverseFeeder,
 )
@@ -25,7 +25,7 @@ class ScoutContextBuilder:
     """ScoutContext 조립기."""
 
     universe: UniverseFeeder
-    news: NewsScoreFeeder
+    news: NewsEventFeeder
     sector: SectorMomentumFeeder
     market: MarketSummaryFeeder
 
@@ -46,7 +46,7 @@ class ScoutContextBuilder:
             universe=universe,
             market_summary=market,
             macro_state=macro_state,
-            news_scores=news,
+            news_events=news,
             sector_momentum=sector,
             previous_scout_runs=list(previous_runs or []),
             strategy_tags_available=sorted(ALLOWED_STRATEGY_TAGS),

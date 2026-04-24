@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from ..schemas import MarketSummary, NewsScoreEntry
+from ..schemas import MarketSummary, NewsEventEntry
 
 
 @runtime_checkable
@@ -19,10 +19,10 @@ class UniverseFeeder(Protocol):
 
 
 @runtime_checkable
-class NewsScoreFeeder(Protocol):
-    """ticker별 감성 점수 스냅샷. Track E의 news_pipeline_kor가 실체."""
+class NewsEventFeeder(Protocol):
+    """ticker별 뉴스 이벤트 분포 스냅샷. 2026-04-25 재설계: Qwen3 메타데이터 기반."""
 
-    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsScoreEntry]: ...
+    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, NewsEventEntry]: ...
 
 
 @runtime_checkable

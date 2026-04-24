@@ -37,7 +37,7 @@ from prime_jennie_runtime.slow_loop.pipeline import SlowLoopComponents, run_slow
 from prime_jennie_runtime.slow_loop.scout.context_builder import ScoutContextBuilder
 from prime_jennie_runtime.slow_loop.scout.feeders.stub import (
     StubMarketSummaryFeeder,
-    StubNewsScoreFeeder,
+    StubNewsEventFeeder,
     StubSectorMomentumFeeder,
     StubUniverseFeeder,
 )
@@ -104,7 +104,7 @@ def _make_components(
 
     scout_builder = ScoutContextBuilder(
         universe=StubUniverseFeeder(),
-        news=StubNewsScoreFeeder(),
+        news=StubNewsEventFeeder(),
         sector=StubSectorMomentumFeeder(),
         market=StubMarketSummaryFeeder(),
     )

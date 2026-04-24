@@ -28,14 +28,14 @@ LLM 호출은 Macro, Scout 각 한 번씩만 (fast path: `output_schema` + `max_
 | `strategy/` | 결정론적 룰엔진 → PositionSheet 발행 | 프로토콜 미사용 (LLM 금지) |
 
 ### `scout/`
-- `schemas.py` — ScoutOutput, ScreeningCandidate, EntryHint, ExitHint, NewsScoreEntry, ScoutContext
+- `schemas.py` — ScoutOutput, ScreeningCandidate, EntryHint, ExitHint, NewsEventEntry, ScoutContext
 - `role.py` — ScoutRole (SubAgentRole 구현, tier="strong")
 - `prompts.py` — SCOUT_SYSTEM_PROMPT + build_user_prompt
 - `code_hasher.py` — sha256 해시 (provenance.scout_code_hash, S13 재현성)
 - `validators.py` — S06/S07/S08 검증
 - `screening_stub.py` — Track D 컨테이너 자리 표시자 (고정 candidates 반환)
 - `context_builder.py` — 입력 feeder 합성 → ScoutContext
-- `feeders/` — UniverseFeeder / NewsScoreFeeder / SectorMomentumFeeder / MarketSummaryFeeder protocol + stub
+- `feeders/` — UniverseFeeder / NewsEventFeeder / SectorMomentumFeeder / MarketSummaryFeeder protocol + stub
 
 ### `macro/`
 - `schemas.py` — MacroGateOutput, RiskItem, MarketSnapshot, IndexPoint, SectorDrop, MacroContext, RecentMacroRun
@@ -72,7 +72,7 @@ LLM 호출은 Macro, Scout 각 한 번씩만 (fast path: `output_schema` + `max_
 | 영역 | 현 상태 | 완성 시 교체 |
 |---|---|---|
 | Scout 코드 실제 실행 | `ScreeningToolAdapterStub` | Track D `ScreeningToolAdapter` (Docker 격리) |
-| news_scores | `StubNewsScoreFeeder` (고정값) | Track E `news_pipeline_kor` |
+| news_events | `StubNewsEventFeeder` (고정값) | Track E `news_pipeline_kor` |
 | WSJ digest | `StubWsjDigestFeeder` | Track E digest pipeline |
 | market data | `StubMarketSnapshotFeeder` / `StubMarketSummaryFeeder` | Track E KRX/v2 legacy_* |
 | RiskThrottle | `NoOpRiskThrottle(1.0)` | Track C 실제 throttle |

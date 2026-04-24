@@ -13,11 +13,11 @@ import pytest
 
 from prime_jennie_runtime.slow_loop.scout.feeders.real import (
     RealMarketSummaryFeeder,
-    RealNewsScoreFeeder,
+    RealNewsEventFeeder,
     RealSectorMomentumFeeder,
     RealUniverseFeeder,
 )
-from prime_jennie_runtime.slow_loop.scout.schemas import MarketSummary, NewsScoreEntry
+from prime_jennie_runtime.slow_loop.scout.schemas import MarketSummary, NewsEventEntry
 
 # --- fake engine scaffolding -----------------------------------------
 
@@ -116,66 +116,79 @@ async def test_universe_feeder_env_override(monkeypatch):
     assert params == {"n": 50}
 
 
-# --- RealNewsScoreFeeder --------------------------------------------
+# --- RealNewsEventFeeder --------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_news_score_feeder_returns_entries_per_ticker():
+async def test_news_event_feeder_returns_entries_per_ticker():
     latest = datetime(2026, 4, 20, 20, 0, 0)
     conn = _FakeConn(
         responses=[
             (
-                "high_impact_count",  # aggregate 쿼리 (unique substring)
+                "MAX(analyzed_at) AS latest",  # 집계 쿼리 (unique substring)
+                [{"ticker": "005930", "cnt": 5, "latest": latest}],
+            ),
+            (
+                "GROUP BY ticker, impact_level, event_type",
                 [
                     {
                         "ticker": "005930",
-                        "avg_score": 0.42,
-                        "cnt": 5,
-                        "high_impact_count": 2,
-                        "latest": latest,
-                    }
-                ],
-            ),
-            (
-                "GROUP BY ticker, event_type",
-                [
-                    {"ticker": "005930", "event_type": "earnings", "cnt": 3},
-                    {"ticker": "005930", "event_type": "product", "cnt": 2},
+                        "impact_level": "high",
+                        "event_type": "earnings",
+                        "cnt": 2,
+                    },
+                    {
+                        "ticker": "005930",
+                        "impact_level": "high",
+                        "event_type": "regulation",
+                        "cnt": 1,
+                    },
+                    {
+                        "ticker": "005930",
+                        "impact_level": "medium",
+                        "event_type": "product",
+                        "cnt": 2,
+                    },
                 ],
             ),
         ]
     )
-    feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
+    feeder = RealNewsEventFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
 
     result = await feeder.fetch(date(2026, 4, 20), ["005930", "000660"])
 
     assert set(result.keys()) == {"005930", "000660"}
     e1 = result["005930"]
-    assert isinstance(e1, NewsScoreEntry)
-    assert e1.score == pytest.approx(0.42)
+    assert isinstance(e1, NewsEventEntry)
     assert e1.article_count == 5
-    assert e1.timestamp == latest
-    assert e1.high_impact_count == 2
-    assert e1.event_types == {"earnings": 3, "product": 2}
+    assert e1.latest_at == latest
+    assert e1.events_by_impact == {
+        "high": {"earnings": 2, "regulation": 1},
+        "medium": {"product": 2},
+    }
+    # earnings 는 POSITIVE, regulation 은 RISK 카테고리.
+    assert e1.positive_events == ["earnings"]
+    assert e1.risk_events == ["regulation"]
 
     # 미매칭 ticker 는 zero entry.
     zero = result["000660"]
-    assert zero.score == 0.0
     assert zero.article_count == 0
+    assert zero.latest_at is None
     assert zero.staleness_hours == pytest.approx(48.0)
-    assert zero.high_impact_count == 0
-    assert zero.event_types == {}
+    assert zero.events_by_impact == {}
+    assert zero.positive_events == []
+    assert zero.risk_events == []
 
 
 @pytest.mark.asyncio
-async def test_news_score_feeder_passes_lookback_window():
+async def test_news_event_feeder_passes_lookback_window():
     conn = _FakeConn(
         responses=[
-            ("high_impact_count", []),
-            ("GROUP BY ticker, event_type", []),
+            ("MAX(analyzed_at) AS latest", []),
+            ("GROUP BY ticker, impact_level, event_type", []),
         ]
     )
-    feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn), lookback_hours=24.0)  # type: ignore[arg-type]
+    feeder = RealNewsEventFeeder(engine=_FakeEngine(conn), lookback_hours=24.0)  # type: ignore[arg-type]
     await feeder.fetch(date(2026, 4, 20), ["005930"])
     sql, params = conn.executed[0]
     assert "analyzed_at >= :since" in sql
@@ -183,42 +196,58 @@ async def test_news_score_feeder_passes_lookback_window():
     assert params["tickers"] == ["005930"]
     # as_of 23:59:59 - 24h = 2026-04-19 23:59:59.
     assert params["since"] == datetime(2026, 4, 19, 23, 59, 59)
-    # 2 쿼리 (집계 + event_type 분포)
+    # 2 쿼리 (집계 + impact×event 분포)
     assert len(conn.executed) == 2
 
 
 @pytest.mark.asyncio
-async def test_news_score_feeder_empty_universe_short_circuits():
+async def test_news_event_feeder_empty_universe_short_circuits():
     conn = _FakeConn()
-    feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
+    feeder = RealNewsEventFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
     result = await feeder.fetch(date(2026, 4, 20), [])
     assert result == {}
     assert conn.executed == []
 
 
 @pytest.mark.asyncio
-async def test_news_score_feeder_clamps_out_of_range_score():
+async def test_news_event_feeder_classifies_positive_and_risk():
     latest = datetime(2026, 4, 20, 10, 0, 0)
     conn = _FakeConn(
         responses=[
             (
-                "high_impact_count",
+                "MAX(analyzed_at) AS latest",
+                [{"ticker": "005930", "cnt": 3, "latest": latest}],
+            ),
+            (
+                "GROUP BY ticker, impact_level, event_type",
                 [
                     {
                         "ticker": "005930",
-                        "avg_score": 2.5,
+                        "impact_level": "high",
+                        "event_type": "contract",
                         "cnt": 1,
-                        "high_impact_count": 0,
-                        "latest": latest,
-                    }
+                    },
+                    {
+                        "ticker": "005930",
+                        "impact_level": "high",
+                        "event_type": "geopolitical",
+                        "cnt": 1,
+                    },
+                    {
+                        "ticker": "005930",
+                        "impact_level": "high",
+                        "event_type": "personnel",
+                        "cnt": 1,
+                    },
                 ],
             ),
-            ("GROUP BY ticker, event_type", []),
         ]
     )
-    feeder = RealNewsScoreFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
+    feeder = RealNewsEventFeeder(engine=_FakeEngine(conn))  # type: ignore[arg-type]
     result = await feeder.fetch(date(2026, 4, 20), ["005930"])
-    assert result["005930"].score == 1.0
+    # contract 는 POSITIVE, geopolitical 은 RISK, personnel 은 둘 다 아님.
+    assert result["005930"].positive_events == ["contract"]
+    assert result["005930"].risk_events == ["geopolitical"]
 
 
 # --- RealSectorMomentumFeeder ---------------------------------------

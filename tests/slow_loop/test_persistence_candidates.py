@@ -95,7 +95,7 @@ async def test_persist_scout_run_serializes_context_snapshot():
         "as_of": "2026-04-20",
         "universe_size": 200,
         "universe_hash": "abcdef",
-        "news_scores": {"005930": {"score": 0.3, "staleness_hours": 2.0}},
+        "news_events": {"005930": {"score": 0.3, "staleness_hours": 2.0}},
         "sector_momentum": {"반도체": 0.05},
         "macro_size_multiplier": 1.0,
         "macro_run_id": "mr_20260420_0800_scheduled",
@@ -117,7 +117,7 @@ async def test_persist_scout_run_serializes_context_snapshot():
     ctx_payload = json.loads(params["ctx"])
     assert ctx_payload["universe_hash"] == "abcdef"
     assert ctx_payload["macro_run_id"] == "mr_20260420_0800_scheduled"
-    assert ctx_payload["news_scores"]["005930"]["score"] == 0.3
+    assert ctx_payload["news_events"]["005930"]["score"] == 0.3
 
 
 @pytest.mark.asyncio

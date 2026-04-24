@@ -279,7 +279,7 @@ async def persist_scout_run(
 ) -> None:
     """Scout 결과 1건을 scout_runs 에 upsert.
 
-    context_snapshot 은 Scout 코드 실행 입력(news_scores, sector_momentum,
+    context_snapshot 은 Scout 코드 실행 입력(news_events, sector_momentum,
     macro_size_multiplier, universe_hash 등)의 생성 시점 스냅샷이다. 백테스트
     재현 시 같은 코드 × 같은 입력을 복원하는 primary key — migration 012 의
     scout_runs.context_snapshot_json 컬럼.

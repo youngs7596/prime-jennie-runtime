@@ -62,23 +62,23 @@ class SentimentScore(BaseModel):
 
 EventType = Literal[
     # 기업 이벤트 (Corporate)
-    "earnings",            # 실적 발표 (매출/영업익/순익)
-    "mna",                 # 인수·합병·매각·지분
-    "lawsuit",             # 소송·손해배상·판결
-    "product",             # 신제품·상용화·출시
-    "personnel",           # 인사·선임·사임
-    "contract",            # 수주·계약·공급
-    "strike",              # 파업·노조·쟁의
+    "earnings",  # 실적 발표 (매출/영업익/순익)
+    "mna",  # 인수·합병·매각·지분
+    "lawsuit",  # 소송·손해배상·판결
+    "product",  # 신제품·상용화·출시
+    "personnel",  # 인사·선임·사임
+    "contract",  # 수주·계약·공급
+    "strike",  # 파업·노조·쟁의
     "shareholder_return",  # 배당·자사주·밸류업
-    "investment",          # 유상증자·회사채·자금조달
-    "bankruptcy",          # 상장폐지·워크아웃·회생
+    "investment",  # 유상증자·회사채·자금조달
+    "bankruptcy",  # 상장폐지·워크아웃·회생
     # 시장/거시 (Market/Macro)
-    "market_movement",     # 지수·거래량·투자자 심리
-    "geopolitical",        # 지정학 (이란/우크라이나/미중 무역)
-    "regulation",          # 규제·정책·승인·제재
+    "market_movement",  # 지수·거래량·투자자 심리
+    "geopolitical",  # 지정학 (이란/우크라이나/미중 무역)
+    "regulation",  # 규제·정책·승인·제재
     # 금융상품/분석 (Product/Analysis)
-    "fund_product",        # ETF/펀드 순자산·신상품·수익률
-    "analyst_rating",      # 증권사 리포트·목표가·매수의견
+    "fund_product",  # ETF/펀드 순자산·신상품·수익률
+    "analyst_rating",  # 증권사 리포트·목표가·매수의견
     # 분류 불가
     "other",
 ]
@@ -112,22 +112,3 @@ class NewsEvent(BaseModel):
 
     model: str = "stub"
     analyzed_at: datetime
-
-
-# ---------------------------------------------------------------------
-# Snapshot — Scout 공급용 ticker별 집계 결과 (호환 유지)
-# ---------------------------------------------------------------------
-
-
-class NewsScoreSnapshot(BaseModel):
-    """ScoutContext.news_scores[ticker] 로 흘러가는 ticker 스냅샷.
-
-    NewsScoreEntry 와 같은 필드지만 도메인 분리를 위해 별도 모델 — scout_feeder
-    가 NewsScoreEntry 로 환산.
-    """
-
-    ticker: str
-    score: Annotated[float, Field(ge=-1.0, le=1.0)]
-    timestamp: datetime
-    article_count: Annotated[int, Field(ge=0)]
-    staleness_hours: Annotated[float, Field(ge=0.0)]

@@ -14,8 +14,9 @@ Scout 코드 검증 닫힌 루프 (`slow_loop/scout/code_loop.py`) 가 3회 모�
   - **dry_run**: 메시지 포맷만 하고 실제 send 호출은 생략. 개발/스테이징 안전.
 
 이벤트 페이로드 스펙 (`code_loop.py` 의 두 emission 지점):
-  - 정상 escalate (라인 215~): attempts(int), last_error(str|None), early_break(str|None)
-  - no_output 케이스 (라인 202~): attempts=0, reason="no_output"
+  - 정상 escalate: attempts(int), last_error(str|None), early_break(str|None),
+    scout_run_id(str|None), code_hashes(list[str], 시도된 코드의 sha256[:16] 시퀀스)
+  - no_output 케이스: attempts=0, reason="no_output", scout_run_id, code_hashes=[]
 """
 
 from __future__ import annotations
@@ -89,6 +90,8 @@ class EscalateTelegramObserver:
         last_error = meta.get("last_error")
         early_break = meta.get("early_break")
         reason = meta.get("reason")  # no_output 케이스용
+        scout_run_id = meta.get("scout_run_id")
+        code_hashes = meta.get("code_hashes") or []
 
         # KST 시각 (event.timestamp 는 UTC). 타임존 정보 누락 대비 안전 처리.
         ts = event.timestamp
@@ -103,6 +106,8 @@ class EscalateTelegramObserver:
             header = f"🚨 Scout escalate ({attempts}회 모두 실패)"
 
         lines = [header, ""]
+        if scout_run_id:
+            lines.append(f"scout_run_id: {scout_run_id}")
         lines.append(f"attempts: {attempts if attempts is not None else 0}")
 
         if last_error:
@@ -114,6 +119,9 @@ class EscalateTelegramObserver:
 
         if early_break:
             lines.append(f"조기종료: {early_break}")
+
+        if code_hashes:
+            lines.append(f"code_hash 시퀀스: {' → '.join(code_hashes)}")
 
         lines.append(f"KST: {kst_str}")
         return "\n".join(lines)

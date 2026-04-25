@@ -169,3 +169,26 @@ async def test_kst_timestamp_conversion():
     await obs.emit(event)
 
     assert "KST: 2026-04-27 09:30:00" in bot.sent[0]
+
+
+@pytest.mark.asyncio
+async def test_emit_includes_scout_run_id_and_code_hashes():
+    """enriched emission: scout_run_id + code_hashes 시퀀스가 메시지에 포함."""
+    bot = _FakeBot()
+    obs = EscalateTelegramObserver(bot)
+    event = pj_event(
+        "pj.scout.escalate",
+        role="scout",
+        ok=False,
+        attempts=3,
+        last_error="invalid_return_type",
+        scout_run_id="sr_20260427_001",
+        code_hashes=["a1b2c3d4e5f60001", "b2c3d4e5f6010002", "c3d4e5f60102000a"],
+    )
+
+    await obs.emit(event)
+
+    assert len(bot.sent) == 1
+    msg = bot.sent[0]
+    assert "scout_run_id: sr_20260427_001" in msg
+    assert "code_hash 시퀀스: a1b2c3d4e5f60001 → b2c3d4e5f6010002 → c3d4e5f60102000a" in msg

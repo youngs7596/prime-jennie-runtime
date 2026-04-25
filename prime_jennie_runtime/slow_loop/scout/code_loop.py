@@ -98,6 +98,7 @@ async def generate_validated_code(
     screening_context: dict,
     observer: Observer,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    scout_run_id: str | None = None,
 ) -> ValidatedScoutResult:
     """Scout LLM ↔ sandbox 닫힌 루프.
 
@@ -200,7 +201,15 @@ async def generate_validated_code(
             strategy_tags_used=[],
         )
         await observer.emit(
-            pj_event("pj.scout.escalate", role="scout", ok=False, attempts=0, reason="no_output")
+            pj_event(
+                "pj.scout.escalate",
+                role="scout",
+                ok=False,
+                attempts=0,
+                reason="no_output",
+                scout_run_id=scout_run_id,
+                code_hashes=[],
+            )
         )
         return ValidatedScoutResult(
             scout_out=placeholder,
@@ -220,6 +229,8 @@ async def generate_validated_code(
             attempts=len(attempts),
             last_error=last.result.error,
             early_break=early_break_reason,
+            scout_run_id=scout_run_id,
+            code_hashes=[a.code_hash[:16] for a in attempts],
         )
     )
     return ValidatedScoutResult(

@@ -14,14 +14,32 @@ from .data_loader import load_daily_bars
 from .domain import BacktestConfig, DailyBar, SheetBacktestResult, Trade
 from .metrics import BacktestSummary, ReasonStats, format_report, summarize
 from .runner import simulate_sheet
+from .tool_adapter import (
+    BacktestConfigOverride,
+    BacktestToolAdapter,
+    BacktestToolAdapterArgs,
+    BacktestToolAdapterValue,
+    DailyBarPayload,
+    SheetResultPayload,
+    SummaryPayload,
+    TradeRecord,
+)
 
 __all__ = [
     "BacktestConfig",
+    "BacktestConfigOverride",
     "BacktestSummary",
+    "BacktestToolAdapter",
+    "BacktestToolAdapterArgs",
+    "BacktestToolAdapterValue",
     "DailyBar",
+    "DailyBarPayload",
     "ReasonStats",
     "SheetBacktestResult",
+    "SheetResultPayload",
+    "SummaryPayload",
     "Trade",
+    "TradeRecord",
     "format_report",
     "load_daily_bars",
     "simulate_sheet",

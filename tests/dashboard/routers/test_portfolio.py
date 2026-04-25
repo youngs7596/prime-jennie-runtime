@@ -42,6 +42,43 @@ async def test_summary_with_kis_mock(app):
             assert body["positions"][0]["stock_code"] == "005930"
 
 
+async def test_history_from_daily_asset_snapshots(app, session_factory):
+    """`/api/portfolio/history` 가 daily_asset_snapshots 테이블 행을 시간순으로 반환."""
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO daily_asset_snapshots "
+                "(snapshot_date, total_asset, cash_balance, stock_eval_amount, "
+                "position_count, total_profit_loss, realized_profit_loss) "
+                "VALUES "
+                "('2026-04-22', 200000000, 50000000, 150000000, 3, -1000000, 0), "
+                "('2026-04-23', 198000000, 50000000, 148000000, 3, -3000000, -500000), "
+                "('2026-04-24', 199500000, 50000000, 149500000, 3, -1500000, 0)"
+            )
+        )
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/portfolio/history?days=30")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert isinstance(body, list)
+        assert len(body) == 3
+        # 시간 오름차순
+        dates = [r["snapshot_date"][:10] for r in body]
+        assert dates == ["2026-04-22", "2026-04-23", "2026-04-24"]
+        assert body[1]["realized_profit_loss"] == -500000
+        assert body[2]["total_asset"] == 199500000
+
+
+async def test_history_empty_when_no_rows(app):
+    """daily_asset_snapshots 비어있으면 빈 리스트."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/portfolio/history?days=30")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
 async def test_performance_from_outcomes(app, session_factory):
     now = datetime.now(UTC)
     async with session_factory() as session:

@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from prime_jennie_runtime.screening_executor.schemas import ScreeningResult
+
 from .schemas import EntryHint, ScreeningCandidate
 
 
@@ -19,10 +21,14 @@ from .schemas import EntryHint, ScreeningCandidate
 class ScreeningInvoker(Protocol):
     """Scout 생성 코드를 실행해 후보 리스트를 돌려주는 인터페이스.
 
-    Stub/Real(Track D) 둘 다 이 시그니처만 지키면 slow_loop.pipeline이 swap 가능.
+    Stub/Real(Track D) 둘 다 이 시그니처를 지키면 slow_loop.pipeline 이 swap 가능.
+
+    - ``invoke``: 빈 리스트 fallback (운영 호환)
+    - ``run``: ScreeningResult 풍부한 형태 (검증 루프용 — error/details 노출)
     """
 
     async def invoke(self, code: str, context: dict) -> list[ScreeningCandidate]: ...
+    async def run(self, code: str, context: dict) -> ScreeningResult: ...
 
 
 @dataclass
@@ -61,3 +67,7 @@ class ScreeningToolAdapterStub:
     async def invoke(self, code: str, context: dict) -> list[ScreeningCandidate]:
         """실제 실행 대신 고정 candidates 반환. code/context는 무시."""
         return list(self.candidates)
+
+    async def run(self, code: str, context: dict) -> ScreeningResult:
+        """검증 루프용 — invoke 결과를 ok=True 로 wrap."""
+        return ScreeningResult(ok=True, candidates=list(self.candidates))

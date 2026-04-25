@@ -54,7 +54,7 @@ from sqlalchemy import text
 from prime_jennie_runtime.infra.config import PostgresConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
-from prime_jennie_runtime.slow_loop.pipeline import _run_pipeline_with_retry, _scout_pipeline
+from prime_jennie_runtime.slow_loop.scout.code_loop import generate_validated_code
 from prime_jennie_runtime.slow_loop.scout.context_builder import ScoutContextBuilder
 from prime_jennie_runtime.slow_loop.scout.feeders.real import (
     RealMarketSummaryFeeder,
@@ -246,31 +246,7 @@ async def _replay_one(
                 new_hash[:8],
             )
 
-    # Scout 재호출
-    res = await _run_pipeline_with_retry(
-        orch,
-        _scout_pipeline(scout_ctx),
-        NullObserver(),
-        role_name="scout",
-        user_request="scout replay",
-    )
-    try:
-        new_scout_out: ScoutOutput = res.state["scout"].payload_as(ScoutOutput)
-    except Exception as e:
-        logger.exception("scout role failed for %s", row.scout_run_id)
-        return {
-            "scout_run_id": row.scout_run_id,
-            "generated_at": row.generated_at.isoformat(),
-            "error": f"scout role failed: {e}",
-            "original": {
-                "hypothesis": row.hypothesis,
-                "code_hash": row.code_hash,
-                "candidates_count": row.candidates_count,
-                "candidate_tickers": row.original_candidate_tickers,
-            },
-        }
-
-    # market_data point-in-time 로드
+    # market_data point-in-time 로드 (검증 루프 안에서 sandbox 실행 시 필요)
     market_data = await load_market_data_records(
         engine,
         universe=scout_ctx.universe,
@@ -287,15 +263,21 @@ async def _replay_one(
         "market_data_records": market_data,
     }
 
-    # 새 code 실행
-    try:
-        new_candidates = await screening.invoke(new_scout_out.screening_code, screening_context)
-    except Exception as e:
-        logger.exception("screening execution failed for %s", row.scout_run_id)
-        new_candidates = []
-        screen_error: str | None = f"screening execution failed: {e}"
-    else:
-        screen_error = None
+    # Scout LLM ↔ sandbox 검증 닫힌 루프 (최대 3회)
+    validated = await generate_validated_code(
+        orch=orch,
+        scout_ctx=scout_ctx,
+        screening=screening,
+        screening_context=screening_context,
+        observer=NullObserver(),
+    )
+    new_scout_out: ScoutOutput = validated.scout_out
+    new_candidates = list(validated.result.candidates)
+    screen_error: str | None = None
+    if not validated.accepted:
+        screen_error = (
+            validated.result.error or validated.early_break_reason or "no_candidates_after_retries"
+        )
 
     new_code_hash = hashlib.sha256(new_scout_out.screening_code.encode("utf-8")).hexdigest()
 
@@ -318,6 +300,17 @@ async def _replay_one(
             "candidate_count": len(new_candidates),
             "candidates": [c.model_dump(mode="json") for c in new_candidates],
             "screening_error": screen_error,
+            "attempts": [
+                {
+                    "attempt_no": a.attempt_no,
+                    "code_hash": a.code_hash,
+                    "ok": a.result.ok,
+                    "error": a.result.error,
+                    "candidate_count": len(a.result.candidates),
+                }
+                for a in validated.attempts
+            ],
+            "early_break_reason": validated.early_break_reason,
         },
     }
 

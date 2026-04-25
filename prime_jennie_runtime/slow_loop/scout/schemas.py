@@ -72,6 +72,20 @@ class ScoutRunSummary(BaseModel):
     hit_rate: float | None = None  # 아직 체결 결과 없으면 None
 
 
+class CodeAttemptHint(BaseModel):
+    """동일 scout 호출 내 직전 시도의 실행 결과 — 재시도 시 LLM 에 주입.
+
+    sandbox 실행에서 발생한 에러 (NameError, invalid_return_type 등) 를 그대로
+    LLM 에게 보여줘서 같은 실수를 반복하지 않게 한다. SCOUT_CODE_GENERATION
+    재설계 (2026-04-25 검증 루프) 에서 신설.
+    """
+
+    attempt_no: Annotated[int, Field(ge=1)]
+    error: str  # ScreeningResult.error (예: "runtime_error", "invalid_return_type")
+    details: str  # ScreeningResult.details — traceback 또는 상세 메시지
+    code_excerpt: str  # 첫 ~30 줄 발췌 (전체는 길어서 truncate)
+
+
 # =====================================================================
 # Scout Context (LLM 호출 전 조립)
 # =====================================================================
@@ -89,6 +103,8 @@ class ScoutContext(BaseModel):
     previous_scout_runs: list[ScoutRunSummary] = Field(default_factory=list)
     strategy_tags_available: list[str]
     trigger_reason: str = "scheduled_0830"
+    # 같은 호출 내 재시도 시 직전 시도(들)의 실패 정보. 첫 시도엔 빈 리스트.
+    previous_attempts: list[CodeAttemptHint] = Field(default_factory=list)
 
 
 # =====================================================================

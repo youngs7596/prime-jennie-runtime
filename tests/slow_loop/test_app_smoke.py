@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 from prime_jennie_runtime.slow_loop import app as slow_app
 
 

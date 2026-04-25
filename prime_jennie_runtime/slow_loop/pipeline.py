@@ -366,13 +366,38 @@ async def run_slow_loop(
         trigger_reason=scout_trigger,
     )
 
-    async def _primary_scout():
-        return await _run_pipeline_with_retry(
-            comp.orchestrator,
-            _scout_pipeline(scout_ctx),
-            observer,
-            role_name="scout",
-            user_request="daily scout run",
+    # market_data 와 screening_context 를 검증 루프 호출 전에 미리 준비
+    # (검증 루프 안에서 sandbox 실행 시 필요)
+    market_data_records: list[dict] = []
+    if comp.db_engine is not None and scout_ctx.universe:
+        from .scout.market_data_loader import load_market_data_records
+
+        market_data_records = await load_market_data_records(
+            comp.db_engine,
+            universe=scout_ctx.universe,
+            as_of=as_of_date,
+            lookback_days=int(os.environ.get("SCOUT_MARKET_DATA_LOOKBACK_DAYS", "60")),
+        )
+
+    screening_context = {
+        "as_of": as_of_date.isoformat(),
+        "universe": scout_ctx.universe,
+        "news_events": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_events.items()},
+        "sector_momentum": scout_ctx.sector_momentum,
+        "macro_size_multiplier": post.output.size_multiplier,
+        "market_data_records": market_data_records,
+    }
+
+    async def _primary_scout_validated():
+        """Scout LLM ↔ sandbox 검증 닫힌 루프 (최대 3회)."""
+        from .scout.code_loop import generate_validated_code
+
+        return await generate_validated_code(
+            orch=comp.orchestrator,
+            scout_ctx=scout_ctx,
+            screening=comp.screening,
+            screening_context=screening_context,
+            observer=observer,
         )
 
     async def _shadow_scout():
@@ -410,11 +435,13 @@ async def run_slow_loop(
             logger.warning("scout shadow failed: %s", e)
             return {"error": f"{type(e).__name__}: {e}"}
 
-    scout_result, scout_shadow_payload = await asyncio.gather(
-        _primary_scout(), _shadow_scout(), return_exceptions=False
+    validated_scout, scout_shadow_payload = await asyncio.gather(
+        _primary_scout_validated(), _shadow_scout(), return_exceptions=False
     )
-    scout_out: ScoutOutput | None = scout_result.state["scout"].payload_as(ScoutOutput)
-    if scout_out is None:
+    scout_out: ScoutOutput = validated_scout.scout_out
+    scout_step_result = validated_scout.scout_step_result
+    if scout_step_result is None:
+        # scout LLM 호출 자체가 한 번도 성공 못함
         await observer.emit(pj_event("pj.scout.output_missing", role="scout", ok=False))
         return SlowLoopResult(macro_post=post, skipped_reason="scout_output_missing")
 
@@ -466,31 +493,10 @@ async def run_slow_loop(
         )
     )
 
-    # --- 3. Screening 실행 (Track D stub) ---
-    # JSON 직렬화 가능해야 subprocess/docker backend이 stdin으로 넘길 수 있다.
-    # (Stub은 무시하므로 어느 모드든 무해)
-    market_data_records: list[dict] = []
-    if comp.db_engine is not None and scout_ctx.universe:
-        from .scout.market_data_loader import load_market_data_records
-
-        market_data_records = await load_market_data_records(
-            comp.db_engine,
-            universe=scout_ctx.universe,
-            as_of=as_of_date,
-            lookback_days=int(os.environ.get("SCOUT_MARKET_DATA_LOOKBACK_DAYS", "60")),
-        )
-
-    screening_context = {
-        "as_of": as_of_date.isoformat(),
-        "universe": scout_ctx.universe,
-        "news_events": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_events.items()},
-        "sector_momentum": scout_ctx.sector_momentum,
-        "macro_size_multiplier": post.output.size_multiplier,
-        "market_data_records": market_data_records,
-    }
-
-    async def _primary_screen() -> list[ScreeningCandidate]:
-        return await comp.screening.invoke(scout_out.screening_code, screening_context)
+    # --- 3. Screening 결과 (검증 루프에서 이미 sandbox 실행 완료) ---
+    # primary candidates 는 검증 루프가 누적한 마지막 시도의 결과 그대로.
+    # shadow 는 별도 1회 실행 (shadow 는 검증 없이 비교 전용).
+    raw_candidates: list[ScreeningCandidate] = list(validated_scout.result.candidates)
 
     async def _shadow_screen() -> list[ScreeningCandidate]:
         """Shadow scout 가 생성한 Python 코드를 격리 실행해 후보 추출.
@@ -508,9 +514,7 @@ async def run_slow_loop(
             logger.exception("shadow screening failed")
             return []
 
-    raw_candidates, shadow_raw_candidates = await asyncio.gather(
-        _primary_screen(), _shadow_screen()
-    )
+    shadow_raw_candidates = await _shadow_screen()
 
     # Scout shadow 결과 구성 — DeepSeek 의 hypothesis + code + candidates 까지 포함
     scout_shadow_for_db: dict[str, Any] | None = None
@@ -559,7 +563,7 @@ async def run_slow_loop(
         scout_run_id=scout_run_id,
         generated_at=as_of_dt,
         scout_out=scout_out,
-        scout_step_result=scout_result.state["scout"],
+        scout_step_result=scout_step_result,
         prompt_chars=scout_prompt_chars,
         context_snapshot=scout_context_snapshot,
         shadow_result=scout_shadow_for_db,

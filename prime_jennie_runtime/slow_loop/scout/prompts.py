@@ -203,6 +203,33 @@ def build_user_prompt(ctx: ScoutContext) -> str:
         or "  (이전 run 없음)"
     )
 
+    # 같은 호출 내 재시도 컨텍스트 — sandbox 실행 실패 피드백을 LLM 에 직접 전달
+    retry_section = ""
+    if ctx.previous_attempts:
+        attempts_str = "\n\n".join(
+            (
+                f"### 시도 #{a.attempt_no} — 실패 사유: {a.error}\n"
+                f"세부 에러:\n```\n{a.details}\n```\n"
+                f"문제의 코드 (앞부분):\n```python\n{a.code_excerpt}\n```"
+            )
+            for a in ctx.previous_attempts
+        )
+        retry_section = f"""
+## ⚠️ 직전 시도 실패 — 같은 실수 반복 금지
+이전에 같은 컨텍스트로 코드를 생성했지만 sandbox 실행에서 실패했습니다.
+아래 실패 정보를 분석하고 **반드시 다른 방식으로** 코드를 작성하십시오.
+같은 코드를 다시 제출하면 fallback 으로 처리됩니다.
+
+{attempts_str}
+
+체크리스트 (반드시 적용):
+- 사용하는 모든 외부 모듈은 코드 첫머리에 import (예: `import numpy as np`)
+- `factors` dict 의 모든 value 는 **숫자 (int/float) 만**. 리스트·문자열·dict 금지
+- `entry_hint`, `exit_hint` 는 dict 또는 None 만 — 다른 타입 금지
+- 반환은 list[dict]. 각 dict 의 ticker/strategy_tag/conviction/entry_hint 필수
+
+"""
+
     return f"""다음 시장 상황에서 스크리닝 코드를 생성하십시오.
 
 ## 분석 기준일
@@ -238,7 +265,7 @@ Trigger: {ctx.trigger_reason}
 
 ## Universe 크기
 {len(ctx.universe)} 종목
-
+{retry_section}
 ---
 
 다음 형식의 JSON으로만 응답하십시오.

@@ -42,7 +42,6 @@ import redis.asyncio as aioredis
 from minyoung_mah import (
     NullHITLChannel,
     NullMemoryStore,
-    NullObserver,
     Orchestrator,
     RoleRegistry,
     TieredModelRouter,
@@ -50,11 +49,16 @@ from minyoung_mah import (
     default_resilience,
 )
 
-from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
+from prime_jennie_runtime.infra.observer_impl import (
+    CompositePJObserver,
+    StructlogPJObserver,
+)
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 from prime_jennie_runtime.position_sheet.schema import KST
 from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
+from prime_jennie_runtime.telegram_bot.bot import TelegramBot
 
 from .macro.context_builder import MacroContextBuilder
 from .macro.feeders.stub import (
@@ -72,6 +76,7 @@ from .scout.feeders.stub import (
     StubSectorMomentumFeeder,
     StubUniverseFeeder,
 )
+from .scout.observers import EscalateTelegramObserver
 from .scout.role import ScoutRole
 from .strategy.engine import StrategyEngine
 from .strategy.policy import load_policy
@@ -152,19 +157,43 @@ def _try_build_tiered_router() -> Any | None:
     }
 
 
+def _build_observer(telegram_cfg: TelegramConfig) -> object:
+    """Slow_loop observer 합성: structlog + (옵션) Telegram escalate hook.
+
+    텔레그램 토큰/chat_id 가 비어있으면 Telegram observer 는 등록하지 않는다 — fail-safe.
+    토큰이 있으면 ``pj.scout.escalate`` 이벤트가 텔레그램으로 즉시 알림 발송된다.
+    """
+    structlog_obs = StructlogPJObserver()
+
+    # Telegram 미설정 (토큰/chat_id 둘 중 하나라도 비어있음) → telegram observer skip
+    if not (telegram_cfg.bot_token and telegram_cfg.chat_id):
+        logger.info("Telegram bot_token/chat_id 미설정 — escalate 알림 비활성 (structlog only)")
+        return structlog_obs
+
+    bot = TelegramBot(telegram_cfg)
+    escalate_obs = EscalateTelegramObserver(bot, dry_run=telegram_cfg.dry_run)
+    logger.info(
+        "Slow_loop observer wired: structlog + telegram escalate (dry_run=%s)",
+        telegram_cfg.dry_run,
+    )
+    return CompositePJObserver(structlog_obs, escalate_obs)
+
+
 def _build_slow_loop_components(
     redis_client: aioredis.Redis,
     db_engine: Any = None,
+    telegram_cfg: TelegramConfig | None = None,
 ) -> SlowLoopComponents | None:
     """SlowLoopComponents 조립. tier 라우터 구성 실패 시 None.
 
     db_engine 이 주어지면 macro_runs/scout_runs 를 persist. None 이면 기록 없이 실행.
+    telegram_cfg 가 주어지면 ``pj.scout.escalate`` 이벤트가 텔레그램으로 라우팅된다.
     """
     tiers = _try_build_tiered_router()
     if tiers is None:
         return None
 
-    observer = NullObserver()
+    observer = _build_observer(telegram_cfg or TelegramConfig())
     orchestrator = Orchestrator(
         role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),
         tool_registry=ToolRegistry(),
@@ -287,7 +316,9 @@ async def run() -> None:
         engine = create_engine(cfg.postgres)
         stack.push_async_callback(engine.dispose)
 
-        components = _build_slow_loop_components(redis_client, db_engine=engine)
+        components = _build_slow_loop_components(
+            redis_client, db_engine=engine, telegram_cfg=cfg.telegram
+        )
         if components is None:
             logger.warning(
                 "slow_loop components 미구성 (VLLM_LLM_URL/MODEL 또는 langchain_openai 누락). "

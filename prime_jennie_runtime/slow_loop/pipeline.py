@@ -398,6 +398,7 @@ async def run_slow_loop(
             screening=comp.screening,
             screening_context=screening_context,
             observer=observer,
+            scout_run_id=scout_run_id,
         )
 
     async def _shadow_scout():

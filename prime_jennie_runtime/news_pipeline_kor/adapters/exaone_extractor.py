@@ -68,7 +68,22 @@ _PROMPT_TEMPLATE = """다음 한국 주식 뉴스에서 메타데이터를 JSON 
 - other: 위 15개 중 어디에도 명확히 속하지 않는 경우만
 
 ## 필드 정의
-- impact_level: {impact_levels} 중 하나 (주가 영향 크기)
+- impact_level: {impact_levels} 중 하나 (주가 영향 크기). **반드시 아래 기준에 따라 보수적으로**:
+  - high: 당일 ±5% 이상 가격 변동을 합리적으로 예상할 수 있는 사건만.
+    예) 어닝서프라이즈/쇼크, 상장폐지·법정관리, M&A 본 거래·지분 매각, 대형 수주(매출 대비 10%+),
+    임상 3상 결과, FDA 승인, 8% 이상 유상증자, 정부의 직접적 영업제한 규제,
+    호르무즈/대만/대규모 전쟁 같은 즉시 시장 충격 지정학.
+  - medium: 당일 ±1~5% 변동 예상. 정황상 영향이 분명하지만 한 분기 안에 흡수될 수준.
+    예) 증권사 목표가 변경/투자의견 조정, 부분파업/공급차질, 신상품 출시,
+    임원 인사·차기 회장 후보 부상, 코스피 일일 1~3% 등락, ETF 순자산 이슈,
+    중소형 수주, 소송 1심 결과(상고 예정), 행정지도/지침 수준 규제.
+  - low: 사실 기록 정도. 주가 영향 미미하거나 이미 반영된 정보.
+    예) 정기 IR 일정 공지, 임원 정기 승진, 일반적 시황·동향 코멘트,
+    증권사 단순 커버리지 개시, 컨센서스 부합 실적, 분기보고서 제출 사실 자체.
+  **판정 가이드**: 헤드라인이 충격성 표현("어닝쇼크", "폭락", "사상최대", "법정관리")을
+  쓰지 않고 사건 규모(액수·비중·시한)도 명시되지 않았다면 medium 이하로 내린다.
+  `매출 대비 10% 미만 수주`, `목표가 ±20% 미만 변경`, `노조 부분파업`, `1심 판결`
+  같은 케이스는 high 가 아니다.
 - sentiment: {sentiments} 중 하나
 - sentiment_score: -1.0~+1.0 (0=중립)
 - time_horizon: {horizons} 중 하나
@@ -104,7 +119,23 @@ _PROMPT_TEMPLATE = """다음 한국 주식 뉴스에서 메타데이터를 JSON 
 "sentiment_score":0.4,"time_horizon":"medium",
 "keywords":["타임폴리오","액티브 ETF","순자산","배당주"],
 "sector_tags":["금융"],
-"financial_signals":[{{"type":"dividend","direction":"up"}}],"confidence":0.85}}"""
+"financial_signals":[{{"type":"dividend","direction":"up"}}],"confidence":0.85}}
+
+## 예시 4 (medium — 증권사 단순 목표가 변경)
+입력: "한국투자증권, LG화학 목표주가 38만원 → 42만원 소폭 상향"
+출력: {{"event_type":"analyst_rating","impact_level":"medium","sentiment":"positive",
+"sentiment_score":0.3,"time_horizon":"medium",
+"keywords":["LG화학","한국투자증권","목표가","상향"],
+"sector_tags":["화학"],
+"financial_signals":[],"confidence":0.7}}
+
+## 예시 5 (low — 정기 IR 일정 사실 보도)
+입력: "한화에어로스페이스, 5월 14일 1분기 실적발표 컨퍼런스콜 개최 예정"
+출력: {{"event_type":"earnings","impact_level":"low","sentiment":"neutral",
+"sentiment_score":0.0,"time_horizon":"short",
+"keywords":["한화에어로스페이스","컨퍼런스콜","실적발표"],
+"sector_tags":["방산"],
+"financial_signals":[],"confidence":0.8}}"""
 
 CompletionFn = Callable[..., Awaitable[Any]]
 

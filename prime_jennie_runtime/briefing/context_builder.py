@@ -354,36 +354,11 @@ async def _collect_assets(conn, today: date) -> dict | None:
 
 
 async def _collect_watchlist(conn) -> list[dict]:
-    """최신 legacy_quant_scores 에서 is_final_selected Top 10."""
-    stmt = text(
-        """
-        SELECT stock_code, stock_name, hybrid_score, trade_tier
-        FROM legacy_quant_scores
-        WHERE score_date = (
-            SELECT MAX(score_date) FROM legacy_quant_scores
-            WHERE is_final_selected = TRUE AND is_active = TRUE
-        )
-        AND is_final_selected = TRUE
-        AND is_active = TRUE
-        ORDER BY hybrid_score DESC NULLS LAST
-        LIMIT 10
-        """
-    )
-    try:
-        rows = (await conn.execute(stmt)).mappings().all()
-    except Exception:
-        logger.warning("legacy_quant_scores 조회 실패 — 빈 워치리스트 반환", exc_info=True)
-        return []
-    return [
-        {
-            "stock_code": r["stock_code"],
-            "stock_name": r["stock_name"],
-            "hybrid_score": float(r["hybrid_score"]) if r["hybrid_score"] is not None else None,
-            "trade_tier": r["trade_tier"],
-            "rank": idx + 1,
-        }
-        for idx, r in enumerate(rows)
-    ]
+    """워치리스트 — v2 legacy_quant_scores 기반 Top 10 은 migration 016 으로
+    테이블이 drop 되면서 비워졌다. v3 는 scout_runs / screening_candidates
+    조합으로 워치리스트 의미가 흡수돼 별도 daily 워치리스트 잡을 두지 않음.
+    """
+    return []
 
 
 async def _collect_news(conn, today: date) -> list[dict]:

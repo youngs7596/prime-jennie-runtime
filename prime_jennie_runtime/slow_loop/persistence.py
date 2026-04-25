@@ -340,7 +340,7 @@ async def persist_scout_run(
         "hash": code_hash,
         "code": code_text,
         "hyp": scout_out.hypothesis,
-        "cnt": candidates_count if candidates_count is not None else scout_out.expected_candidates,
+        "cnt": candidates_count,
         "model": model_name,
         "pv": meta.get("prompt_version") or "v1",
         "cost": cost,

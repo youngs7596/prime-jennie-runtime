@@ -165,6 +165,51 @@ async def test_persist_scout_run_records_stats_even_when_engine_none():
 
 
 @pytest.mark.asyncio
+async def test_persist_scout_run_candidates_count_uses_actual_value():
+    """candidates_count 가 주어지면 그 값을 그대로 저장 — LLM 예측치(expected_candidates)
+    로 대체되지 않아야 한다.
+    """
+    conn = _FakeConn()
+    engine = _FakeEngine(conn)
+    scout_out = _scout_out()  # expected_candidates=0
+    await persist_scout_run(
+        engine,
+        scout_run_id="scout_x",
+        generated_at=datetime(2026, 4, 27, 8, 30),
+        scout_out=scout_out,
+        scout_step_result=None,
+        candidates_count=7,
+    )
+    _, params = conn.executed[0]
+    assert params["cnt"] == 7
+
+
+@pytest.mark.asyncio
+async def test_persist_scout_run_candidates_count_none_stores_null():
+    """candidates_count 미지정 시 NULL 로 저장 — expected_candidates fallback 제거됨."""
+    conn = _FakeConn()
+    engine = _FakeEngine(conn)
+    scout_out = ScoutOutput(
+        screening_code="def screen(m, c): return []\n",
+        hypothesis="h",
+        expected_candidates=15,  # fallback 으로 새지 않아야 함
+        factor_weights={"momentum": 1.0},
+        strategy_tags_used=["MOMENTUM"],
+        fallback_strategy="skip_today",
+        estimated_runtime_seconds=1.0,
+    )
+    await persist_scout_run(
+        engine,
+        scout_run_id="scout_x",
+        generated_at=datetime(2026, 4, 27, 8, 30),
+        scout_out=scout_out,
+        scout_step_result=None,
+    )
+    _, params = conn.executed[0]
+    assert params["cnt"] is None
+
+
+@pytest.mark.asyncio
 async def test_persist_scout_run_empty_context_defaults_to_empty_dict():
     conn = _FakeConn()
     engine = _FakeEngine(conn)

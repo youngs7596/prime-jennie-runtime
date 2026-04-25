@@ -446,8 +446,9 @@ async def run_slow_loop(
         await observer.emit(pj_event("pj.scout.output_missing", role="scout", ok=False))
         return SlowLoopResult(macro_post=post, skipped_reason="scout_output_missing")
 
-    # DB 기록 (engine=None 이면 no-op). candidates_count 는 screening 후 갱신되지 않으므로
-    # expected_candidates 로 대체.
+    # DB 기록 (engine=None 이면 no-op). candidates_count 는 screening 코드를
+    # sandbox 실행해 얻은 실제 후보 수 (raw_candidates) 로 채운다 — LLM 예측치
+    # (scout_out.expected_candidates) 는 모니터링 정확도를 떨어뜨려 사용 금지.
     from .scout.prompts import SCOUT_SYSTEM_PROMPT
     from .scout.prompts import build_user_prompt as _build_scout_user
 
@@ -565,6 +566,7 @@ async def run_slow_loop(
         generated_at=as_of_dt,
         scout_out=scout_out,
         scout_step_result=scout_step_result,
+        candidates_count=len(raw_candidates),
         prompt_chars=scout_prompt_chars,
         context_snapshot=scout_context_snapshot,
         shadow_result=scout_shadow_for_db,

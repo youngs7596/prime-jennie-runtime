@@ -38,10 +38,7 @@ EXPECTED_TABLES_AFTER_APPLY = {
     "scout_runs",
     "macro_runs",
     "meta_prs",
-    # 002
-    "legacy_signal_logs",
-    "legacy_trade_logs",
-    "legacy_quant_scores",
+    # 002 — legacy_signal_logs / legacy_trade_logs / legacy_quant_scores 는 migration 016 으로 drop
     # 003
     "daily_prices",
     "minute_prices",
@@ -61,16 +58,13 @@ EXPECTED_TABLES_AFTER_APPLY = {
     "stock_consensus",
     "index_daily_prices",
     "us_market_daily",
-    # 008
-    "daily_macro_insights",
-    "global_macro_snapshots",
+    # 008 — daily_macro_insights / global_macro_snapshots 는 migration 016 으로 drop
     # 009
     "positions",
     "daily_asset_snapshots",
     "watchlist_histories",
     "daily_quant_scores",
-    # 010
-    "legacy_news_sentiments",
+    # 010 — legacy_news_sentiments 는 migration 016 으로 drop
 }
 
 

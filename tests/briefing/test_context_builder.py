@@ -254,9 +254,11 @@ async def test_collect_briefing_data_assets_none_when_snapshot_stale():
 
 
 @pytest.mark.asyncio
-async def test_collect_briefing_data_watchlist_failure_returns_empty():
-    """legacy_quant_scores 테이블이 비어/없어도 전체가 실패하지 않는다."""
-    conn = _FakeConn(raise_on_prefix={"FROM legacy_quant_scores"})
+async def test_collect_briefing_data_watchlist_is_empty():
+    """legacy_quant_scores 가 migration 016 으로 drop 된 뒤 워치리스트는
+    무조건 빈 리스트 (v3 워치리스트 의미는 scout_runs/screening_candidates 가 흡수).
+    """
+    conn = _FakeConn()
     engine = _FakeEngine(conn)
     data = await collect_briefing_data(engine, as_of=date(2026, 4, 17))
     assert data["watchlist"] == []

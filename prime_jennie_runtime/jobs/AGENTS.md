@@ -20,7 +20,9 @@ news_pipeline_kor 3-stage Redis Stream 상시 소비) 는 이미 전용 runner �
 | `maintenance.py` | cleanup_old_data, update_naver_sectors, seed_stock_masters, contract_smoke_test |
 | `market_data.py` | collect_index_daily_prices, collect_us_market, collect_investor_trading, collect_foreign_holding, refresh_market_caps, collect_minute_chart (백테스트 상위30) |
 | `fundamentals.py` | collect_dart_filings, collect_consensus, collect_naver_roe, collect_quarterly_financials |
-| `analytics.py` | daily_asset_snapshot, analyze_ai_performance, analyst_feedback, weekly_factor_analysis |
+| `analytics.py` | (제거됨, migration 016 — analyze_ai_performance / analyst_feedback 는 legacy_trade_logs 와 함께 정리) |
+| `factor_analysis.py` | weekly_factor_analysis |
+| `asset_snapshot.py` | daily_asset_snapshot |
 | `council_macro.py` | macro_collect_global/korea, macro_validate_store, macro_quick (council_trigger/council_insight 는 slow_loop 전담 — 아래 참조) |
 | `positions.py` | sync_positions |
 | `briefing_glue.py` | daily_briefing_report (호출만 — 구현은 Track D briefing) |

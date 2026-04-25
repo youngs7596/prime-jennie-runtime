@@ -236,5 +236,267 @@
       "keywords_must_include": ["현대차", "파업"],
       "sector_tags_must_include": ["자동차"]
     }
+  },
+  {
+    "article_id": "eval-earnings-medium-01",
+    "ticker": "006400",
+    "title": "삼성SDI 1분기 영업익 4,200억 컨센서스 부합…2차전지 점유율 유지",
+    "body": "삼성SDI는 1분기 영업이익 4,200억원으로 시장 컨센서스 4,150억원과 부합했다고 25일 공시했다. 매출 5조9천억으로 전년 동기 대비 2% 증가. 신규 가이던스 제시 없이 기존 연간 실적 전망을 유지.",
+    "published_at": "2026-04-25T08:30:00+09:00",
+    "source_url": "https://eval.fixture/earnings-m-01",
+    "source_name": "이데일리",
+    "expected": {
+      "event_type": "earnings",
+      "impact_level": "medium",
+      "sentiment": "neutral",
+      "keywords_must_include": ["삼성SDI", "영업이익"],
+      "sector_tags_must_include": ["배터리"]
+    }
+  },
+  {
+    "article_id": "eval-analyst-medium-01",
+    "ticker": "035720",
+    "title": "메리츠증권, 카카오 목표주가 7만원 → 7만5천원 상향…콘텐츠 부문 회복",
+    "body": "메리츠증권은 카카오의 1분기 콘텐츠 매출 회복을 근거로 목표가를 7만원에서 7만5천원으로 상향했다. 투자의견 매수 유지. 변동률 7%.",
+    "published_at": "2026-04-23T08:00:00+09:00",
+    "source_url": "https://eval.fixture/analyst-m-01",
+    "source_name": "한경비즈니스",
+    "expected": {
+      "event_type": "analyst_rating",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["카카오", "목표가"]
+    }
+  },
+  {
+    "article_id": "eval-contract-medium-01",
+    "ticker": "034020",
+    "title": "두산에너빌리티, 베트남 가스터빈 800억 수주",
+    "body": "두산에너빌리티가 베트남 빈탄 가스복합화력 발전소에 가스터빈 1기를 800억원에 공급한다고 공시. 연 매출 대비 0.6% 수준이며 2027년 인도 예정.",
+    "published_at": "2026-04-22T11:00:00+09:00",
+    "source_url": "https://eval.fixture/contract-m-01",
+    "source_name": "전기신문",
+    "expected": {
+      "event_type": "contract",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["두산에너빌리티", "가스터빈"]
+    }
+  },
+  {
+    "article_id": "eval-product-medium-01",
+    "ticker": "051900",
+    "title": "LG생활건강, 후 신규 라인 5월 글로벌 동시 출시",
+    "body": "LG생활건강이 럭셔리 화장품 브랜드 '후'의 신규 안티에이징 라인 4종을 5월 1일 한국·중국·일본·미국에서 동시 출시한다. 초기 발주 물량 미공개. 연 매출 기여도 추정치 별도 제공 없음.",
+    "published_at": "2026-04-21T09:30:00+09:00",
+    "source_url": "https://eval.fixture/product-m-01",
+    "source_name": "패션비즈",
+    "expected": {
+      "event_type": "product",
+      "impact_level": "medium",
+      "sentiment": "positive",
+      "keywords_must_include": ["LG생활건강", "후"]
+    }
+  },
+  {
+    "article_id": "eval-lawsuit-medium-01",
+    "ticker": "068270",
+    "title": "셀트리온, 美 트룩시마 특허침해 1심 패소…2심 항소 예정",
+    "body": "셀트리온이 미국에서 진행 중인 트룩시마(리툭산 바이오시밀러) 특허침해 소송 1심에서 패소했다. 배상금 규모는 추후 별도 심리에서 결정. 셀트리온은 항소 방침.",
+    "published_at": "2026-04-20T17:00:00+09:00",
+    "source_url": "https://eval.fixture/lawsuit-m-01",
+    "source_name": "디지털타임스",
+    "expected": {
+      "event_type": "lawsuit",
+      "impact_level": "medium",
+      "sentiment": "negative",
+      "keywords_must_include": ["셀트리온", "특허"]
+    }
+  },
+  {
+    "article_id": "eval-regulation-medium-01",
+    "ticker": "035420",
+    "title": "공정위, 플랫폼 자율규제 가이드라인 발표…카카오·네이버 영향 제한",
+    "body": "공정거래위원회가 플랫폼 시장 자율규제 가이드라인을 발표했다. 강제력은 없는 권고 수준이지만 카카오·네이버 등 대형 플랫폼은 자체 준수 계획을 6개월 내 제출해야 한다.",
+    "published_at": "2026-04-19T14:00:00+09:00",
+    "source_url": "https://eval.fixture/regulation-m-01",
+    "source_name": "전자신문",
+    "expected": {
+      "event_type": "regulation",
+      "impact_level": "medium",
+      "sentiment": "negative",
+      "keywords_must_include": ["공정위", "플랫폼"]
+    }
+  },
+  {
+    "article_id": "eval-mna-medium-01",
+    "ticker": "004990",
+    "title": "롯데지주, 자회사 롯데글로벌로지스 지분 12% 1,500억에 일부 매각",
+    "body": "롯데지주가 자회사 롯데글로벌로지스 보유 지분 일부(12%)를 1,500억원에 사모펀드 IMM PE 에 매각한다. 경영권은 그대로 유지. 자금은 그룹 신성장동력 투자에 활용.",
+    "published_at": "2026-04-18T11:00:00+09:00",
+    "source_url": "https://eval.fixture/mna-m-01",
+    "source_name": "더벨",
+    "expected": {
+      "event_type": "mna",
+      "impact_level": "medium",
+      "sentiment": "neutral",
+      "keywords_must_include": ["롯데지주", "롯데글로벌로지스"]
+    }
+  },
+  {
+    "article_id": "eval-strike-medium-01",
+    "ticker": "005490",
+    "title": "포스코 노조, 임단협 결렬…단계적 부분파업 검토",
+    "body": "포스코 노조가 임단협 결렬을 선언하고 단계적 부분파업을 검토 중이다. 다음 주 중앙노동위원회 조정신청 결과에 따라 실제 파업 여부 결정. 직접 생산 차질은 아직 미발생.",
+    "published_at": "2026-04-17T10:00:00+09:00",
+    "source_url": "https://eval.fixture/strike-m-01",
+    "source_name": "철강금속신문",
+    "expected": {
+      "event_type": "strike",
+      "impact_level": "medium",
+      "sentiment": "negative",
+      "keywords_must_include": ["포스코", "노조"]
+    }
+  },
+  {
+    "article_id": "eval-earnings-low-01",
+    "ticker": "055550",
+    "title": "신한지주, 5월 13일 1분기 컨퍼런스콜 일정 공지",
+    "body": "신한지주는 1분기 실적발표 컨퍼런스콜을 5월 13일 오전 10시 개최한다고 공지했다. 별도 가이던스 변경은 없음.",
+    "published_at": "2026-04-25T16:00:00+09:00",
+    "source_url": "https://eval.fixture/earnings-l-01",
+    "source_name": "한국금융신문",
+    "expected": {
+      "event_type": "earnings",
+      "impact_level": "low",
+      "sentiment": "neutral",
+      "keywords_must_include": ["신한지주"]
+    }
+  },
+  {
+    "article_id": "eval-personnel-low-01",
+    "ticker": "086790",
+    "title": "하나금융지주, 자회사 대표 4명 정기 인사 단행",
+    "body": "하나금융지주가 6월 정기인사로 자회사 대표 4명을 교체했다. 경영권 분쟁 등 특이사항은 없으며 모두 그룹 내부 출신.",
+    "published_at": "2026-04-24T14:00:00+09:00",
+    "source_url": "https://eval.fixture/personnel-l-01",
+    "source_name": "이투데이",
+    "expected": {
+      "event_type": "personnel",
+      "impact_level": "low",
+      "sentiment": "neutral",
+      "keywords_must_include": ["하나금융"]
+    }
+  },
+  {
+    "article_id": "eval-analyst-low-01",
+    "ticker": "180640",
+    "title": "DB금융투자, 한진칼 신규 커버리지 개시…투자의견 보류",
+    "body": "DB금융투자가 한진칼에 대한 신규 커버리지를 개시했다. 첫 의견은 보류(Not Rated)이며 목표가 미제시. 향후 분기 실적 확인 후 투자의견 부여 예정.",
+    "published_at": "2026-04-23T08:30:00+09:00",
+    "source_url": "https://eval.fixture/analyst-l-01",
+    "source_name": "인포스탁",
+    "expected": {
+      "event_type": "analyst_rating",
+      "impact_level": "low",
+      "sentiment": "neutral",
+      "keywords_must_include": ["한진칼"]
+    }
+  },
+  {
+    "article_id": "eval-market-low-01",
+    "ticker": "069500",
+    "title": "코스피 상장사 1분기 자사주 매입 1.2조원 집계",
+    "body": "한국거래소 집계에 따르면 코스피 상장사 1분기 자사주 매입 규모는 1.2조원으로 전년 동기 대비 8% 증가. 평균 시가총액 비중은 0.4% 수준에 머물러 시장 전체 영향은 제한적.",
+    "published_at": "2026-04-22T15:00:00+09:00",
+    "source_url": "https://eval.fixture/market-l-01",
+    "source_name": "연합인포맥스",
+    "expected": {
+      "event_type": "market_movement",
+      "impact_level": "low",
+      "sentiment": "neutral",
+      "keywords_must_include": ["코스피"]
+    }
+  },
+  {
+    "article_id": "eval-earnings-shock-01",
+    "ticker": "373220",
+    "title": "LG에너지솔루션, 1분기 영업손실 5천억 어닝쇼크…시장 컨센 흑자 5천억서 반전",
+    "body": "LG에너지솔루션이 1분기 영업손실 5,000억원을 기록해 시장 컨센서스(영업이익 5,000억원 흑자)를 1조원 차이로 하회하는 어닝쇼크를 냈다. 폴란드 공장 화재로 인한 일시적 비용 + 유럽 EV 수요 둔화가 직격탄.",
+    "published_at": "2026-04-15T07:00:00+09:00",
+    "source_url": "https://eval.fixture/earnings-s-01",
+    "source_name": "이데일리",
+    "expected": {
+      "event_type": "earnings",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["LG에너지솔루션", "어닝쇼크"],
+      "sector_tags_must_include": ["배터리"]
+    }
+  },
+  {
+    "article_id": "eval-mna-mega-01",
+    "ticker": "000880",
+    "title": "한화그룹, 두산밥캣 인수 6.4조원 본계약 체결",
+    "body": "한화에어로스페이스 컨소시엄이 두산밥캣 경영권 지분 35%를 6.4조원에 인수하는 본계약을 체결했다고 25일 공시. 1년 내 기업결합심사 완료 예정. 인수 후 한화는 글로벌 건설장비 빅3 진입.",
+    "published_at": "2026-04-25T09:00:00+09:00",
+    "source_url": "https://eval.fixture/mna-h-01",
+    "source_name": "조선비즈",
+    "expected": {
+      "event_type": "mna",
+      "impact_level": "high",
+      "sentiment": "positive",
+      "keywords_must_include": ["한화", "두산밥캣"]
+    }
+  },
+  {
+    "article_id": "eval-bankruptcy-mega-01",
+    "ticker": "037620",
+    "title": "쌍방울 그룹, 4개 자회사 동시 회생절차 신청…코스닥 상장폐지 사유 발생",
+    "body": "쌍방울 그룹이 핵심 자회사 4곳에 대해 서울회생법원에 동시 회생절차를 신청했다고 25일 공시. 자본잠식률 평균 180%, 누적 영업손실 3천억. 해당 자회사 모두 코스닥 상장폐지 사유 발생.",
+    "published_at": "2026-04-25T11:00:00+09:00",
+    "source_url": "https://eval.fixture/bank-h-01",
+    "source_name": "파이낸셜뉴스",
+    "expected": {
+      "event_type": "bankruptcy",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["쌍방울", "회생"]
+    }
+  },
+  {
+    "article_id": "eval-regulation-severe-01",
+    "ticker": "036530",
+    "title": "정부, 가상자산 거래소 ISMS 미비 4개사 영업정지 처분",
+    "body": "금융위원회가 정보보호관리체계(ISMS) 인증을 갖추지 못한 가상자산 거래소 4개사에 대해 6개월 영업정지 처분을 내렸다. 해당 거래소는 신규 회원 가입 및 입금 전면 중단. 시장 점유율 합산 18% 규모.",
+    "published_at": "2026-04-24T10:00:00+09:00",
+    "source_url": "https://eval.fixture/regulation-h-01",
+    "source_name": "디지털데일리",
+    "expected": {
+      "event_type": "regulation",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["금융위", "가상자산"]
+    }
+  },
+  {
+    "article_id": "eval-geopolitical-tariff-01",
+    "ticker": "000660",
+    "title": "트럼프, 中 반도체 75품목 수출통제 추가…HBM·AI칩 직격",
+    "body": "미국 트럼프 행정부가 중국에 대한 반도체 수출통제 품목 75개를 추가 발표했다. HBM 관련 핵심 장비, AI 가속기 부품 등이 포함돼 SK하이닉스·삼성전자의 중국 매출 5조원 규모가 영향권.",
+    "published_at": "2026-04-23T22:00:00+09:00",
+    "source_url": "https://eval.fixture/geo-h-01",
+    "source_name": "한국경제",
+    "expected": {
+      "event_type": "geopolitical",
+      "impact_level": "high",
+      "sentiment": "negative",
+      "sentiment_score_sign": "negative",
+      "keywords_must_include": ["트럼프", "수출통제"],
+      "sector_tags_must_include": ["반도체"]
+    }
   }
 ]

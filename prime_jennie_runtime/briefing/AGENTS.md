@@ -25,7 +25,7 @@ Track D 소유 (Phase 2.10).
 - v2 `StockNewsSentimentDB` → v3 `news_sentiments` + `news_articles`
 - v2 `PortfolioRepository.get_positions` / `get_recent_trades` → v3 `position_sheets` + `executions` + `outcomes` 조합 (Phase 2.10 범위에선 outcomes 기반 sells만 채움)
 - v2 `MacroRepository.get_latest_insight` → v3 `macro_runs` 최신 row
-- v2 `WatchlistRepository.get_latest` → v3 `legacy_quant_scores` 최신 score_date + is_final_selected=true
+- v2 `WatchlistRepository.get_latest` → migration 016 으로 `legacy_quant_scores` 가 drop 된 뒤로는 빈 리스트 반환 (`_collect_watchlist`). v3 워치리스트 의미는 scout_runs / screening_candidates 가 흡수.
 - v2 `AssetSnapshotRepository` → v3 테이블 없음. 당분간 None (Track B 가 KIS snapshot 으로 채울 예정)
 
 ## 공개 API

@@ -81,6 +81,9 @@ class ServiceStatus(BaseModel):
     message: str | None = None
 
 
+_OK_LIKE_STATUSES = ("ok", "healthy", "alive", "up")
+
+
 async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatus:
     try:
         resp = await client.get(url)
@@ -90,10 +93,14 @@ async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatu
                 if resp.headers.get("content-type", "").startswith("application/json")
                 else {}
             )
+            raw_status = data.get("status", "healthy")
+            # 서비스마다 응답이 "ok" / "healthy" / "alive" 등으로 제각각이라 UI 카운트가
+            # "healthy" 만 세면 정상인 서비스도 unhealthy 로 보인다. 백엔드에서 통일.
+            status = "healthy" if str(raw_status).lower() in _OK_LIKE_STATUSES else str(raw_status)
             return ServiceStatus(
                 name=name,
                 url=url,
-                status=data.get("status", "healthy"),
+                status=status,
                 version=data.get("version"),
                 uptime_seconds=data.get("uptime_seconds"),
             )

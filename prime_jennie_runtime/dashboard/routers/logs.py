@@ -30,6 +30,9 @@ _SERVICES = [
     "telegram-bot",
     "dashboard",
     "monitor",
+    "job-worker",
+    "cloudflared",
+    "control-ui",
 ]
 
 

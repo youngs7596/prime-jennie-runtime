@@ -43,3 +43,31 @@ async def test_health_mixed(app, targets_env):
             by_name = {r["name"]: r for r in rows}
             assert by_name["kis-gateway"]["status"] == "healthy"
             assert by_name["slow-loop"]["status"] == "unreachable"
+
+
+async def test_health_normalizes_ok_to_healthy(app, targets_env):
+    """서비스가 `{"status":"ok"}` 또는 `{"status":"alive"}` 처럼 응답해도 백엔드가
+    "healthy" 로 정규화 — UI 의 "N/M healthy" 카운트가 ok-라벨 서비스를 빼먹지
+    않도록.
+    """
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("http://kis-gateway/health").mock(
+            return_value=Response(
+                200,
+                json={"status": "ok"},
+                headers={"content-type": "application/json"},
+            )
+        )
+        mock.get("http://slow-loop/health").mock(
+            return_value=Response(
+                200,
+                json={"status": "alive"},
+                headers={"content-type": "application/json"},
+            )
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/system/health")
+            rows = resp.json()
+            by_name = {r["name"]: r["status"] for r in rows}
+            assert by_name["kis-gateway"] == "healthy"
+            assert by_name["slow-loop"] == "healthy"

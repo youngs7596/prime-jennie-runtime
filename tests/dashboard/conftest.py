@@ -187,6 +187,18 @@ _SCHEMA_STATEMENTS = [
         duration_ms INTEGER
     )
     """,
+    # daily_asset_snapshots (migration 009)
+    """
+    CREATE TABLE IF NOT EXISTS daily_asset_snapshots (
+        snapshot_date DATE PRIMARY KEY,
+        total_asset BIGINT NOT NULL,
+        cash_balance BIGINT NOT NULL,
+        stock_eval_amount BIGINT NOT NULL,
+        position_count INTEGER NOT NULL,
+        total_profit_loss BIGINT,
+        realized_profit_loss BIGINT
+    )
+    """,
 ]
 
 

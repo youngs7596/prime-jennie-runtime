@@ -5,8 +5,8 @@ v2 원본: `prime_jennie/services/dashboard/routers/portfolio.py`
 v3 매핑:
 - 실시간 잔고: v3 KIS Gateway HTTP `/balance` 호출 (`KIS_GATEWAY_URL`)
 - 포지션 메타데이터: `position_sheets` (ticker/strategy_tag) + `outcomes` (closed_at IS NULL → 오픈)
-- 자산 스냅샷: v3 `daily_prices` 기반 일별 집계는 별도 job 에서 생성 예정.
-  현재는 KIS 잔고 단일 소스만 반환 (history 엔드포인트는 빈 배열).
+- 자산 스냅샷: `daily_asset_snapshots` (migration 009) — `job_worker.daily_asset_snapshot`
+  (15:45 KST cron) 이 매일 채운다. `/history` 가 그대로 노출.
 - 성과 요약: `outcomes` 기준 집계 (pnl_pct / pnl_krw).
 
 Redis 실시간 스냅샷 키(v2 `monitoring:live_positions`)는 v3 monitor 포팅 이후 연동.
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -169,10 +169,50 @@ async def get_live_positions(
     }
 
 
+def _to_snapshot_datetime(value: Any) -> datetime:
+    """asyncpg(Postgres)는 `date`, aiosqlite(test)는 `str` 로 돌려준다."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time())
+    return datetime.fromisoformat(str(value))
+
+
 @router.get("/history", response_model=list[DailySnapshot])
-async def get_history(days: int = 30) -> list[DailySnapshot]:
-    """자산 히스토리 — v3 별도 스냅샷 테이블 미구현. 빈 배열 반환 (UI 는 placeholder 처리)."""
-    return []
+async def get_history(
+    days: int = 30,
+    session: AsyncSession = Depends(get_session),
+) -> list[DailySnapshot]:
+    """자산 히스토리 — `daily_asset_snapshots` (migration 009) 의 최근 `days` 일분.
+
+    `job_worker.daily_asset_snapshot` (15:45 KST cron) 이 매일 1행씩 채운다.
+    오래된 → 최신 순으로 반환 (UI 차트가 시간순 직접 그릴 수 있도록).
+    """
+    since = (datetime.now(UTC) - timedelta(days=max(1, days))).date()
+    result = await session.execute(
+        text(
+            "SELECT snapshot_date, total_asset, cash_balance, "
+            "stock_eval_amount, realized_profit_loss "
+            "FROM daily_asset_snapshots "
+            "WHERE snapshot_date >= :since "
+            "ORDER BY snapshot_date ASC"
+        ),
+        {"since": since},
+    )
+    return [
+        DailySnapshot(
+            snapshot_date=_to_snapshot_datetime(row["snapshot_date"]),
+            total_asset=int(row["total_asset"] or 0),
+            cash_balance=int(row["cash_balance"] or 0),
+            stock_eval_amount=int(row["stock_eval_amount"] or 0),
+            realized_profit_loss=(
+                int(row["realized_profit_loss"])
+                if row["realized_profit_loss"] is not None
+                else None
+            ),
+        )
+        for row in result.mappings().all()
+    ]
 
 
 @router.get("/performance", response_model=PerformanceSummary)

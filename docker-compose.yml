@@ -425,6 +425,10 @@ services:
       dockerfile: infra/docker/Dockerfile.job_worker
     environment:
       <<: *common-env
+      # daily_asset_snapshot · refresh_market_caps · collect_minute_chart 등
+      # KIS 의존 잡이 호출. 누락되면 cfg default `http://localhost:8080` 으로
+      # 떨어져 ConnectError 가 매일 cron 시점에 재현된다 (04-20~30 9회 재현).
+      KIS_GATEWAY_URL: http://kis-gateway:8080
       # macro_collect_global/korea 는 BOK ECOS 키가 있을 때만 실제 호출.
       # 비어 있으면 jobs/app.py 가 None 으로 전달 → fallback 경로만 동작.
       BOK_ECOS_API_KEY: ${BOK_ECOS_API_KEY:-}

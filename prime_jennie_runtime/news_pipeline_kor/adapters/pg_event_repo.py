@@ -58,6 +58,8 @@ _RECENT_SELECT = (
     "ORDER BY analyzed_at DESC"
 )
 
+_EXISTING_IDS_SELECT = "SELECT article_id FROM news_events WHERE article_id = ANY($1::text[])"
+
 
 @dataclass
 class PostgresEventRepo:
@@ -97,6 +99,12 @@ class PostgresEventRepo:
             event.model,
             event.analyzed_at,
         )
+
+    async def existing_article_ids(self, article_ids: list[str]) -> set[str]:
+        if not article_ids:
+            return set()
+        rows = await self.conn.fetch(_EXISTING_IDS_SELECT, article_ids)
+        return {r["article_id"] for r in rows}
 
     async def recent_for_ticker(
         self,

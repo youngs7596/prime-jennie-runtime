@@ -53,6 +53,14 @@ class EventRepo(Protocol):
         now: datetime | None = None,
     ) -> list[NewsEvent]: ...
 
+    async def existing_article_ids(self, article_ids: list[str]) -> set[str]:
+        """주어진 ids 중 이미 분석된 것들의 집합. extractor 가 LLM 호출 전 사전 필터.
+
+        네이버가 옛 기사를 다시 노출하면 dedup TTL(3일) 만료로 stream 에 재진입하기 때문에,
+        article_id PK 로 PG 사전조회해 LLM 재호출을 막는다.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------
 # In-memory implementations
@@ -112,6 +120,14 @@ class InMemoryEventRepo:
         out = [e for e in bucket.values() if e.analyzed_at >= since]
         out.sort(key=lambda e: e.analyzed_at, reverse=True)
         return out
+
+    async def existing_article_ids(self, article_ids: list[str]) -> set[str]:
+        if not article_ids:
+            return set()
+        seen: set[str] = set()
+        for bucket in self._by_ticker.values():
+            seen.update(bucket.keys())
+        return {aid for aid in article_ids if aid in seen}
 
     def total_count(self) -> int:
         return sum(len(b) for b in self._by_ticker.values())

@@ -50,6 +50,7 @@ class CycleStats:
     crawled: int = 0
     deduped: int = 0  # stream 에 발행된 신규 기사 수
     extracted: int = 0  # news_events 로 upsert 성공 건수
+    skipped_existing: int = 0  # 이미 PG 에 분석된 article_id — LLM 호출 없이 ACK
     errors: list[str] = field(default_factory=list)
 
 
@@ -172,13 +173,38 @@ class NewsPipeline:
         if not parsed:
             return stats
 
+        # 이미 분석된 article_id 는 LLM 재호출 없이 즉시 ACK.
+        # 네이버가 옛 기사를 다시 노출하면 dedup TTL(3일) 만료로 stream 에 재진입하므로,
+        # PG 의 PK 만 단일 쿼리로 확인하면 vLLM GPU 시간을 크게 절약한다.
+        candidate_ids = [a.article_id for _, a in parsed]
+        try:
+            already_analyzed = await self.event_repo.existing_article_ids(candidate_ids)
+        except Exception as e:
+            logger.warning("existing_article_ids lookup failed, proceeding without skip: %s", e)
+            already_analyzed = set()
+
+        skipped_ack: list[Any] = []
+        to_extract: list[tuple[Any, NewsArticle]] = []
+        for msg_id, article in parsed:
+            if article.article_id in already_analyzed:
+                skipped_ack.append(msg_id)
+            else:
+                to_extract.append((msg_id, article))
+
+        stats.skipped_existing = len(skipped_ack)
+        if skipped_ack:
+            await _xack(redis_client, EXTRACTOR_GROUP, skipped_ack)
+
+        if not to_extract:
+            return stats
+
         results: list[NewsEvent | BaseException] = await asyncio.gather(
-            *(self._extract_one(a) for _, a in parsed),
+            *(self._extract_one(a) for _, a in to_extract),
             return_exceptions=True,
         )
 
         ack_ids: list[Any] = []
-        for (msg_id, article), result in zip(parsed, results, strict=True):
+        for (msg_id, article), result in zip(to_extract, results, strict=True):
             if isinstance(result, BaseException):
                 stats.errors.append(f"extract:{article.article_id}:{result}")
             else:

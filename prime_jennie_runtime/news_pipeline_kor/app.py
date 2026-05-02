@@ -185,10 +185,11 @@ async def _extractor_loop(
     while not stop.is_set():
         try:
             stats = await pipeline.extract_stream_once(sync_redis_client)
-            if stats.extracted > 0 or stats.errors:
+            if stats.extracted > 0 or stats.skipped_existing > 0 or stats.errors:
                 logger.info(
-                    "[extractor] processed=%d errors=%d",
+                    "[extractor] processed=%d skipped_existing=%d errors=%d",
                     stats.extracted,
+                    stats.skipped_existing,
                     len(stats.errors),
                 )
                 for err in stats.errors[:3]:

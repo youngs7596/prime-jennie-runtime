@@ -116,11 +116,6 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # Phase 2.14 real 전환 기간: KOSPI 20d vol 58% 상태 유지 시 high_volatility
-      # auto_override 가 항상 closed 로 잡혀 Scout phase 가 스킵됨. trading_flags:stop
-      # 으로 주문 이중 차단된 상태에서는 신호/코드/후보 축적이 우선이라 bypass 활성.
-      # 실 매매 재개 전에 반드시 이 env 를 제거 (또는 "0" 로 덮어씀).
-      MACRO_AUTO_OVERRIDE_DISABLED: ${MACRO_AUTO_OVERRIDE_DISABLED:-1}
       # Macro/Scout shadow 병렬 평가 — 2026-04-22 종료 (4일치 35 successful run 으로
       # DeepSeek Gate 100%/Size 86% 일치 확인됨). 모델 비교 재실행 필요 시 1 로.
       MACRO_SHADOW_ENABLED: ${MACRO_SHADOW_ENABLED:-0}

@@ -24,6 +24,7 @@ class StrategyEntry:
     base_pct: float
     max_notional_krw: int
     default_exit_rules: list[dict[str, Any]]
+    default_entry_conditions: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -56,5 +57,6 @@ def load_policy(path: Path | str | None = None) -> StrategyPolicy:
             base_pct=float(cfg["base_pct"]),
             max_notional_krw=int(cfg["max_notional_krw"]),
             default_exit_rules=list(cfg["default_exit_rules"]),
+            default_entry_conditions=list(cfg.get("default_entry_conditions", [])),
         )
     return StrategyPolicy(version=str(raw["policy_version"]), entries=entries)

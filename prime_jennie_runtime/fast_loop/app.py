@@ -29,6 +29,11 @@ from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
 from prime_jennie_runtime.fast_loop.gateway_subscriber import subscribe_on_startup
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
+from prime_jennie_runtime.fast_loop.pending_entry import (
+    EntryConditionEvaluator,
+    PendingEntryQueue,
+)
+from prime_jennie_runtime.fast_loop.persistence import PostgresTradeRecorder
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.tick_loop import TickLoop
 from prime_jennie_runtime.infra.config import AppConfig
@@ -145,18 +150,33 @@ async def run() -> None:
         restored = await tracker.load_from_redis()
         logger.info("position tracker restored %d active positions", restored)
 
+        pending_queue = PendingEntryQueue(redis_client)
+        pending_restored = await pending_queue.load_from_redis()
+        logger.info("pending entry queue restored %d sheets from redis", pending_restored)
+        entry_evaluator = EntryConditionEvaluator()
+
         notifier = Notifier(redis_client)
         system_state = SystemState(redis_client)
-
-        entry_executor = EntryExecutor(kis=kis, tracker=tracker, notifier=notifier)
-        exit_executor = ExitExecutor(kis=kis, tracker=tracker, notifier=notifier)
+        recorder = PostgresTradeRecorder(pool)
 
         sheet_fetcher = PostgresSheetFetcher(pool)
 
+        entry_executor = EntryExecutor(
+            kis=kis, tracker=tracker, notifier=notifier, recorder=recorder
+        )
+        exit_executor = ExitExecutor(
+            kis=kis,
+            tracker=tracker,
+            notifier=notifier,
+            recorder=recorder,
+            sheet_fetcher=sheet_fetcher,
+        )
+        sizer = BalanceAwareSizer(kis, system_state)
+
         sheet_consumer = PositionSheetConsumer(
             redis_client=redis_client,
-            entry_executor=entry_executor,
-            account_sizer=BalanceAwareSizer(kis, system_state),
+            pending_queue=pending_queue,
+            tracker=tracker,
             kis=kis,
         )
         await sheet_consumer.ensure_group()
@@ -166,6 +186,10 @@ async def run() -> None:
             tracker=tracker,
             exit_executor=exit_executor,
             sheet_fetcher=sheet_fetcher,
+            pending_queue=pending_queue,
+            entry_evaluator=entry_evaluator,
+            entry_executor=entry_executor,
+            account_sizer=sizer,
         )
         await tick_loop.ensure_group()
 
@@ -184,12 +208,20 @@ async def run() -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, _request_stop)
 
-        logger.info("fast_loop runner ready — starting sheet consumer + tick loop")
+        logger.info("fast_loop runner ready — starting sheet consumer + tick loop + purge loop")
         consumer_task = asyncio.create_task(sheet_consumer.run(), name="sheet-consumer")
         tick_task = asyncio.create_task(tick_loop.run(), name="tick-loop")
+        purge_task = asyncio.create_task(
+            pending_queue.purge_loop(interval_sec=60.0), name="pending-purge"
+        )
 
         done, pending = await asyncio.wait(
-            {consumer_task, tick_task, asyncio.create_task(stop_event.wait())},
+            {
+                consumer_task,
+                tick_task,
+                purge_task,
+                asyncio.create_task(stop_event.wait()),
+            },
             return_when=asyncio.FIRST_COMPLETED,
         )
         for t in pending:

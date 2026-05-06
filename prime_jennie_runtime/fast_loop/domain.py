@@ -81,6 +81,7 @@ class TickData:
     """1틱 가격 이벤트.
 
     exit rule 평가에 필요한 최소 정보. 1분봉 지표(rsi_1m)는 상위에서 미리 계산.
+    bid/ask 는 entry condition `spread_under_bps` 평가용 (KIS H0STCNT0 호가1).
     """
 
     ticker: str
@@ -88,6 +89,8 @@ class TickData:
     ts: datetime
     rsi_1m: float | None = None  # overextension_exit 평가용
     volume: float | None = None
+    bid: float | None = None
+    ask: float | None = None
 
 
 @dataclass

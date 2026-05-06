@@ -306,11 +306,21 @@ class KISWebSocketStreamer:
             stock_code = fields[0]
             price = fields[2]
             high = fields[5]
-            volume = fields[10] if len(fields) > 10 else "0"
+            # KIS H0STCNT0 표준: 10=ASKP1(매도1), 11=BIDP1(매수1), 13=ACML_VOL(누적거래량)
+            ask = fields[10] if len(fields) > 10 else "0"
+            bid = fields[11] if len(fields) > 11 else "0"
+            volume = fields[13] if len(fields) > 13 else "0"
 
             await self._redis.xadd(
                 STREAM_PRICES,
-                {"code": stock_code, "price": price, "high": high, "vol": volume},
+                {
+                    "code": stock_code,
+                    "price": price,
+                    "high": high,
+                    "ask": ask,
+                    "bid": bid,
+                    "vol": volume,
+                },
                 maxlen=PRICE_STREAM_MAXLEN,
                 approximate=True,
             )

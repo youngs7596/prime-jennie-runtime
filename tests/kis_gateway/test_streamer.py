@@ -100,7 +100,13 @@ async def test_handle_tick_writes_to_redis(fake_redis):
         redis_client=fake_redis, app_key="k", app_secret="s", is_paper=True
     )
     # KIS 실시간 체결가 포맷: 0|H0STCNT0|001|<fields>
-    fields = ["005930", "090000", "71200", "0", "100", "71500", "0", "0", "0", "0", "50"]
+    # H0STCNT0: [0]code [1]time [2]price [3]vrss_sign [4]vrss [5]ctrt
+    #           [6]wgt_avg [7]open [8]high [9]low [10]ask1 [11]bid1
+    #           [12]contract_vol [13]accumulated_vol
+    fields = [
+        "005930", "090000", "71200", "0", "100", "71500",
+        "0", "0", "0", "0", "71210", "71190", "10", "50",
+    ]
     msg = "0|H0STCNT0|001|" + "^".join(fields)
 
     await streamer._handle_message(ws=FakeWebSocket([]), message=msg)
@@ -110,6 +116,8 @@ async def test_handle_tick_writes_to_redis(fake_redis):
     _mid, data = entries[0]
     assert data[b"code"] == b"005930"
     assert data[b"price"] == b"71200"
+    assert data[b"ask"] == b"71210"
+    assert data[b"bid"] == b"71190"
     assert data[b"vol"] == b"50"
 
 

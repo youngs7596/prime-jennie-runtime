@@ -9,7 +9,7 @@ from prime_jennie_runtime.slow_loop.strategy.policy import load_policy
 
 def test_load_default_policy():
     policy = load_policy()
-    assert policy.version == "v3.0.1"
+    assert policy.version == "v3.0.2"
 
 
 def test_all_four_tags_present():
@@ -46,3 +46,12 @@ def test_sector_momentum_has_profit_floor():
     assert pf is not None
     assert pf["activate_pct"] == 0.15
     assert pf["floor_pct"] == 0.10
+
+
+def test_all_strategies_have_default_entry_conditions():
+    """v3.0.2 도입 — 모든 strategy 가 호가 안전장치(spread_under_bps) 부착."""
+    policy = load_policy()
+    for tag in ("GAP_UP_REBOUND", "SECTOR_MOMENTUM", "EARNINGS_DRIFT", "MEAN_REVERT_RSI"):
+        entry = policy.get(tag)
+        types = {c["type"] for c in entry.default_entry_conditions}
+        assert "spread_under_bps" in types, f"{tag} missing spread_under_bps default"

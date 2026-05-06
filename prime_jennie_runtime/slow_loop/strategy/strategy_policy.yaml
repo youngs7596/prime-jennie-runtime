@@ -1,18 +1,26 @@
-# Strategy Policy v3.0.1 — strategy_tag별 base_pct와 기본 exit rules.
+# Strategy Policy v3.0.2 — strategy_tag별 base_pct, exit rules, entry conditions.
 # Strategy Engine이 ScreeningCandidate를 PositionSheet로 조립할 때 참고.
-# base_pct, max_notional_krw, exit rule 파라미터 모두 영석이 수동 관리.
+# base_pct, max_notional_krw, exit rule, entry condition 파라미터 모두 영석이 수동 관리.
 #
 # 참고:
 # - v2 실증: Breakeven +3%→+0.3%, Profit Floor +15%→+10%, Death Cross MA5/MA20 min_loss 1%
-# - POSITION_SHEET_SPEC §5.3 권장 순서대로 rule 배열
+# - POSITION_SHEET_SPEC §4.2 / §5.3 권장 순서대로 rule 배열
 # - fixed_sl, time_stop은 모든 정책에 반드시 포함
+# - default_entry_conditions: scout entry_hint 의 conditions_hint 가 비어있을 때 보강.
+#   현재는 호가 안전장치 (spread_under_bps) 만 부착 — KIS H0STCNT0 호가1 기반.
+#   volume_over_ma20 는 ma20 lookup 미구현이라 보류 (별도 단계).
+#   strict 한 시그널 기반 (price_above breakout 등) 도입은 v2 scanner reference + 운영
+#   데이터 누적 후 점진 추가.
 
-policy_version: "v3.0.1"
+policy_version: "v3.0.2"
 
 strategies:
   GAP_UP_REBOUND:
     base_pct: 0.05
     max_notional_krw: 5000000
+    default_entry_conditions:
+      - type: spread_under_bps
+        max_bps: 20
     default_exit_rules:
       - type: trailing_tp
         activate_pct: 0.05
@@ -28,6 +36,9 @@ strategies:
   SECTOR_MOMENTUM:
     base_pct: 0.05
     max_notional_krw: 5000000
+    default_entry_conditions:
+      - type: spread_under_bps
+        max_bps: 20
     default_exit_rules:
       - type: profit_floor
         activate_pct: 0.15
@@ -51,6 +62,9 @@ strategies:
   EARNINGS_DRIFT:
     base_pct: 0.03
     max_notional_krw: 3000000
+    default_entry_conditions:
+      - type: spread_under_bps
+        max_bps: 15
     default_exit_rules:
       - type: trailing_tp
         activate_pct: 0.07
@@ -64,6 +78,9 @@ strategies:
   MEAN_REVERT_RSI:
     base_pct: 0.03
     max_notional_krw: 3000000
+    default_entry_conditions:
+      - type: spread_under_bps
+        max_bps: 15
     default_exit_rules:
       - type: fixed_tp
         pct: 0.04

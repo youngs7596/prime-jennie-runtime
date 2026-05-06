@@ -1,8 +1,15 @@
-"""Tick Loop — kis:prices Stream 소비 → 활성 포지션마다 exit 평가.
+"""Tick Loop — kis:prices Stream 소비.
 
-KIS Gateway가 WebSocket에서 받은 가격 이벤트를 STREAM_PRICES에 발행하면,
-이 루프가 consumer group으로 읽고 ticker에 해당하는 active sheet를 찾아
-exit_evaluator로 평가. 매칭된 ExitDecision은 exit_executor로 실행.
+매 tick 당 다음 두 path 를 평가:
+
+1. ``exit_evaluator`` — 보유 중 (``PositionTracker``) 인 ticker 의 active sheet 들에
+   대해 9종 exit rule 평가. 매칭 시 ``ExitExecutor`` 로 매도.
+2. ``entry_condition_evaluator`` — ``PendingEntryQueue`` 에 적재된 같은 ticker 의
+   시트들에 대해 ``EntryCondition`` (price_below/above 등) 재평가. 통과 시
+   ``account_sizer`` 로 수량 계산 후 ``EntryExecutor`` 로 매수. 성공이면 큐에서
+   제거. 미체결/실패 시 큐 유지 → 다음 tick 재시도.
+
+POSITION_SHEET_SPEC §4.1 / §4.3 의 "valid_until 내 재평가" 의미가 여기 구현됨.
 """
 
 from __future__ import annotations
@@ -10,13 +17,18 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
 from prime_jennie_runtime.fast_loop.domain import TickData
+from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_evaluator import evaluate as evaluate_exit
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
+from prime_jennie_runtime.fast_loop.pending_entry import (
+    EntryConditionEvaluator,
+    PendingEntryQueue,
+)
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.infra.redis_streams import STREAM_PRICES
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
@@ -25,10 +37,18 @@ logger = logging.getLogger(__name__)
 
 # 시트 조회 콜백 — sheet_id → 해당 시트. 캐시 구현은 호출자 책임.
 SheetFetcher = Callable[[str], Awaitable[list[PositionSheet]]]
+AccountSizer = Callable[[PositionSheet], Awaitable[int]]
+Clock = Callable[[], datetime]
+
+
+def _default_clock() -> datetime:
+    return datetime.now(UTC)
 
 
 class TickLoop:
-    """STREAM_PRICES 소비. 한 tick당 ticker의 모든 active sheet 평가."""
+    """STREAM_PRICES 소비. 한 tick 당 ticker 의 active sheet (exit) +
+    pending sheet (entry condition 재평가) 를 모두 처리.
+    """
 
     def __init__(
         self,
@@ -36,7 +56,12 @@ class TickLoop:
         tracker: PositionTracker,
         exit_executor: ExitExecutor,
         sheet_fetcher: SheetFetcher,
+        pending_queue: PendingEntryQueue,
+        entry_evaluator: EntryConditionEvaluator,
+        entry_executor: EntryExecutor,
+        account_sizer: AccountSizer,
         *,
+        clock: Clock = _default_clock,
         group: str = "fast_loop_ticks",
         consumer: str = "fast_loop_tick_1",
         stream: str = STREAM_PRICES,
@@ -46,6 +71,11 @@ class TickLoop:
         self._tracker = tracker
         self._exit_executor = exit_executor
         self._sheet_fetcher = sheet_fetcher
+        self._queue = pending_queue
+        self._entry_evaluator = entry_evaluator
+        self._entry_executor = entry_executor
+        self._sizer = account_sizer
+        self._clock = clock
         self._group = group
         self._consumer = consumer
         self._stream = stream
@@ -95,10 +125,16 @@ class TickLoop:
         if tick is None:
             return
 
+        # ── exit path: 보유 중 시트 평가 ──
+        await self._evaluate_exits(tick)
+
+        # ── entry path: pending 큐 시트 conditions 재평가 ──
+        await self._evaluate_pending_entries(tick)
+
+    async def _evaluate_exits(self, tick: TickData) -> None:
         sheet_ids = self._tracker.sheet_ids_for(tick.ticker)
         if not sheet_ids:
             return
-
         for sheet_id in sheet_ids:
             state = self._tracker.get(sheet_id)
             if state is None:
@@ -109,10 +145,70 @@ class TickLoop:
             sheet = sheets[0]
             decision = evaluate_exit(sheet, state, tick)
             if decision is None:
-                await self._tracker.persist(sheet_id)  # state가 변경됐을 수 있음 (high_watermark)
+                # state 변경 가능 (high_watermark 등) 만 persist
+                await self._tracker.persist(sheet_id)
+                continue
+            await self._exit_executor.execute(state, decision)
+
+    async def _evaluate_pending_entries(self, tick: TickData) -> None:
+        pending_sheets = self._queue.snapshot_for_ticker(tick.ticker)
+        if not pending_sheets:
+            return
+
+        now = self._clock()
+        for sheet in pending_sheets:
+            # 평가 전 보유 dedup 재확인 (동시성 안전)
+            if self._tracker.sheet_ids_for(sheet.ticker):
+                logger.info(
+                    "pending entry skipped (now holding): ticker=%s sheet=%s",
+                    sheet.ticker,
+                    sheet.sheet_id,
+                )
+                await self._queue.remove(sheet.sheet_id)
                 continue
 
-            await self._exit_executor.execute(state, decision)
+            result = self._entry_evaluator.evaluate(sheet, tick, now=now)
+            if not result.passed:
+                logger.debug(
+                    "pending entry conditions not met: sheet=%s reason=%s",
+                    sheet.sheet_id,
+                    result.reason,
+                )
+                # entry.valid_until 만료면 큐에서 제거
+                if result.reason == "entry_valid_until_expired":
+                    await self._queue.remove(sheet.sheet_id)
+                continue
+
+            # 통과 → 매수 실행
+            try:
+                qty = await self._sizer(sheet)
+            except Exception:
+                logger.exception("account_sizer failed sheet=%s", sheet.sheet_id)
+                continue
+            if qty <= 0:
+                logger.info(
+                    "pending entry skipped qty<=0 sheet=%s ticker=%s",
+                    sheet.sheet_id,
+                    sheet.ticker,
+                )
+                continue
+
+            outcome = await self._entry_executor.execute(sheet, quantity=qty)
+            if outcome.success:
+                logger.info(
+                    "pending entry filled: sheet=%s ticker=%s qty=%d price=%.2f",
+                    sheet.sheet_id,
+                    sheet.ticker,
+                    outcome.filled_qty,
+                    outcome.filled_price,
+                )
+                await self._queue.remove(sheet.sheet_id)
+            else:
+                logger.warning(
+                    "pending entry failed: sheet=%s reason=%s — leaving in queue for retry",
+                    sheet.sheet_id,
+                    outcome.reason,
+                )
 
 
 def _parse_tick(data: dict) -> TickData | None:
@@ -121,15 +217,21 @@ def _parse_tick(data: dict) -> TickData | None:
     if raw_payload is None:
         # 일부 streamer는 개별 필드로 발행할 수 있음
         try:
-            ticker = _decode(data, "ticker") or _decode(data, "stock_code")
+            ticker = _decode(data, "ticker") or _decode(data, "stock_code") or _decode(data, "code")
             price = _decode(data, "price")
             ts = _decode(data, "ts")
+            volume = _decode(data, "vol") or _decode(data, "volume")
+            ask = _decode(data, "ask")
+            bid = _decode(data, "bid")
             if ticker is None or price is None:
                 return None
             return TickData(
                 ticker=ticker,
                 price=float(price),
                 ts=_parse_ts(ts),
+                volume=float(volume) if volume is not None else None,
+                ask=_safe_float(ask),
+                bid=_safe_float(bid),
             )
         except Exception:
             logger.exception("tick parse failed")
@@ -143,12 +245,26 @@ def _parse_tick(data: dict) -> TickData | None:
         logger.warning("tick payload not json")
         return None
     return TickData(
-        ticker=str(obj.get("ticker") or obj.get("stock_code")),
+        ticker=str(obj.get("ticker") or obj.get("stock_code") or obj.get("code")),
         price=float(obj["price"]),
         ts=_parse_ts(obj.get("ts")),
         rsi_1m=obj.get("rsi_1m"),
-        volume=obj.get("volume"),
+        volume=obj.get("volume") or obj.get("vol"),
+        ask=_safe_float(obj.get("ask")),
+        bid=_safe_float(obj.get("bid")),
     )
+
+
+def _safe_float(v: object) -> float | None:
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f <= 0:
+        return None
+    return f
 
 
 def _decode(data: dict, key: str) -> str | None:
@@ -162,12 +278,8 @@ def _decode(data: dict, key: str) -> str | None:
 
 def _parse_ts(raw: str | None) -> datetime:
     if raw is None:
-        from datetime import UTC
-
         return datetime.now(UTC)
     try:
         return datetime.fromisoformat(raw)
     except ValueError:
-        from datetime import UTC
-
         return datetime.now(UTC)

@@ -1,20 +1,24 @@
 """Position Sheet Consumer — v3:position_sheets Stream 구독.
 
-Slow loop가 발행한 시트를 소비하여 entry_executor에 전달.
+Slow loop 가 발행한 시트를 소비하여 ``PendingEntryQueue`` 에 적재한다.
+실제 매수는 ``TickLoop`` 가 매 tick 마다 conditions 를 재평가하여 만족 시점에
+``EntryExecutor`` 를 호출한다 (POSITION_SHEET_SPEC §4.1 / §4.3).
 
-수량 계산은 호출자가 제공하는 `account_sizer`에 위임 (계좌 잔고 * final_pct / current_price).
-Phase 1은 단순 stub으로 시작 가능.
+Dedup 가드:
+    - 같은 ticker 가 이미 ``PositionTracker`` 에 보유 중이면 reject
+    - 같은 ticker 의 시트가 이미 큐에 있으면 reject
+    - 시트가 큐에 적재되면 KIS streamer 에 ticker subscribe 요청 (tick 수신 보장)
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 
 import redis.asyncio as aioredis
 
-from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor, EntryOutcome
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
+from prime_jennie_runtime.fast_loop.pending_entry import PendingEntryQueue
+from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.infra.redis_streams import (
     STREAM_POSITION_SHEETS,
     TypedStreamConsumer,
@@ -23,28 +27,26 @@ from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
 logger = logging.getLogger(__name__)
 
-AccountSizer = Callable[[PositionSheet], Awaitable[int]]
-
 
 class PositionSheetConsumer:
-    """v3:position_sheets → entry_executor 호출."""
+    """v3:position_sheets → PendingEntryQueue 적재."""
 
     def __init__(
         self,
         redis_client: aioredis.Redis,
-        entry_executor: EntryExecutor,
-        account_sizer: AccountSizer,
+        pending_queue: PendingEntryQueue,
+        tracker: PositionTracker,
         kis: KisClient,
         *,
         group: str = "fast_loop",
         consumer: str = "fast_loop_1",
-        subscribe_on_entry: bool = True,
+        subscribe_on_enqueue: bool = True,
     ):
         self._redis = redis_client
-        self._entry = entry_executor
-        self._sizer = account_sizer
+        self._queue = pending_queue
+        self._tracker = tracker
         self._kis = kis
-        self._subscribe_on_entry = subscribe_on_entry
+        self._subscribe_on_enqueue = subscribe_on_enqueue
         self._consumer = TypedStreamConsumer(
             redis_client,
             STREAM_POSITION_SHEETS,
@@ -66,18 +68,45 @@ class PositionSheetConsumer:
         self._consumer.stop()
 
     async def _handle(self, sheet: PositionSheet) -> None:
-        try:
-            qty = await self._sizer(sheet)
-        except Exception:
-            logger.exception("account_sizer failed sheet=%s", sheet.sheet_id)
+        # 1) ticker dedup — 보유 중이면 reject
+        if self._tracker.sheet_ids_for(sheet.ticker):
+            logger.info(
+                "sheet rejected (already holding): ticker=%s sheet=%s",
+                sheet.ticker,
+                sheet.sheet_id,
+            )
             return
 
-        if qty <= 0:
-            logger.info("entry skipped qty<=0 sheet=%s", sheet.sheet_id)
+        # 2) ticker dedup — 이미 큐에 같은 ticker 시트 있으면 reject
+        if self._queue.contains_ticker(sheet.ticker):
+            logger.info(
+                "sheet rejected (ticker already pending): ticker=%s sheet=%s",
+                sheet.ticker,
+                sheet.sheet_id,
+            )
             return
 
-        outcome: EntryOutcome = await self._entry.execute(sheet, quantity=qty)
-        if outcome.success and self._subscribe_on_entry:
+        # 3) 큐 적재 — 같은 sheet_id 가 이미 있으면 noop
+        added = await self._queue.add(sheet)
+        if not added:
+            logger.info(
+                "sheet rejected (sheet_id already in queue): sheet=%s",
+                sheet.sheet_id,
+            )
+            return
+
+        logger.info(
+            "sheet enqueued for entry condition evaluation: ticker=%s sheet=%s "
+            "trigger=%s n_conditions=%d valid_until=%s",
+            sheet.ticker,
+            sheet.sheet_id,
+            sheet.entry.trigger,
+            len(sheet.entry.conditions),
+            sheet.entry.valid_until.isoformat(),
+        )
+
+        # 4) tick 수신을 위해 KIS streamer 에 ticker subscribe
+        if self._subscribe_on_enqueue:
             try:
                 await self._kis.subscribe([sheet.ticker])
             except Exception:

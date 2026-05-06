@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from prime_jennie_runtime.fast_loop.domain import PositionState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
+from prime_jennie_runtime.fast_loop.persistence import NoopTradeRecorder, TradeRecorder
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.schemas import TradeNotification
 from prime_jennie_runtime.kis_gateway.schemas import OrderRequest
@@ -51,6 +52,7 @@ class EntryExecutor:
         kis: KisClient,
         tracker: PositionTracker,
         notifier: Notifier,
+        recorder: TradeRecorder | None = None,
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 3.0,
@@ -58,6 +60,7 @@ class EntryExecutor:
         self._kis = kis
         self._tracker = tracker
         self._notifier = notifier
+        self._recorder: TradeRecorder = recorder or NoopTradeRecorder()
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
 
@@ -127,6 +130,14 @@ class EntryExecutor:
             high_watermark=filled_price,
         )
         await self._tracker.register(state)
+
+        # PG persist (executions + positions)
+        await self._recorder.record_buy(
+            sheet,
+            filled_qty=filled_qty,
+            filled_price=filled_price,
+            executed_at=now,
+        )
 
         # 알림 발행
         await self._notifier.emit(

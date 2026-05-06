@@ -78,8 +78,16 @@ def _sheet(sheet_id: str = "ps_20260416_005930_e2e1") -> PositionSheet:
 
 @pytest.mark.asyncio
 async def test_full_flow_sheet_to_entry_to_exit(fake_redis):
-    """Slow loop 시트 발행 → Fast loop entry → 가격 하락 tick → fixed_sl 청산."""
+    """Slow loop 시트 발행 → consumer 가 큐 적재 → 첫 tick 에서 entry condition
+    재평가 → 통과 시 entry → 가격 하락 tick → fixed_sl 청산."""
+    from prime_jennie_runtime.fast_loop.pending_entry import (
+        EntryConditionEvaluator,
+        PendingEntryQueue,
+    )
+
     tracker = PositionTracker(fake_redis)
+    queue = PendingEntryQueue(fake_redis)
+    evaluator = EntryConditionEvaluator()
     notifier = Notifier(fake_redis)
     kis = FakeKisClient(fill_price=70000.0)
     entry_exec = EntryExecutor(kis, tracker, notifier)
@@ -90,39 +98,66 @@ async def test_full_flow_sheet_to_entry_to_exit(fake_redis):
     publisher = TypedStreamPublisher(fake_redis, STREAM_POSITION_SHEETS, PositionSheet)
     await publisher.publish(sheet)
 
-    # 2. Fast loop consumer가 시트 소비 → entry
-    async def sizer(s: PositionSheet) -> int:
-        return 10
-
+    # 2. Fast loop consumer 가 시트 소비 → 큐 적재 (즉시 매수 X)
     consumer = PositionSheetConsumer(
-        fake_redis, entry_exec, sizer, kis, group="e2e_fl", consumer="e2e_c1"
+        fake_redis, queue, tracker, kis, group="e2e_fl", consumer="e2e_c1"
     )
     await consumer.ensure_group()
     await consumer._handle(sheet)
 
-    # 체결 + 추적 등록 확인
-    state = tracker.get(sheet.sheet_id)
-    assert state is not None
-    assert state.entry_price == 70000.0
-    assert state.quantity == 10
+    assert queue.contains_sheet(sheet.sheet_id) is True
+    assert kis.buy_calls == []
+    assert tracker.get(sheet.sheet_id) is None
     assert kis.subscribe_calls == [["005930"]]
 
-    # 3. KIS Gateway가 가격 tick 발행 (-6%) — fixed_sl 트리거 예상
-    kis.fill_price = 65800.0  # sell 체결가
+    # 3. tick 도착 → conditions=[] 라 즉시 entry
+    async def sizer(s: PositionSheet) -> int:
+        return 10
 
     async def fetch(sid: str) -> list[PositionSheet]:
         return [sheet] if sid == sheet.sheet_id else []
 
+    frozen = datetime(2026, 4, 16, 9, 30, tzinfo=KST)
     loop = TickLoop(
         fake_redis,
         tracker,
         exit_exec,
         fetch,
+        queue,
+        evaluator,
+        entry_exec,
+        sizer,
+        clock=lambda: frozen,
         group="e2e_tl",
         consumer="e2e_tl1",
     )
     await loop.ensure_group()
 
+    # entry tick — 70000 (조건 없음 → 즉시 entry)
+    await fake_redis.xadd(
+        STREAM_PRICES,
+        {
+            "payload": json.dumps(
+                {"ticker": "005930", "price": 70000.0, "ts": "2026-04-16T09:30:00+09:00"}
+            )
+        },
+    )
+    messages = await fake_redis.xreadgroup(
+        "e2e_tl", "e2e_tl1", {STREAM_PRICES: ">"}, count=1, block=100
+    )
+    for _s, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+    # entry 발사 + tracker 등록 + 큐에서 제거
+    state = tracker.get(sheet.sheet_id)
+    assert state is not None
+    assert state.entry_price == 70000.0
+    assert state.quantity == 10
+    assert queue.contains_sheet(sheet.sheet_id) is False
+
+    # 4. 가격 하락 tick (-6%) → fixed_sl 트리거
+    kis.fill_price = 65800.0
     await fake_redis.xadd(
         STREAM_PRICES,
         {
@@ -138,11 +173,11 @@ async def test_full_flow_sheet_to_entry_to_exit(fake_redis):
         for msg_id, data in entries:
             await loop.process_one(msg_id, data)
 
-    # 4. exit 체결 + tracker 제거 확인
+    # 5. exit 체결 + tracker 제거 확인
     assert tracker.get(sheet.sheet_id) is None
     assert len(kis.sell_calls) == 1
 
-    # 5. notifications 스트림: entry_filled + exit_filled 두 건
+    # 6. notifications 스트림: entry_filled + exit_filled 두 건
     notifs_len = await fake_redis.xlen(STREAM_NOTIFICATIONS)
     assert notifs_len == 2
 

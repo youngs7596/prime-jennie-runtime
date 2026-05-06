@@ -10,15 +10,18 @@ per-sheet 수량/상태 관리.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from prime_jennie_runtime.fast_loop.domain import ExitDecision, PositionState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
+from prime_jennie_runtime.fast_loop.persistence import NoopTradeRecorder, TradeRecorder
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.schemas import TradeNotification
 from prime_jennie_runtime.kis_gateway.schemas import OrderRequest
+from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,8 @@ class ExitExecutor:
         kis: KisClient,
         tracker: PositionTracker,
         notifier: Notifier,
+        recorder: TradeRecorder | None = None,
+        sheet_fetcher: Callable[[str], Awaitable[list[PositionSheet]]] | None = None,
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 2.0,
@@ -49,6 +54,8 @@ class ExitExecutor:
         self._kis = kis
         self._tracker = tracker
         self._notifier = notifier
+        self._recorder: TradeRecorder = recorder or NoopTradeRecorder()
+        self._sheet_fetcher = sheet_fetcher
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
 
@@ -124,6 +131,18 @@ class ExitExecutor:
             await self._tracker.close(state.sheet_id)
         else:
             await self._tracker.persist(state.sheet_id)
+
+        # PG persist — executions INSERT + positions UPDATE/DELETE
+        if self._sheet_fetcher is not None:
+            sheets = await self._sheet_fetcher(state.sheet_id)
+            if sheets:
+                await self._recorder.record_sell(
+                    sheets[0],
+                    filled_qty=filled_qty,
+                    filled_price=filled_price,
+                    executed_at=now,
+                    reason=decision.reason,
+                )
 
         await self._notifier.emit(
             TradeNotification(

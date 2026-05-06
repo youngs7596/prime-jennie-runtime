@@ -187,13 +187,17 @@ class StrategyEngine:
             max_notional_krw=entry.max_notional_krw,
         )
 
-        # 5. entry 조립 — Scout entry_hint 반영
+        # 5. entry 조립 — Scout entry_hint 반영. conditions_hint 가 비어있으면
+        # 정책의 default_entry_conditions 로 보강 (호가 안전장치 등).
         entry_valid_until = _entry_valid_until(inputs.generated_at)
+        scout_conditions = list(candidate.entry_hint.conditions_hint or [])
+        if not scout_conditions and entry.default_entry_conditions:
+            scout_conditions = [dict(c) for c in entry.default_entry_conditions]
         entry_section = EntrySection(
             trigger=candidate.entry_hint.trigger,
             price=candidate.entry_hint.price_hint,
             valid_until=entry_valid_until,
-            conditions=candidate.entry_hint.conditions_hint,  # type: ignore[arg-type]
+            conditions=scout_conditions,  # type: ignore[arg-type]
         )
 
         # 6. exit 조립 — Scout exit_hint 있으면 그것, 없으면 policy 기본값

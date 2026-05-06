@@ -1,4 +1,8 @@
-"""PositionSheetConsumer + TickLoop 통합 단위 테스트."""
+"""PositionSheetConsumer + TickLoop 통합 단위 테스트.
+
+POSITION_SHEET_SPEC §4.1 / §4.3 의 흐름 (시트 → 큐 적재 → tick 마다 conditions
+재평가 → 만족 시 entry) 을 검증.
+"""
 
 from __future__ import annotations
 
@@ -11,24 +15,30 @@ from prime_jennie_runtime.fast_loop.consumer import PositionSheetConsumer
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
 from prime_jennie_runtime.fast_loop.notifier import Notifier
+from prime_jennie_runtime.fast_loop.pending_entry import (
+    EntryConditionEvaluator,
+    PendingEntryQueue,
+)
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.tick_loop import TickLoop
-from prime_jennie_runtime.infra.redis_streams import (
-    STREAM_POSITION_SHEETS,
-    TypedStreamPublisher,
-)
 from prime_jennie_runtime.position_sheet.schema import KST, PositionSheet
 
 from .fakes import FakeKisClient
 
 
-def _sheet(sheet_id: str = "ps_20260416_005930_a3f2", sl_pct: float = 0.05) -> PositionSheet:
+def _sheet(
+    sheet_id: str = "ps_20260416_005930_a3f2",
+    sl_pct: float = 0.05,
+    *,
+    ticker: str = "005930",
+    conditions: list[dict] | None = None,
+) -> PositionSheet:
     now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)
     return PositionSheet(
         sheet_id=sheet_id,
         generated_at=now,
         valid_until=now + timedelta(hours=6),
-        ticker="005930",
+        ticker=ticker,
         strategy_tag="SECTOR_MOMENTUM",
         size={
             "base_pct": 0.05,
@@ -41,6 +51,7 @@ def _sheet(sheet_id: str = "ps_20260416_005930_a3f2", sl_pct: float = 0.05) -> P
             "trigger": "limit",
             "price": 70000,
             "valid_until": now + timedelta(hours=1),
+            "conditions": conditions or [],
         },
         exit={
             "rules": [
@@ -64,56 +75,119 @@ def _sheet(sheet_id: str = "ps_20260416_005930_a3f2", sl_pct: float = 0.05) -> P
 
 
 # =====================================================================
-# Position Sheet Consumer
+# Position Sheet Consumer — 시트 → 큐 적재
 # =====================================================================
 
 
 @pytest.mark.asyncio
-async def test_sheet_consumer_triggers_entry_and_subscribe(fake_redis):
+async def test_sheet_consumer_enqueues_and_subscribes(fake_redis):
+    """시트 도착 시 즉시 매수 X, pending queue 적재 + subscribe."""
     tracker = PositionTracker(fake_redis)
-    notifier = Notifier(fake_redis)
+    queue = PendingEntryQueue(fake_redis)
     kis = FakeKisClient(fill_price=70000.0)
-    entry_exec = EntryExecutor(kis, tracker, notifier)
 
-    async def sizer(sheet: PositionSheet) -> int:
-        return 10
+    consumer = PositionSheetConsumer(fake_redis, queue, tracker, kis)
 
-    publisher = TypedStreamPublisher(fake_redis, STREAM_POSITION_SHEETS, PositionSheet)
     sheet = _sheet()
-    await publisher.publish(sheet)
-
-    consumer = PositionSheetConsumer(
-        fake_redis, entry_exec, sizer, kis, group="test_fl", consumer="c1"
-    )
-    await consumer.ensure_group()
-
-    # 한 번만 처리하기 위해 internal handler 직접 호출
     await consumer._handle(sheet)
 
-    assert len(kis.buy_calls) == 1
-    assert tracker.get(sheet.sheet_id) is not None
+    # 즉시 매수 안 함
+    assert kis.buy_calls == []
+    # 큐에 적재됨
+    assert queue.contains_sheet(sheet.sheet_id) is True
     # subscribe 호출
     assert kis.subscribe_calls == [["005930"]]
 
 
 @pytest.mark.asyncio
-async def test_sheet_consumer_zero_qty_skips(fake_redis):
+async def test_sheet_consumer_dedups_when_holding(fake_redis):
+    """이미 보유 중인 ticker 의 시트는 거부."""
     tracker = PositionTracker(fake_redis)
-    notifier = Notifier(fake_redis)
+    queue = PendingEntryQueue(fake_redis)
     kis = FakeKisClient()
-    entry_exec = EntryExecutor(kis, tracker, notifier)
 
-    async def sizer(sheet: PositionSheet) -> int:
+    # 보유 중 상태 등록
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    state = PositionState(
+        sheet_id="existing_sheet",
+        ticker="005930",
+        entry_price=70000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+    )
+    await tracker.register(state)
+
+    consumer = PositionSheetConsumer(fake_redis, queue, tracker, kis)
+    await consumer._handle(_sheet())
+
+    assert queue.size() == 0
+    assert kis.subscribe_calls == []
+
+
+@pytest.mark.asyncio
+async def test_sheet_consumer_dedups_when_ticker_already_pending(fake_redis):
+    """같은 ticker 의 다른 시트가 이미 큐에 있으면 두 번째 시트 거부."""
+    tracker = PositionTracker(fake_redis)
+    queue = PendingEntryQueue(fake_redis)
+    kis = FakeKisClient()
+
+    consumer = PositionSheetConsumer(fake_redis, queue, tracker, kis)
+
+    s1 = _sheet("ps_20260416_005930_a3f2")
+    s2 = _sheet("ps_20260416_005930_b1c3")  # 같은 ticker, 다른 sheet_id
+    await consumer._handle(s1)
+    await consumer._handle(s2)
+
+    assert queue.size() == 1
+    # 첫 번째 시트만 적재
+    assert queue.contains_sheet(s1.sheet_id) is True
+    assert queue.contains_sheet(s2.sheet_id) is False
+    # subscribe 도 첫 번째만
+    assert kis.subscribe_calls == [["005930"]]
+
+
+# =====================================================================
+# Tick Loop — exit path
+# =====================================================================
+
+
+def _build_tick_loop(fake_redis, *, exit_executor, sheet_fetcher, **overrides):
+    """TickLoop 시그니처가 길어 헬퍼로 분리. 기본 fake 큐/evaluator 주입."""
+    queue = overrides.pop("pending_queue", PendingEntryQueue(fake_redis))
+    evaluator = overrides.pop("entry_evaluator", EntryConditionEvaluator())
+    entry_exec = overrides.pop("entry_executor", None)
+    sizer = overrides.pop(
+        "account_sizer",
+        _make_zero_sizer(),
+    )
+    return TickLoop(
+        fake_redis,
+        overrides.pop("tracker"),
+        exit_executor,
+        sheet_fetcher,
+        queue,
+        evaluator,
+        entry_exec,
+        sizer,
+        **overrides,
+    )
+
+
+def _frozen_clock(when: datetime):
+    """장 개장 후 시각으로 고정된 clock — entry path 테스트용."""
+
+    def clock():
+        return when
+
+    return clock
+
+
+def _make_zero_sizer():
+    async def sizer(_sheet):
         return 0
 
-    consumer = PositionSheetConsumer(fake_redis, entry_exec, sizer, kis)
-    await consumer._handle(_sheet())
-    assert kis.buy_calls == []
-
-
-# =====================================================================
-# Tick Loop
-# =====================================================================
+    return sizer
 
 
 @pytest.mark.asyncio
@@ -123,10 +197,10 @@ async def test_tick_loop_triggers_exit_on_stop_loss(fake_redis):
     notifier = Notifier(fake_redis)
     kis = FakeKisClient(fill_price=66000.0)
     exit_exec = ExitExecutor(kis, tracker, notifier)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
 
     sheet = _sheet(sl_pct=0.05)
 
-    # 수동으로 entry 후 상태 (consumer 건너뛰고 직접 등록)
     from prime_jennie_runtime.fast_loop.domain import PositionState
 
     state = PositionState(
@@ -142,10 +216,17 @@ async def test_tick_loop_triggers_exit_on_stop_loss(fake_redis):
     async def fetch(sheet_id: str):
         return [sheet] if sheet_id == sheet.sheet_id else []
 
-    loop = TickLoop(fake_redis, tracker, exit_exec, fetch, group="tick_g1", consumer="tc1")
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        entry_executor=entry_exec,
+        group="tick_g1",
+        consumer="tc1",
+    )
     await loop.ensure_group()
 
-    # STREAM_PRICES에 tick 발행
     await fake_redis.xadd(
         "kis:prices",
         {
@@ -158,8 +239,6 @@ async def test_tick_loop_triggers_exit_on_stop_loss(fake_redis):
             )
         },
     )
-
-    # 한 번 읽어서 처리
     messages = await fake_redis.xreadgroup(
         "tick_g1", "tc1", {"kis:prices": ">"}, count=1, block=100
     )
@@ -167,18 +246,17 @@ async def test_tick_loop_triggers_exit_on_stop_loss(fake_redis):
         for msg_id, data in entries:
             await loop.process_one(msg_id, data)
 
-    # exit 실행됨 → tracker에서 제거
     assert tracker.get(state.sheet_id) is None
     assert len(kis.sell_calls) == 1
 
 
 @pytest.mark.asyncio
 async def test_tick_loop_no_match_persists_state(fake_redis):
-    """가격 변동이 rule 트리거하지 않으면 state만 갱신 (high_watermark)."""
     tracker = PositionTracker(fake_redis)
     notifier = Notifier(fake_redis)
     kis = FakeKisClient()
     exit_exec = ExitExecutor(kis, tracker, notifier)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
 
     sheet = _sheet(sl_pct=0.10)
 
@@ -197,10 +275,17 @@ async def test_tick_loop_no_match_persists_state(fake_redis):
     async def fetch(sheet_id: str):
         return [sheet]
 
-    loop = TickLoop(fake_redis, tracker, exit_exec, fetch, group="tg2", consumer="tc2")
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        entry_executor=entry_exec,
+        group="tg2",
+        consumer="tc2",
+    )
     await loop.ensure_group()
-    # ts 를 sheet 와 같은 날짜 (eod 전)로 고정 — 오늘 날짜에 따라 time_stop 이
-    # 우발적으로 트리거되는 것을 방지.
+
     tick_ts = datetime(2026, 4, 16, 10, 0, 0, tzinfo=KST).isoformat()
     await fake_redis.xadd(
         "kis:prices",
@@ -211,8 +296,125 @@ async def test_tick_loop_no_match_persists_state(fake_redis):
         for msg_id, data in entries:
             await loop.process_one(msg_id, data)
 
-    # 여전히 active
     updated = tracker.get(state.sheet_id)
     assert updated is not None
     assert updated.high_watermark == 71000.0
     assert kis.sell_calls == []
+
+
+# =====================================================================
+# Tick Loop — entry path (pending queue 재평가)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_entry_fires_when_conditions_empty(fake_redis):
+    """conditions=[] 시트는 첫 tick 에 즉시 entry."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=70000.0)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+    queue = PendingEntryQueue(fake_redis)
+
+    sheet = _sheet(conditions=[])
+    await queue.add(sheet)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    async def sizer(_s):
+        return 5
+
+    frozen = datetime(2026, 4, 16, 9, 30, tzinfo=KST)
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        pending_queue=queue,
+        entry_executor=entry_exec,
+        account_sizer=sizer,
+        clock=_frozen_clock(frozen),
+        group="tg_e1",
+        consumer="tce1",
+    )
+    await loop.ensure_group()
+
+    await fake_redis.xadd(
+        "kis:prices",
+        {
+            "payload": json.dumps(
+                {
+                    "ticker": "005930",
+                    "price": 70000.0,
+                    "ts": frozen.isoformat(),
+                }
+            )
+        },
+    )
+    messages = await fake_redis.xreadgroup("tg_e1", "tce1", {"kis:prices": ">"}, count=1, block=100)
+    for _s, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+    assert len(kis.buy_calls) == 1
+    assert tracker.get(sheet.sheet_id) is not None
+    assert queue.contains_sheet(sheet.sheet_id) is False
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_entry_blocked_when_price_below_fails(fake_redis):
+    """price_below 조건 미만족 시 entry 보류, 큐에 남음."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=70000.0)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+    queue = PendingEntryQueue(fake_redis)
+
+    # 70500 미만일 때만 진입 — tick 71000 이면 fail
+    sheet = _sheet(conditions=[{"type": "price_below", "value": 70500}])
+    await queue.add(sheet)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    async def sizer(_s):
+        return 5
+
+    frozen = datetime(2026, 4, 16, 9, 30, tzinfo=KST)
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        pending_queue=queue,
+        entry_executor=entry_exec,
+        account_sizer=sizer,
+        clock=_frozen_clock(frozen),
+        group="tg_e2",
+        consumer="tce2",
+    )
+    await loop.ensure_group()
+
+    await fake_redis.xadd(
+        "kis:prices",
+        {
+            "payload": json.dumps(
+                {
+                    "ticker": "005930",
+                    "price": 71000.0,  # 조건 fail
+                    "ts": datetime(2026, 4, 16, 9, 30, tzinfo=KST).isoformat(),
+                }
+            )
+        },
+    )
+    messages = await fake_redis.xreadgroup("tg_e2", "tce2", {"kis:prices": ">"}, count=1, block=100)
+    for _s, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+    # 매수 안 함, 큐에 남음
+    assert kis.buy_calls == []
+    assert queue.contains_sheet(sheet.sheet_id) is True

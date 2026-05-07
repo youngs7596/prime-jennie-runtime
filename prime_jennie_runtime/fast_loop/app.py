@@ -20,14 +20,17 @@ import signal
 from contextlib import AsyncExitStack
 
 import asyncpg
+import httpx
 import redis.asyncio as aioredis
 
+from prime_jennie_runtime.control.consumer import ControlCommandConsumer
 from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.consumer import PositionSheetConsumer
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
 from prime_jennie_runtime.fast_loop.gateway_subscriber import subscribe_on_startup
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
+from prime_jennie_runtime.fast_loop.market_snapshot import RuntimeMarketSnapshotFetcher
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.fast_loop.pending_entry import (
     EntryConditionEvaluator,
@@ -35,8 +38,12 @@ from prime_jennie_runtime.fast_loop.pending_entry import (
 )
 from prime_jennie_runtime.fast_loop.persistence import PostgresTradeRecorder
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+from prime_jennie_runtime.fast_loop.risk_throttle import IntradayRiskThrottle
+from prime_jennie_runtime.fast_loop.risk_updater import run_risk_updater
+from prime_jennie_runtime.fast_loop.schemas import RiskLevelChangeNotification
 from prime_jennie_runtime.fast_loop.tick_loop import TickLoop
 from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.redis_streams import STREAM_NOTIFICATIONS, TypedStreamPublisher
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
 logger = logging.getLogger(__name__)
@@ -65,10 +72,14 @@ class PostgresSheetFetcher:
 
 
 class BalanceAwareSizer:
-    """계좌 잔고 × final_pct / current_price → 정수 수량.
+    """계좌 잔고 × final_pct × intraday_mult / current_price → 정수 수량.
 
     stop/pause 상태면 0 반환 → PositionSheetConsumer 가 entry skip.
     ``cache_ttl_sec`` 동안 잔고/시세를 캐시하여 연쇄 시트 처리 시 rate limit 회피.
+
+    ``risk_throttle`` 주입 시 가장 최근 intraday level 의 multiplier 를 추가 적용.
+    slow-loop 가 NoOpRiskThrottle 인 동안만 의미 있는 보강 — 추후 slow-loop 가
+    동일 throttle 을 읽도록 통합되면 중복 적용을 피하기 위해 제거 검토.
     """
 
     def __init__(
@@ -77,10 +88,12 @@ class BalanceAwareSizer:
         system_state: SystemState,
         *,
         cache_ttl_sec: float = 5.0,
+        risk_throttle: IntradayRiskThrottle | None = None,
     ) -> None:
         self._kis = kis
         self._system = system_state
         self._ttl = cache_ttl_sec
+        self._risk_throttle = risk_throttle
         self._cached_balance: tuple[float, int] | None = None  # (expires_at, krw)
 
     async def __call__(self, sheet: PositionSheet) -> int:
@@ -103,7 +116,10 @@ class BalanceAwareSizer:
         if stock.price <= 0:
             return 0
 
-        notional = int(balance_krw * sheet.size.final_pct)
+        intraday_mult = (
+            self._risk_throttle.current_multiplier() if self._risk_throttle is not None else 1.0
+        )
+        notional = int(balance_krw * sheet.size.final_pct * intraday_mult)
         qty = notional // int(stock.price)
         return max(qty, 0)
 
@@ -149,6 +165,9 @@ async def run() -> None:
         kis = KisClient(cfg.kis)
         stack.push_async_callback(kis.close)
 
+        http_client = httpx.AsyncClient(timeout=15.0)
+        stack.push_async_callback(http_client.aclose)
+
         tracker = PositionTracker(redis_client)
         restored = await tracker.load_from_redis()
         logger.info("position tracker restored %d active positions", restored)
@@ -162,6 +181,19 @@ async def run() -> None:
         system_state = SystemState(redis_client)
         recorder = PostgresTradeRecorder(pool)
 
+        control_consumer = ControlCommandConsumer(
+            redis_client, consumer_name=f"control-fast-{cfg.env}"
+        )
+
+        risk_throttle = IntradayRiskThrottle(redis_client)
+        await risk_throttle.load_state()
+        snapshot_fetcher = RuntimeMarketSnapshotFetcher(
+            http=http_client, redis_client=redis_client, pool=pool
+        )
+        risk_publisher = TypedStreamPublisher(
+            redis_client, STREAM_NOTIFICATIONS, RiskLevelChangeNotification
+        )
+
         sheet_fetcher = PostgresSheetFetcher(pool)
 
         entry_executor = EntryExecutor(
@@ -174,7 +206,7 @@ async def run() -> None:
             recorder=recorder,
             sheet_fetcher=sheet_fetcher,
         )
-        sizer = BalanceAwareSizer(kis, system_state)
+        sizer = BalanceAwareSizer(kis, system_state, risk_throttle=risk_throttle)
 
         sheet_consumer = PositionSheetConsumer(
             redis_client=redis_client,
@@ -207,15 +239,29 @@ async def run() -> None:
             stop_event.set()
             sheet_consumer.stop()
             tick_loop.stop()
+            control_consumer.stop()
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, _request_stop)
 
-        logger.info("fast_loop runner ready — starting sheet consumer + tick loop + purge loop")
+        logger.info(
+            "fast_loop runner ready — starting sheet consumer + tick loop + purge loop"
+            " + control consumer + risk updater"
+        )
         consumer_task = asyncio.create_task(sheet_consumer.run(), name="sheet-consumer")
         tick_task = asyncio.create_task(tick_loop.run(), name="tick-loop")
         purge_task = asyncio.create_task(
             pending_queue.purge_loop(interval_sec=60.0), name="pending-purge"
+        )
+        control_task = asyncio.create_task(control_consumer.run(), name="control-consumer")
+        risk_task = asyncio.create_task(
+            run_risk_updater(
+                throttle=risk_throttle,
+                fetch_snapshot=snapshot_fetcher,
+                interval_sec=300,
+                notifier=risk_publisher,
+            ),
+            name="risk-updater",
         )
 
         done, pending = await asyncio.wait(
@@ -223,6 +269,8 @@ async def run() -> None:
                 consumer_task,
                 tick_task,
                 purge_task,
+                control_task,
+                risk_task,
                 asyncio.create_task(stop_event.wait()),
             },
             return_when=asyncio.FIRST_COMPLETED,

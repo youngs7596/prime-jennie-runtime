@@ -104,8 +104,20 @@ async def test_handle_tick_writes_to_redis(fake_redis):
     #           [6]wgt_avg [7]open [8]high [9]low [10]ask1 [11]bid1
     #           [12]contract_vol [13]accumulated_vol
     fields = [
-        "005930", "090000", "71200", "0", "100", "71500",
-        "0", "0", "0", "0", "71210", "71190", "10", "50",
+        "005930",
+        "090000",
+        "71200",
+        "0",
+        "100",
+        "71500",
+        "0",
+        "0",
+        "0",
+        "0",
+        "71210",
+        "71190",
+        "10",
+        "50",
     ]
     msg = "0|H0STCNT0|001|" + "^".join(fields)
 

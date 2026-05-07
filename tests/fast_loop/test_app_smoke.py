@@ -95,6 +95,45 @@ async def test_balance_sizer_computes_quantity():
     assert await sizer(sheet) == 50
 
 
+async def test_balance_sizer_applies_intraday_multiplier():
+    kis = AsyncMock()
+    kis.get_balance.return_value = _fake_portfolio(10_000_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+
+    class _StubThrottle:
+        def __init__(self, mult: float):
+            self._mult = mult
+
+        def current_multiplier(self) -> float:
+            return self._mult
+
+    # 10% × 0.6 (WARNING) = 6% → 60만원 → 30주
+    sizer = fast_app.BalanceAwareSizer(
+        kis=kis,
+        system_state=_FakeSystemState(_open_snapshot()),
+        risk_throttle=_StubThrottle(0.6),  # type: ignore[arg-type]
+    )
+    sheet = _minimal_sheet(final_pct=0.1)
+    assert await sizer(sheet) == 30
+
+
+async def test_balance_sizer_critical_zero_blocks_entry():
+    kis = AsyncMock()
+    kis.get_balance.return_value = _fake_portfolio(10_000_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+
+    class _ZeroThrottle:
+        def current_multiplier(self) -> float:
+            return 0.0
+
+    sizer = fast_app.BalanceAwareSizer(
+        kis=kis,
+        system_state=_FakeSystemState(_open_snapshot()),
+        risk_throttle=_ZeroThrottle(),  # type: ignore[arg-type]
+    )
+    assert await sizer(_minimal_sheet(final_pct=0.1)) == 0
+
+
 # ─── helpers ─────────────────────────────────────────────
 
 

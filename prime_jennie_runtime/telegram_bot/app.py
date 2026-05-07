@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -32,6 +33,10 @@ from .handler import CommandHandler
 from .llm_intent import IntentRouter
 from .long_poll import LongPollLoop
 
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 GROUP_TELEGRAM = "group_telegram"

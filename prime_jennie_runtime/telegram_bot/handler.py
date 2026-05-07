@@ -107,6 +107,9 @@ class CommandHandler:
             "/watchlist": self._handle_watchlist,
             "/watch": self._handle_watch,
             "/unwatch": self._handle_unwatch,
+            "/balance": self._handle_balance,
+            "/price": self._handle_price,
+            "/portfolio": self._handle_portfolio,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -381,6 +384,63 @@ class CommandHandler:
         if not removed:
             return CommandResult(reply=f"워치리스트에 없습니다: {name}({code})")
         return CommandResult(reply=f"워치리스트에서 제거: {name}({code})")
+
+    # ----- KIS gateway proxy -----
+
+    async def _handle_balance(self, args: str, **_: object) -> CommandResult:
+        if self._kis is None:
+            return CommandResult(reply="KIS 클라이언트 미설정 — /balance 사용 불가")
+        try:
+            cash = await self._kis.get_cash()
+        except Exception as e:
+            logger.warning("get_cash failed: %s", e)
+            return CommandResult(reply=f"잔고 조회 실패: {e}")
+        return CommandResult(reply=f"현금 잔고: <b>{cash:,}원</b>")
+
+    async def _handle_price(self, args: str, **_: object) -> CommandResult:
+        if self._kis is None:
+            return CommandResult(reply="KIS 클라이언트 미설정 — /price 사용 불가")
+        if not args.strip():
+            return CommandResult(reply="사용법: <code>/price 종목명|코드</code>")
+        stock = await resolve_stock(self._pool, args.strip())
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {args.strip()}")
+        code, name = stock
+        try:
+            snap = await self._kis.get_snapshot(code)
+        except Exception as e:
+            logger.warning("get_snapshot failed code=%s: %s", code, e)
+            return CommandResult(reply=f"가격 조회 실패: {e}")
+        return CommandResult(
+            reply=(
+                f"<b>{name}</b> ({code})\n"
+                f"현재가: {snap.price:,}원\n"
+                f"시가: {snap.open_price:,}원\n"
+                f"등락: {snap.change_pct:+.2f}%\n"
+                f"고가: {snap.high_price:,}원\n"
+                f"저가: {snap.low_price:,}원"
+            )
+        )
+
+    async def _handle_portfolio(self, args: str, **_: object) -> CommandResult:
+        if self._kis is None:
+            return CommandResult(reply="KIS 클라이언트 미설정 — /portfolio 사용 불가")
+        try:
+            state = await self._kis.get_balance()
+        except Exception as e:
+            logger.warning("get_balance failed: %s", e)
+            return CommandResult(reply=f"포트폴리오 조회 실패: {e}")
+        if not state.positions:
+            return CommandResult(reply="보유 종목이 없습니다.")
+        lines = [f"<b>보유 포트폴리오</b> ({state.position_count}종목)"]
+        for p in state.positions:
+            lines.append(
+                f"  {p.stock_name}({p.stock_code}) "
+                f"{p.quantity}주 평균 {p.average_buy_price:,}원"
+                + (f" ({p.profit_pct:+.1f}%)" if p.profit_pct is not None else "")
+            )
+        lines.append(f"\n현금: {state.cash_balance:,}원 / 총자산: {state.total_asset:,}원")
+        return CommandResult(reply="\n".join(lines))
 
 
 def _on_off(v: bytes | str | None) -> str:

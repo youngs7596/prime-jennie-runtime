@@ -207,3 +207,118 @@ async def test_unwatch_not_in_list(fake_redis):
     h = _handler(fake_redis, pool=pool)
     res = await h.process_command("/unwatch", "005930", chat_id="1001")
     assert "없습니다" in res.reply
+
+
+# ----- /balance /price /portfolio (KIS gateway proxy) -----
+
+
+class _StubKis:
+    def __init__(self, *, cash=None, snapshot=None, balance=None, raises=None):
+        self._cash = cash
+        self._snapshot = snapshot
+        self._balance = balance
+        self._raises = raises or {}
+
+    async def get_cash(self):
+        if "get_cash" in self._raises:
+            raise self._raises["get_cash"]
+        return self._cash
+
+    async def get_snapshot(self, code):
+        if "get_snapshot" in self._raises:
+            raise self._raises["get_snapshot"]
+        return self._snapshot
+
+    async def get_balance(self):
+        if "get_balance" in self._raises:
+            raise self._raises["get_balance"]
+        return self._balance
+
+
+@pytest.mark.asyncio
+async def test_balance_returns_cash(fake_redis):
+    h = _handler(fake_redis, kis=_StubKis(cash=15_300_000))
+    res = await h.process_command("/balance", "", chat_id="1001")
+    assert "15,300,000" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_balance_kis_missing(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/balance", "", chat_id="1001")
+    assert "미설정" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_price_with_known_code(fake_redis):
+    from prime_jennie_runtime.kis_gateway.schemas import StockSnapshot
+
+    snap = StockSnapshot(
+        stock_code="005930",
+        price=71200,
+        open_price=70000,
+        high_price=71500,
+        low_price=69800,
+        change_pct=1.71,
+        timestamp=FROZEN_NOW,
+    )
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool, kis=_StubKis(snapshot=snap))
+    res = await h.process_command("/price", "005930", chat_id="1001")
+    assert "삼성전자" in res.reply
+    assert "71,200" in res.reply
+    assert "+1.71%" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_price_unknown_stock(fake_redis):
+    pool = _StubPool()
+    h = _handler(fake_redis, pool=pool, kis=_StubKis())
+    res = await h.process_command("/price", "없는종목", chat_id="1001")
+    assert "찾을 수 없" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_portfolio_lists_positions(fake_redis):
+    from prime_jennie_runtime.kis_gateway.schemas import PortfolioState, Position
+
+    state = PortfolioState(
+        positions=[
+            Position(
+                stock_code="005930",
+                stock_name="삼성전자",
+                quantity=10,
+                average_buy_price=70000,
+                total_buy_amount=700000,
+                profit_pct=2.5,
+            ),
+        ],
+        cash_balance=10_000_000,
+        total_asset=10_700_000,
+        stock_eval_amount=700_000,
+        position_count=1,
+        timestamp=FROZEN_NOW,
+    )
+    h = _handler(fake_redis, kis=_StubKis(balance=state))
+    res = await h.process_command("/portfolio", "", chat_id="1001")
+    assert "삼성전자" in res.reply
+    assert "1종목" in res.reply
+    assert "+2.5%" in res.reply
+    assert "10,700,000" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_portfolio_empty(fake_redis):
+    from prime_jennie_runtime.kis_gateway.schemas import PortfolioState
+
+    state = PortfolioState(
+        positions=[],
+        cash_balance=33_070_000,
+        total_asset=33_070_000,
+        stock_eval_amount=0,
+        position_count=0,
+        timestamp=FROZEN_NOW,
+    )
+    h = _handler(fake_redis, kis=_StubKis(balance=state))
+    res = await h.process_command("/portfolio", "", chat_id="1001")
+    assert "없습니다" in res.reply

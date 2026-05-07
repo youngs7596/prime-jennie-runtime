@@ -107,6 +107,7 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         nonlocal state
         redis_client = None
+        pg_pool = None
         if state is None:
             cfg = config or KISConfig()
             logger.info("KIS Gateway starting — paper=%s, base_url=%s", cfg.is_paper, cfg.base_url)
@@ -147,7 +148,39 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
             except Exception:
                 logger.exception("streamer init failed — subscribe API will return 503 until fixed")
 
-            state = GatewayState(config=cfg, kis_api=api, streamer=streamer, calendar=calendar)
+            # daily/minute prices fallback — KIS API 실패 시 PG read-through.
+            price_repo = None
+            try:
+                import asyncpg
+
+                from prime_jennie_runtime.infra.config import PostgresConfig
+
+                pg_cfg = PostgresConfig()
+                pg_pool = await asyncpg.create_pool(
+                    host=pg_cfg.host,
+                    port=pg_cfg.port,
+                    user=pg_cfg.user,
+                    password=pg_cfg.password,
+                    database=pg_cfg.db,
+                    min_size=1,
+                    max_size=4,
+                )
+                from .price_repo import PostgresPriceRepo
+
+                price_repo = PostgresPriceRepo(conn=pg_pool)
+                logger.info("PostgresPriceRepo wired for KIS fallback")
+            except Exception:
+                logger.exception(
+                    "price_repo init failed — daily/minute prices will not have PG fallback"
+                )
+
+            state = GatewayState(
+                config=cfg,
+                kis_api=api,
+                streamer=streamer,
+                calendar=calendar,
+                price_repo=price_repo,
+            )
 
         app.state.gateway = state
         try:
@@ -159,6 +192,8 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                 await state.kis_api.close()
             if redis_client is not None:
                 await redis_client.aclose()
+            if pg_pool is not None:
+                await pg_pool.close()
 
     app = FastAPI(title="KIS Gateway", version="1.0.0", lifespan=lifespan)
 

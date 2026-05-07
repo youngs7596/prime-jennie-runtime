@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
 import pytest
 
-from prime_jennie_runtime.fast_loop.market_snapshot import RuntimeMarketSnapshotFetcher
-from prime_jennie_runtime.jobs.council_macro import MACRO_SNAPSHOT_KEY_PREFIX
-
-
-@dataclass
-class _FakeIndex:
-    close: float
-    change_pct: float
-    traded_at: Any
+from prime_jennie_runtime.fast_loop.market_snapshot import (
+    _MACRO_SNAPSHOT_KEY_PREFIX,
+    RuntimeMarketSnapshotFetcher,
+)
 
 
 class _FakePool:
@@ -39,21 +33,20 @@ class _FakeRedis:
 
 
 class _StubHttp:
-    """`fetch_index_data` 가 모듈 함수라 패치로 대체. 객체는 그냥 sentinel."""
+    """KOSPI fetcher 는 monkeypatch 로 갈아끼우므로 객체는 sentinel."""
 
 
 @pytest.mark.asyncio
 async def test_all_sources_present(monkeypatch):
-    today_key = f"{MACRO_SNAPSHOT_KEY_PREFIX}{date.today().isoformat()}"
+    today_key = f"{_MACRO_SNAPSHOT_KEY_PREFIX}{date.today().isoformat()}"
     redis = _FakeRedis({today_key: json.dumps({"vix": 22.5, "sox_change_pct": -1.2})})
     pool = _FakePool(row={"size_multiplier": 0.75})
 
-    async def fake_fetch_index(_client, code):
-        assert code == "KOSPI"
-        return _FakeIndex(close=2500.0, change_pct=-1.5, traded_at=date.today())
+    async def fake_fetch_kospi(_client):
+        return -1.5
 
     monkeypatch.setattr(
-        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_index_data", fake_fetch_index
+        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_kospi_change_pct", fake_fetch_kospi
     )
     fetcher = RuntimeMarketSnapshotFetcher(
         http=_StubHttp(),  # type: ignore[arg-type]
@@ -73,11 +66,11 @@ async def test_kospi_fetch_returns_none_falls_back_to_zero(monkeypatch):
     redis = _FakeRedis({})
     pool = _FakePool(row=None)
 
-    async def fake_fetch_index(_client, _code):
+    async def fake_fetch_kospi(_client):
         return None
 
     monkeypatch.setattr(
-        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_index_data", fake_fetch_index
+        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_kospi_change_pct", fake_fetch_kospi
     )
     fetcher = RuntimeMarketSnapshotFetcher(
         http=_StubHttp(),  # type: ignore[arg-type]
@@ -93,35 +86,16 @@ async def test_kospi_fetch_returns_none_falls_back_to_zero(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_kospi_exception_falls_back_to_zero(monkeypatch):
-    redis = _FakeRedis({})
-    pool = _FakePool(row=None)
-
-    async def boom(_client, _code):
-        raise RuntimeError("network boom")
-
-    monkeypatch.setattr("prime_jennie_runtime.fast_loop.market_snapshot.fetch_index_data", boom)
-    fetcher = RuntimeMarketSnapshotFetcher(
-        http=_StubHttp(),  # type: ignore[arg-type]
-        redis_client=redis,  # type: ignore[arg-type]
-        pool=pool,  # type: ignore[arg-type]
-    )
-
-    kospi, *_ = await fetcher()
-    assert kospi == 0.0
-
-
-@pytest.mark.asyncio
 async def test_redis_corrupt_payload_returns_none(monkeypatch):
-    today_key = f"{MACRO_SNAPSHOT_KEY_PREFIX}{date.today().isoformat()}"
+    today_key = f"{_MACRO_SNAPSHOT_KEY_PREFIX}{date.today().isoformat()}"
     redis = _FakeRedis({today_key: "not-json"})
     pool = _FakePool(row=None)
 
-    async def fake_fetch_index(_client, _code):
-        return _FakeIndex(close=0, change_pct=0.0, traded_at=date.today())
+    async def fake_fetch_kospi(_client):
+        return 0.0
 
     monkeypatch.setattr(
-        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_index_data", fake_fetch_index
+        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_kospi_change_pct", fake_fetch_kospi
     )
     fetcher = RuntimeMarketSnapshotFetcher(
         http=_StubHttp(),  # type: ignore[arg-type]
@@ -142,11 +116,11 @@ async def test_council_mult_db_error_falls_back(monkeypatch):
         async def fetchrow(self, *_args):
             raise RuntimeError("db down")
 
-    async def fake_fetch_index(_client, _code):
-        return _FakeIndex(close=0, change_pct=-0.5, traded_at=date.today())
+    async def fake_fetch_kospi(_client):
+        return -0.5
 
     monkeypatch.setattr(
-        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_index_data", fake_fetch_index
+        "prime_jennie_runtime.fast_loop.market_snapshot.fetch_kospi_change_pct", fake_fetch_kospi
     )
     fetcher = RuntimeMarketSnapshotFetcher(
         http=_StubHttp(),  # type: ignore[arg-type]
@@ -156,3 +130,16 @@ async def test_council_mult_db_error_falls_back(monkeypatch):
 
     _, _, _, council = await fetcher()
     assert council == 1.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_kospi_change_pct_handles_http_error():
+    """fetch_kospi_change_pct 자체가 raise 안 함 — 통신 오류 시 None."""
+    import httpx
+
+    from prime_jennie_runtime.fast_loop.market_snapshot import fetch_kospi_change_pct
+
+    transport = httpx.MockTransport(lambda _r: httpx.Response(503))
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await fetch_kospi_change_pct(client)
+    assert result is None

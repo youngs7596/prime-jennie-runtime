@@ -20,6 +20,7 @@ from prime_jennie_runtime.infra.config import TelegramConfig
 
 from .bot import TelegramBot
 from .handler import CommandHandler, parse_command
+from .llm_intent import IntentRouter
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class LongPollLoop:
         handler: CommandHandler,
         bot: TelegramBot,
         client: httpx.AsyncClient | None = None,
+        intent_router: IntentRouter | None = None,
     ) -> None:
         self._config = config
         self._handler = handler
@@ -41,6 +43,7 @@ class LongPollLoop:
         self._owns_client = client is None
         self._offset: int = 0
         self._running = False
+        self._intent_router = intent_router
 
     def _api_url(self, method: str) -> str:
         return f"{self._config.api_base.rstrip('/')}/bot{self._config.bot_token}/{method}"
@@ -113,9 +116,17 @@ class LongPollLoop:
 
         parsed = parse_command(text)
         if parsed is None:
-            return  # 평문 메시지는 무시 (현재 scope)
+            # 평문 메시지 — IntentRouter 가 활성화돼 있으면 LLM 으로 분류 시도
+            if self._intent_router is None or not self._intent_router.enabled:
+                return
+            classified = await self._intent_router.classify(text)
+            if classified is None:
+                return
+            cmd, args = classified
+            logger.info("nl_routed text=%r → cmd=%s args=%r", text[:80], cmd, args)
+        else:
+            cmd, args = parsed
 
-        cmd, args = parsed
         result = await self._handler.process_command(cmd, args, chat_id, username)
         if result.reply:
             await self._bot.send_message(result.reply, chat_id=str(chat_id))

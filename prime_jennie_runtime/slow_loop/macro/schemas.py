@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
 
 # =====================================================================
 # 보조 타입
@@ -156,8 +156,9 @@ class MacroGateOutput(BaseModel):
     gate: Literal["open", "closed"]
     size_multiplier: Annotated[float, Field(ge=0.0, le=1.0)]
 
-    # 로깅 전용
-    reasoning: Annotated[str, Field(max_length=500)]
+    # 로깅 전용 — Field(max_length) 로 hard validation 걸면 초과 시 gate 가
+    # closed 로 fallback 되므로 BeforeValidator 로 사전 truncate.
+    reasoning: Annotated[str, BeforeValidator(lambda v: v[:2000] if isinstance(v, str) else v)]
     top_risks: Annotated[list[RiskItem], Field(max_length=5)]
     confidence: Literal["high", "medium", "low"]
     news_digest_ref: str

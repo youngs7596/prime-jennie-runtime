@@ -46,6 +46,12 @@ STATE_KEY_DRYRUN = "control.state:dryrun"
 # 강제 청산 armed flag
 STATE_KEY_LIQUIDATE_ARMED = "control.state:liquidate_armed"
 
+# v2 호환 키 — 알림 음소거 / 가격 알림 / 최대 매수 횟수 / 워치리스트
+KEY_MUTE_UNTIL = "notification:mute_until"
+KEY_PRICE_ALERTS = "price_alerts"
+KEY_MAX_BUY_COUNT = "config:max_buy_count"
+KEY_WATCHLIST_MANUAL = "watchlist:manual"
+
 
 def rate_limit_key(chat_id: str) -> str:
     return f"telegram:rl:{chat_id}"
@@ -56,13 +62,38 @@ def rate_limit_key(chat_id: str) -> str:
 # ---------------------------------------------------------------------
 
 RESPONSE_HELP = (
-    "<b>Prime Jennie v3 — 제어 명령</b>\n\n"
-    "/status — 시스템 상태\n"
+    "<b>Prime Jennie v3 — 명령어</b>\n\n"
+    "<b>매매 제어</b>\n"
     "/pause [사유] — 진입 일시정지\n"
     "/resume — 재개\n"
     "/stop 확인 — 긴급 정지\n"
-    "/dryrun on|off — 시뮬레이션 모드\n"
-    "/liquidate arm|disarm|status — 강제 청산 준비\n"
+    "/dryrun on|off — 시뮬레이션 모드\n\n"
+    "<b>조회</b>\n"
+    "/status — 시스템 상태\n"
+    "/portfolio — 보유 종목\n"
+    "/pnl — 오늘 손익\n"
+    "/balance — 현금 잔고\n"
+    "/price 종목 — 현재가\n\n"
+    "<b>워치리스트</b>\n"
+    "/watchlist — 목록\n"
+    "/watch 종목 — 추가\n"
+    "/unwatch 종목 — 제거\n\n"
+    "<b>알림</b>\n"
+    "/mute 분 — 음소거\n"
+    "/unmute — 재개\n"
+    "/alert 종목 가격 — 가격 알림\n"
+    "/alerts — 알림 목록\n\n"
+    "<b>설정</b>\n"
+    "/config — 현재 설정\n"
+    "/maxbuy N — 일일 최대 매수 (0~20)\n\n"
+    "<b>매매</b>\n"
+    "/buy 종목 [수량] — 수동 매수\n"
+    "/sell 종목 [수량|전량] — 수동 매도\n"
+    "/sellall 확인 — 전량 청산\n\n"
+    "<b>강제 청산</b>\n"
+    "/liquidate add|remove|list|clear|arm|disarm|status\n\n"
+    "<b>진단</b>\n"
+    "/diagnose — 시스템 진단\n"
     "/help — 이 도움말\n"
 )
 
@@ -74,6 +105,10 @@ RESPONSE_DRYRUN_USAGE = "사용법: <code>/dryrun on|off</code>"
 RESPONSE_LIQUIDATE_USAGE = "사용법: <code>/liquidate arm|disarm|status</code>"
 
 __all__ = [
+    "KEY_MAX_BUY_COUNT",
+    "KEY_MUTE_UNTIL",
+    "KEY_PRICE_ALERTS",
+    "KEY_WATCHLIST_MANUAL",
     "RESPONSE_DRYRUN_USAGE",
     "RESPONSE_HELP",
     "RESPONSE_LIQUIDATE_USAGE",

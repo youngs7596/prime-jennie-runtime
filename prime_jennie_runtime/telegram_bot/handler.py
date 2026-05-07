@@ -1,20 +1,24 @@
 """Command Handler — Telegram 명령 → control.commands stream publish + 응답 문자열.
 
-v2 ``services/telegram/handler.py`` 744줄의 **제어 서브셋만** v3 로 포팅.
-Phase 2.1 scope: 진입/청산 제어 + 상태 조회. 수동 매매/워치리스트/가격 조회는
-Phase 2.x 에서 별도 handler 로 분리 (DB/KIS client 의존 때문).
+v2 ``services/telegram/handler.py`` 744줄을 v3 으로 포팅.
 
 설계:
-- **Pure producer**: 이 모듈은 Redis 만 의존. KIS/DB 미접근.
-- **상태는 control.state:* 키에서 read-only**: Task 2.2 consumer 가 write.
-- **Allowlist fail-safe**: ``config.allowed_chat_ids`` 가 비면 ``False`` 반환 →
-  bot 기동 코드가 명시적으로 거부해야 한다 (D4 결정).
+- 제어 명령 (pause/resume/stop/dryrun/liquidate) 은 control.commands stream
+  으로 publish — fast/slow loop 의 ControlConsumer 가 적용.
+- 조회 명령 (balance/portfolio/price/pnl 등) 은 KIS gateway HTTP + PG 직접
+  쿼리. ``pool`` / ``kis_client`` 가 None 이면 degrade 응답.
+- 매매 명령 (buy/sell/sellall) 은 manual_buy/manual_sell/manual_sellall
+  ControlKind 로 publish.
+- **Allowlist fail-safe**: ``config.allowed_chat_ids`` 가 비면 ``is_allowed``
+  False 반환 (D4).
 - **Rate limit**: chat 당 ``config.command_min_interval_s`` 초 간격.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +38,9 @@ if TYPE_CHECKING:
     from prime_jennie_runtime.fast_loop.kis_client import KisClient
 
 from .control import (
+    KEY_MAX_BUY_COUNT,
+    KEY_MUTE_UNTIL,
+    KEY_PRICE_ALERTS,
     RESPONSE_DRYRUN_USAGE,
     RESPONSE_HELP,
     RESPONSE_LIQUIDATE_USAGE,
@@ -49,6 +56,7 @@ from .control import (
     ControlKind,
     rate_limit_key,
 )
+from .stock_resolver import resolve_stock
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +97,12 @@ class CommandHandler:
             "/stop": self._handle_stop,
             "/dryrun": self._handle_dryrun,
             "/liquidate": self._handle_liquidate,
+            "/mute": self._handle_mute,
+            "/unmute": self._handle_unmute,
+            "/alert": self._handle_alert,
+            "/alerts": self._handle_alerts,
+            "/maxbuy": self._handle_maxbuy,
+            "/config": self._handle_config,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -221,6 +235,113 @@ class CommandHandler:
             armed = await self._redis.get(STATE_KEY_LIQUIDATE_ARMED)
             return CommandResult(reply=f"강제 청산 armed: {_on_off(armed)}")
         return CommandResult(reply=RESPONSE_LIQUIDATE_USAGE)
+
+    # ----- 알림 음소거 -----
+
+    async def _handle_mute(self, args: str, **_: object) -> CommandResult:
+        try:
+            minutes = int(args.strip())
+        except (ValueError, TypeError):
+            return CommandResult(reply="사용법: <code>/mute 분</code> (예: /mute 30)")
+        if minutes <= 0:
+            return CommandResult(reply="분은 1 이상의 정수")
+        until = int(time.time()) + minutes * 60
+        await self._redis.set(KEY_MUTE_UNTIL, str(until).encode(), ex=minutes * 60 + 60)
+        return CommandResult(reply=f"알림을 {minutes}분간 음소거합니다.")
+
+    async def _handle_unmute(self, args: str, **_: object) -> CommandResult:
+        await self._redis.delete(KEY_MUTE_UNTIL)
+        return CommandResult(reply="알림이 재개됩니다.")
+
+    # ----- 가격 알림 -----
+
+    async def _handle_alert(self, args: str, **_: object) -> CommandResult:
+        parts = args.strip().split()
+        if len(parts) < 2:
+            return CommandResult(reply="사용법: <code>/alert 종목 가격</code>")
+
+        stock = await resolve_stock(self._pool, parts[0])
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {parts[0]}")
+        try:
+            target_price = int(parts[1].replace(",", ""))
+        except ValueError:
+            return CommandResult(reply="가격은 숫자로 입력하세요.")
+        if target_price <= 0:
+            return CommandResult(reply="가격은 양수여야 합니다.")
+
+        code, name = stock
+        alert = {
+            "stock_code": code,
+            "stock_name": name,
+            "target_price": target_price,
+            "created_at": self._now().isoformat(),
+        }
+        await self._redis.hset(
+            KEY_PRICE_ALERTS, f"{code}:{target_price}", json.dumps(alert).encode()
+        )
+        await self._redis.expire(KEY_PRICE_ALERTS, 7 * 86400)
+        return CommandResult(reply=f"가격 알림 설정: {name}({code}) → {target_price:,}원")
+
+    async def _handle_alerts(self, args: str, **_: object) -> CommandResult:
+        raw = await self._redis.hgetall(KEY_PRICE_ALERTS)
+        if not raw:
+            return CommandResult(reply="설정된 알림이 없습니다.")
+        lines = ["<b>가격 알림 목록</b>"]
+        for _key, val in sorted(raw.items()):
+            try:
+                data = json.loads(val.decode() if isinstance(val, bytes) else str(val))
+                lines.append(
+                    f"  {data['stock_name']}({data['stock_code']}) → {data['target_price']:,}원"
+                )
+            except (ValueError, KeyError):
+                continue
+        return CommandResult(reply="\n".join(lines))
+
+    # ----- 설정 -----
+
+    async def _handle_maxbuy(self, args: str, **_: object) -> CommandResult:
+        try:
+            val = int(args.strip())
+        except (ValueError, TypeError):
+            return CommandResult(reply="사용법: <code>/maxbuy 횟수</code> (0~20)")
+        if not 0 <= val <= 20:
+            return CommandResult(reply="0~20 사이 값을 입력하세요.")
+        await self._redis.set(KEY_MAX_BUY_COUNT, str(val).encode())
+        return CommandResult(reply=f"일일 최대 매수: {val}회로 변경")
+
+    async def _handle_config(self, args: str, **_: object) -> CommandResult:
+        pause = await self._redis.get(STATE_KEY_PAUSE)
+        stop = await self._redis.get(STATE_KEY_STOP)
+        dry = await self._redis.get(STATE_KEY_DRYRUN)
+        mute_until = await self._redis.get(KEY_MUTE_UNTIL)
+        max_buy = await self._redis.get(KEY_MAX_BUY_COUNT)
+
+        mute_str = "OFF"
+        if mute_until:
+            try:
+                until_ts = int(mute_until.decode() if isinstance(mute_until, bytes) else mute_until)
+                remaining = until_ts - int(time.time())
+                if remaining > 0:
+                    mute_str = f"{remaining // 60}분 남음"
+            except ValueError:
+                pass
+
+        max_buy_str = (
+            (max_buy.decode() if isinstance(max_buy, bytes) else str(max_buy))
+            if max_buy
+            else "기본값"
+        )
+
+        reply = (
+            "<b>현재 설정</b>\n"
+            f"긴급정지: {_on_off(stop)}\n"
+            f"일시정지: {pause.decode() if isinstance(pause, bytes) else (pause or 'OFF')}\n"
+            f"DRY_RUN: {_on_off(dry)}\n"
+            f"알림 음소거: {mute_str}\n"
+            f"일일 최대 매수: {max_buy_str}회"
+        )
+        return CommandResult(reply=reply)
 
 
 def _on_off(v: bytes | str | None) -> str:

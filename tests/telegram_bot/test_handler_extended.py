@@ -322,3 +322,85 @@ async def test_portfolio_empty(fake_redis):
     h = _handler(fake_redis, kis=_StubKis(balance=state))
     res = await h.process_command("/portfolio", "", chat_id="1001")
     assert "없습니다" in res.reply
+
+
+# ----- /pnl /diagnose (PG) -----
+
+
+class _PgPool:
+    def __init__(self, rows=None, fetchval_result=1, fetch_raises=None):
+        self._rows = rows or []
+        self._fetchval_result = fetchval_result
+        self._fetch_raises = fetch_raises
+
+    async def fetch(self, sql, *args):
+        if self._fetch_raises:
+            raise self._fetch_raises
+        return self._rows
+
+    async def fetchval(self, sql, *args):
+        return self._fetchval_result
+
+    async def fetchrow(self, sql, arg):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_pnl_aggregates_today(fake_redis):
+    pool = _PgPool(
+        rows=[
+            {"exit_reason": "tp", "pnl_pct": 2.5, "pnl_krw": 50000},
+            {"exit_reason": "sl", "pnl_pct": -1.0, "pnl_krw": -20000},
+            {"exit_reason": "tp", "pnl_pct": 1.5, "pnl_krw": 30000},
+        ]
+    )
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/pnl", "", chat_id="1001")
+    assert "3" in res.reply
+    assert "승 2 / 패 1" in res.reply
+    assert "+1.00%" in res.reply  # avg
+    assert "+60,000" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_pnl_no_outcomes(fake_redis):
+    pool = _PgPool(rows=[])
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/pnl", "", chat_id="1001")
+    assert "없습니다" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_pnl_pool_missing(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/pnl", "", chat_id="1001")
+    assert "미주입" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_diagnose_all_ok(fake_redis):
+    pool = _PgPool(fetchval_result=1)
+    kis = _StubKis(cash=1000)
+    h = _handler(fake_redis, pool=pool, kis=kis)
+    res = await h.process_command("/diagnose", "", chat_id="1001")
+    assert "Redis: OK" in res.reply
+    assert "DB: OK" in res.reply
+    assert "KIS Gateway: OK" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_diagnose_kis_fail(fake_redis):
+    pool = _PgPool(fetchval_result=1)
+    kis = _StubKis(raises={"get_cash": RuntimeError("kis down")})
+    h = _handler(fake_redis, pool=pool, kis=kis)
+    res = await h.process_command("/diagnose", "", chat_id="1001")
+    assert "KIS Gateway: FAIL" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_report_aliases_diagnose(fake_redis):
+    pool = _PgPool(fetchval_result=1)
+    kis = _StubKis(cash=1000)
+    h = _handler(fake_redis, pool=pool, kis=kis)
+    res = await h.process_command("/report", "", chat_id="1001")
+    assert "시스템 진단" in res.reply

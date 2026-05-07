@@ -21,7 +21,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
@@ -31,11 +31,6 @@ from prime_jennie_runtime.infra.redis_streams import (
     STREAM_CONTROL_COMMANDS,
     TypedStreamPublisher,
 )
-
-if TYPE_CHECKING:
-    import asyncpg
-
-    from prime_jennie_runtime.fast_loop.kis_client import KisClient
 
 from .control import (
     KEY_MAX_BUY_COUNT,
@@ -58,6 +53,13 @@ from .control import (
     rate_limit_key,
 )
 from .stock_resolver import resolve_stock
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from prime_jennie_runtime.fast_loop.kis_client import KisClient
+
+KST = timezone(timedelta(hours=9))
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,9 @@ class CommandHandler:
             "/balance": self._handle_balance,
             "/price": self._handle_price,
             "/portfolio": self._handle_portfolio,
+            "/pnl": self._handle_pnl,
+            "/diagnose": self._handle_diagnose,
+            "/report": self._handle_diagnose,  # v2 alias
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -441,6 +446,72 @@ class CommandHandler:
             )
         lines.append(f"\n현금: {state.cash_balance:,}원 / 총자산: {state.total_asset:,}원")
         return CommandResult(reply="\n".join(lines))
+
+    # ----- PG read -----
+
+    async def _handle_pnl(self, args: str, **_: object) -> CommandResult:
+        if self._pool is None:
+            return CommandResult(reply="DB 미주입 — /pnl 사용 불가")
+        # KST 오늘 자정 (00:00) 이후 outcomes
+        today_kst = self._now().astimezone(KST).date()
+        start = datetime(today_kst.year, today_kst.month, today_kst.day, tzinfo=KST)
+        try:
+            rows = await self._pool.fetch(
+                "SELECT exit_reason, pnl_pct, pnl_krw FROM outcomes "
+                "WHERE closed_at >= $1 ORDER BY closed_at",
+                start,
+            )
+        except Exception as e:
+            logger.warning("/pnl query failed: %s", e)
+            return CommandResult(reply=f"PnL 조회 실패: {e}")
+        if not rows:
+            return CommandResult(reply="오늘 마감된 매매가 없습니다.")
+        total_krw = sum(float(r["pnl_krw"] or 0) for r in rows)
+        avg_pct = sum(float(r["pnl_pct"] or 0) for r in rows) / len(rows)
+        wins = sum(1 for r in rows if (r["pnl_pct"] or 0) > 0)
+        lines = [
+            "<b>오늘 마감 손익</b>",
+            f"건수: {len(rows)} (승 {wins} / 패 {len(rows) - wins})",
+            f"평균 수익률: {avg_pct:+.2f}%",
+            f"누적 손익: {total_krw:+,.0f}원",
+        ]
+        return CommandResult(reply="\n".join(lines))
+
+    async def _handle_diagnose(self, args: str, **_: object) -> CommandResult:
+        checks: list[str] = []
+        try:
+            await self._redis.ping()
+            checks.append("Redis: OK")
+        except Exception:
+            checks.append("Redis: FAIL")
+
+        if self._pool is None:
+            checks.append("DB: 미주입")
+        else:
+            try:
+                await self._pool.fetchval("SELECT 1")
+                checks.append("DB: OK")
+            except Exception:
+                checks.append("DB: FAIL")
+
+        if self._kis is None:
+            checks.append("KIS Gateway: 미주입")
+        else:
+            try:
+                await self._kis.get_cash()
+                checks.append("KIS Gateway: OK")
+            except Exception:
+                checks.append("KIS Gateway: FAIL")
+
+        stop = await self._redis.get(STATE_KEY_STOP)
+        pause = await self._redis.get(STATE_KEY_PAUSE)
+        return CommandResult(
+            reply=(
+                "<b>시스템 진단</b>\n"
+                + "\n".join(checks)
+                + f"\n\n긴급정지: {_on_off(stop)}\n일시정지: {_on_off(pause)}"
+            )
+        )
 
 
 def _on_off(v: bytes | str | None) -> str:

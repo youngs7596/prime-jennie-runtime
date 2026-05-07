@@ -29,7 +29,6 @@ STREAM_POSITION_SHEETS_DLQ = "v3:position_sheets.dlq"
 # Track C
 STREAM_PRICES = "kis:prices"  # KIS Gateway → Fast loop
 STREAM_NOTIFICATIONS = "v3:notifications"  # Fast loop → Telegram / UI
-STREAM_EXECUTIONS = "v3:executions"  # Fast loop → DB writer / audit
 # Telegram / UI → fast & slow loop consumer (Phase 2.1)
 STREAM_CONTROL_COMMANDS = "v3:control.commands"
 

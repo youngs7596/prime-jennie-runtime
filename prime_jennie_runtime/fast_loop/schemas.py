@@ -56,12 +56,12 @@ class GenericAlertNotification(BaseModel):
 
 
 # =====================================================================
-# 실행 기록 (v3:executions → Postgres)
+# 실행 기록 (executions 테이블)
 # =====================================================================
 
 
 class ExecutionRecord(BaseModel):
-    """체결 이력. executions 테이블에 그대로 INSERT."""
+    """체결 이력. executions 테이블에 그대로 INSERT (PostgresTradeRecorder 직쓰기)."""
 
     sheet_id: str
     ticker: str

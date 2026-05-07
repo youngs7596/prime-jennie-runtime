@@ -41,6 +41,7 @@ from .control import (
     KEY_MAX_BUY_COUNT,
     KEY_MUTE_UNTIL,
     KEY_PRICE_ALERTS,
+    KEY_WATCHLIST_MANUAL,
     RESPONSE_DRYRUN_USAGE,
     RESPONSE_HELP,
     RESPONSE_LIQUIDATE_USAGE,
@@ -103,6 +104,9 @@ class CommandHandler:
             "/alerts": self._handle_alerts,
             "/maxbuy": self._handle_maxbuy,
             "/config": self._handle_config,
+            "/watchlist": self._handle_watchlist,
+            "/watch": self._handle_watch,
+            "/unwatch": self._handle_unwatch,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -342,6 +346,41 @@ class CommandHandler:
             f"일일 최대 매수: {max_buy_str}회"
         )
         return CommandResult(reply=reply)
+
+    # ----- 워치리스트 -----
+
+    async def _handle_watchlist(self, args: str, **_: object) -> CommandResult:
+        raw = await self._redis.hgetall(KEY_WATCHLIST_MANUAL)
+        if not raw:
+            return CommandResult(reply="워치리스트가 비어있습니다.")
+        lines = [f"<b>워치리스트</b> ({len(raw)}종목)"]
+        for code_b, name_b in sorted(raw.items()):
+            code = code_b.decode() if isinstance(code_b, bytes) else str(code_b)
+            name = name_b.decode() if isinstance(name_b, bytes) else str(name_b)
+            lines.append(f"  {name}({code})")
+        return CommandResult(reply="\n".join(lines))
+
+    async def _handle_watch(self, args: str, **_: object) -> CommandResult:
+        if not args.strip():
+            return CommandResult(reply="사용법: <code>/watch 종목명|코드</code>")
+        stock = await resolve_stock(self._pool, args.strip())
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {args.strip()}")
+        code, name = stock
+        await self._redis.hset(KEY_WATCHLIST_MANUAL, code.encode(), name.encode())
+        return CommandResult(reply=f"워치리스트에 추가: {name}({code})")
+
+    async def _handle_unwatch(self, args: str, **_: object) -> CommandResult:
+        if not args.strip():
+            return CommandResult(reply="사용법: <code>/unwatch 종목명|코드</code>")
+        stock = await resolve_stock(self._pool, args.strip())
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {args.strip()}")
+        code, name = stock
+        removed = await self._redis.hdel(KEY_WATCHLIST_MANUAL, code.encode())
+        if not removed:
+            return CommandResult(reply=f"워치리스트에 없습니다: {name}({code})")
+        return CommandResult(reply=f"워치리스트에서 제거: {name}({code})")
 
 
 def _on_off(v: bytes | str | None) -> str:

@@ -158,3 +158,52 @@ async def test_config_aggregates_state(fake_redis):
     res = await h.process_command("/config", "", chat_id="1001")
     assert "DRY_RUN: ON" in res.reply
     assert "7회" in res.reply
+
+
+# ----- /watch /unwatch /watchlist -----
+
+
+@pytest.mark.asyncio
+async def test_watch_adds_to_redis_hash(fake_redis):
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/watch", "005930", chat_id="1001")
+    assert "추가" in res.reply
+    val = await fake_redis.hget("watchlist:manual", b"005930")
+    assert val == b"\xec\x82\xbc\xec\x84\xb1\xec\xa0\x84\xec\x9e\x90"  # UTF-8 of 삼성전자
+
+
+@pytest.mark.asyncio
+async def test_watchlist_lists_all(fake_redis):
+    await fake_redis.hset("watchlist:manual", b"005930", "삼성전자".encode())
+    await fake_redis.hset("watchlist:manual", b"035720", "카카오".encode())
+    h = _handler(fake_redis)
+    res = await h.process_command("/watchlist", "", chat_id="1001")
+    assert "2종목" in res.reply
+    assert "삼성전자" in res.reply
+    assert "카카오" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_watchlist_empty(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/watchlist", "", chat_id="1001")
+    assert "비어있습니다" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_unwatch_removes(fake_redis):
+    await fake_redis.hset("watchlist:manual", b"005930", "삼성전자".encode())
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/unwatch", "005930", chat_id="1001")
+    assert "제거" in res.reply
+    assert await fake_redis.hget("watchlist:manual", b"005930") is None
+
+
+@pytest.mark.asyncio
+async def test_unwatch_not_in_list(fake_redis):
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/unwatch", "005930", chat_id="1001")
+    assert "없습니다" in res.reply

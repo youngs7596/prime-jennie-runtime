@@ -34,10 +34,12 @@ from prime_jennie_runtime.infra.redis_streams import (
 
 from .control import (
     KEY_FORCED_LIQUIDATION,
+    KEY_MANUAL_TRADE_PREFIX,
     KEY_MAX_BUY_COUNT,
     KEY_MUTE_UNTIL,
     KEY_PRICE_ALERTS,
     KEY_WATCHLIST_MANUAL,
+    MANUAL_TRADE_DAILY_LIMIT,
     RESPONSE_DRYRUN_USAGE,
     RESPONSE_HELP,
     RESPONSE_LIQUIDATE_USAGE,
@@ -116,6 +118,9 @@ class CommandHandler:
             "/pnl": self._handle_pnl,
             "/diagnose": self._handle_diagnose,
             "/report": self._handle_diagnose,  # v2 alias
+            "/buy": self._handle_buy,
+            "/sell": self._handle_sell,
+            "/sellall": self._handle_sellall,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -531,6 +536,95 @@ class CommandHandler:
             f"누적 손익: {total_krw:+,.0f}원",
         ]
         return CommandResult(reply="\n".join(lines))
+
+    # ----- 수동 매매 -----
+
+    async def _check_manual_trade_limit(self, chat_id: str) -> bool:
+        """일일 수동매매 한도 확인 + 카운터 증가. True 면 허용."""
+        today = self._now().astimezone(KST).date().isoformat()
+        key = f"{KEY_MANUAL_TRADE_PREFIX}{today}:{chat_id}"
+        try:
+            count = await self._redis.incr(key)
+            if count == 1:
+                await self._redis.expire(key, 86400)
+            # 한도 초과 — 증가분은 자연스럽게 다음 날 만료
+            return count <= MANUAL_TRADE_DAILY_LIMIT
+        except Exception:
+            logger.exception("manual_trade_limit check failed")
+            return True  # fail-open (다른 가드가 잡음)
+
+    async def _handle_buy(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        if not await self._check_manual_trade_limit(chat_id):
+            return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
+        parts = args.strip().split()
+        if not parts:
+            return CommandResult(reply="사용법: <code>/buy 종목 [수량]</code>")
+        stock = await resolve_stock(self._pool, parts[0])
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {parts[0]}")
+        code, name = stock
+
+        qty: int | None = None
+        if len(parts) > 1 and parts[1].isdigit():
+            qty = int(parts[1])
+        elif self._kis is not None:
+            try:
+                cash = await self._kis.get_cash()
+                snap = await self._kis.get_snapshot(code)
+                if snap.price > 0:
+                    qty = int((cash * 0.20) / snap.price)
+            except Exception:
+                logger.exception("auto-quantity calc failed code=%s", code)
+        if not qty or qty <= 0:
+            return CommandResult(reply="수량을 계산할 수 없습니다. 직접 입력하세요.")
+
+        cmd = await self._publish("manual_buy", chat_id, payload={"ticker": code, "quantity": qty})
+        return CommandResult(reply=f"매수 요청 발행: {name}({code}) {qty}주", published=cmd)
+
+    async def _handle_sell(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        if not await self._check_manual_trade_limit(chat_id):
+            return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
+        parts = args.strip().split()
+        if not parts:
+            return CommandResult(reply="사용법: <code>/sell 종목 [수량|전량]</code>")
+        stock = await resolve_stock(self._pool, parts[0])
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {parts[0]}")
+        code, name = stock
+
+        qty_str = parts[1] if len(parts) > 1 else "전량"
+        is_full = qty_str in ("전량", "all", "ALL")
+
+        qty = 0
+        if is_full:
+            if self._kis is None:
+                return CommandResult(reply="KIS 미주입 — 전량 매도는 직접 수량 입력")
+            try:
+                state = await self._kis.get_balance()
+                position = next((p for p in state.positions if p.stock_code == code), None)
+            except Exception:
+                logger.exception("get_balance failed for /sell")
+                return CommandResult(reply="잔고 조회 실패")
+            if position is None:
+                return CommandResult(reply=f"보유하고 있지 않습니다: {name}({code})")
+            qty = position.quantity
+        else:
+            qty = int(qty_str) if qty_str.isdigit() else 0
+
+        if qty <= 0:
+            return CommandResult(reply="매도 수량이 올바르지 않습니다.")
+
+        cmd = await self._publish("manual_sell", chat_id, payload={"ticker": code, "quantity": qty})
+        label = "전량" if is_full else f"{qty}주"
+        return CommandResult(reply=f"매도 요청 발행: {name}({code}) {label}", published=cmd)
+
+    async def _handle_sellall(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        if args.strip() != "확인":
+            return CommandResult(reply="전체 청산: <code>/sellall 확인</code> 으로 실행")
+        cmd = await self._publish("manual_sellall", chat_id, reason="telegram_sellall")
+        return CommandResult(
+            reply="<b>전체 청산 요청 발행</b> (실행은 fast-loop 에서)", published=cmd
+        )
 
     async def _handle_diagnose(self, args: str, **_: object) -> CommandResult:
         checks: list[str] = []

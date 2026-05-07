@@ -9,6 +9,8 @@ Consumer group 는 `control.runtime` 하나만 둔다 (state 는 멱등이므로
 - emergency_stop → STOP + PAUSE 동시 설정 (v2 policy: stop 이 pause 를 함의).
 - resume → STOP + PAUSE 동시 해제 (긴급 복귀).
 - set_dryrun → payload.enabled True/False 기반 SET/DEL.
+- manual_buy / manual_sell / manual_sellall — kis_client 주입 시 KIS gateway
+  로 주문. DRY_RUN 키 ON 이면 실 주문 없이 로그만.
 - observer 주입 시 `pj.control.applied` 이벤트 발생 (telemetry).
 """
 
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
 from minyoung_mah import Observer
@@ -34,6 +37,9 @@ from prime_jennie_runtime.telegram_bot.control import (
     ControlCommand,
 )
 
+if TYPE_CHECKING:
+    from prime_jennie_runtime.fast_loop.kis_client import KisClient
+
 logger = logging.getLogger(__name__)
 
 CONTROL_GROUP = "control.runtime"
@@ -49,9 +55,11 @@ class ControlCommandConsumer:
         consumer_name: str,
         observer: Observer | None = None,
         group: str = CONTROL_GROUP,
+        kis_client: KisClient | None = None,
     ) -> None:
         self._redis = redis_client
         self._observer = observer
+        self._kis = kis_client
         self._consumer = TypedStreamConsumer(
             client=redis_client,
             stream=STREAM_CONTROL_COMMANDS,
@@ -69,11 +77,14 @@ class ControlCommandConsumer:
 
     async def apply(self, command: ControlCommand) -> None:
         """단일 명령 적용 — 테스트 / consumer 양쪽에서 직접 호출 가능."""
-        handler = _HANDLERS.get(command.kind)
-        if handler is None:
-            logger.error("unknown control command kind: %s", command.kind)
-            return
-        await handler(self._redis, command)
+        if command.kind in ("manual_buy", "manual_sell", "manual_sellall"):
+            await self._apply_manual_trade(command)
+        else:
+            handler = _HANDLERS.get(command.kind)
+            if handler is None:
+                logger.error("unknown control command kind: %s", command.kind)
+                return
+            await handler(self._redis, command)
         if self._observer is not None:
             await self._observer.emit(
                 pj_event(
@@ -85,6 +96,89 @@ class ControlCommandConsumer:
                     reason=command.reason or "",
                 )
             )
+
+    async def _apply_manual_trade(self, command: ControlCommand) -> None:
+        if self._kis is None:
+            logger.error(
+                "manual trade %s received but ControlConsumer has no kis_client", command.kind
+            )
+            return
+        dryrun = bool(await self._redis.get(STATE_KEY_DRYRUN))
+        if dryrun:
+            logger.info(
+                "DRY_RUN: skipping manual trade kind=%s payload=%s", command.kind, command.payload
+            )
+            return
+        from prime_jennie_runtime.kis_gateway.schemas import OrderRequest
+
+        if command.kind == "manual_buy":
+            ticker = str(command.payload.get("ticker", ""))
+            qty = int(command.payload.get("quantity", 0))
+            if not ticker or qty <= 0:
+                logger.warning("manual_buy invalid payload: %s", command.payload)
+                return
+            try:
+                result = await self._kis.buy(
+                    OrderRequest(stock_code=ticker, quantity=qty, order_type="market", price=0)
+                )
+                logger.info(
+                    "manual_buy ticker=%s qty=%d success=%s order_no=%s",
+                    ticker,
+                    qty,
+                    result.success,
+                    result.order_no,
+                )
+            except Exception:
+                logger.exception("manual_buy failed ticker=%s qty=%d", ticker, qty)
+
+        elif command.kind == "manual_sell":
+            ticker = str(command.payload.get("ticker", ""))
+            qty = int(command.payload.get("quantity", 0))
+            if not ticker or qty <= 0:
+                logger.warning("manual_sell invalid payload: %s", command.payload)
+                return
+            try:
+                result = await self._kis.sell(
+                    OrderRequest(stock_code=ticker, quantity=qty, order_type="market", price=0)
+                )
+                logger.info(
+                    "manual_sell ticker=%s qty=%d success=%s order_no=%s",
+                    ticker,
+                    qty,
+                    result.success,
+                    result.order_no,
+                )
+            except Exception:
+                logger.exception("manual_sell failed ticker=%s qty=%d", ticker, qty)
+
+        elif command.kind == "manual_sellall":
+            try:
+                state = await self._kis.get_balance()
+            except Exception:
+                logger.exception("manual_sellall: get_balance failed")
+                return
+            if not state.positions:
+                logger.info("manual_sellall: no positions")
+                return
+            count = 0
+            for p in state.positions:
+                try:
+                    await self._kis.sell(
+                        OrderRequest(
+                            stock_code=p.stock_code,
+                            quantity=p.quantity,
+                            order_type="market",
+                            price=0,
+                        )
+                    )
+                    count += 1
+                except Exception:
+                    logger.exception(
+                        "manual_sellall sell failed ticker=%s qty=%d",
+                        p.stock_code,
+                        p.quantity,
+                    )
+            logger.info("manual_sellall: sold %d/%d positions", count, len(state.positions))
 
 
 # ---------------------------------------------------------------------

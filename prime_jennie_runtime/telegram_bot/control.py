@@ -22,6 +22,9 @@ ControlKind = Literal[
     "liquidate_add",
     "liquidate_remove",
     "liquidate_clear",
+    "manual_buy",
+    "manual_sell",
+    "manual_sellall",
 ]
 
 
@@ -57,6 +60,10 @@ KEY_WATCHLIST_MANUAL = "watchlist:manual"
 
 # 강제 청산 대상 Redis Set (v2 호환). fast-loop 의 ControlConsumer 가 멤버 추가/제거.
 KEY_FORCED_LIQUIDATION = "forced_liquidation:stocks"
+
+# 일일 수동 매매 카운터 prefix — telegram:manual_trades:{YYYY-MM-DD}:{chat_id}
+KEY_MANUAL_TRADE_PREFIX = "telegram:manual_trades:"
+MANUAL_TRADE_DAILY_LIMIT = 20
 
 
 def rate_limit_key(chat_id: str) -> str:
@@ -121,10 +128,12 @@ RESPONSE_LIQUIDATE_USAGE = (
 
 __all__ = [
     "KEY_FORCED_LIQUIDATION",
+    "KEY_MANUAL_TRADE_PREFIX",
     "KEY_MAX_BUY_COUNT",
     "KEY_MUTE_UNTIL",
     "KEY_PRICE_ALERTS",
     "KEY_WATCHLIST_MANUAL",
+    "MANUAL_TRADE_DAILY_LIMIT",
     "RESPONSE_DRYRUN_USAGE",
     "RESPONSE_HELP",
     "RESPONSE_LIQUIDATE_USAGE",

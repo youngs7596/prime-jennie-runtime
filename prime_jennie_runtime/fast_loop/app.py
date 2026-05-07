@@ -182,7 +182,7 @@ async def run() -> None:
         recorder = PostgresTradeRecorder(pool)
 
         control_consumer = ControlCommandConsumer(
-            redis_client, consumer_name=f"control-fast-{cfg.env}"
+            redis_client, consumer_name=f"control-fast-{cfg.env}", kis_client=kis
         )
 
         risk_throttle = IntradayRiskThrottle(redis_client)

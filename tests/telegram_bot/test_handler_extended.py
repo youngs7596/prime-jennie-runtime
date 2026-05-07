@@ -470,6 +470,252 @@ async def test_liquidate_arm_with_members_publishes(fake_redis):
     assert res.published.kind == "liquidate_arm"
 
 
+# ----- /buy /sell /sellall (A7 manual trading) -----
+
+
+@pytest.mark.asyncio
+async def test_buy_with_explicit_quantity(fake_redis):
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/buy", "005930 10", chat_id="1001")
+    assert "매수 요청 발행" in res.reply
+    assert "10주" in res.reply
+    assert res.published.kind == "manual_buy"
+    assert res.published.payload == {"ticker": "005930", "quantity": 10}
+
+
+@pytest.mark.asyncio
+async def test_buy_auto_quantity_uses_kis(fake_redis):
+    from prime_jennie_runtime.kis_gateway.schemas import StockSnapshot
+
+    snap = StockSnapshot(stock_code="005930", price=70000, timestamp=FROZEN_NOW)
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    kis = _StubKis(cash=10_000_000, snapshot=snap)
+    h = _handler(fake_redis, pool=pool, kis=kis)
+    # 1천만 × 0.20 / 70000 = 28주
+    res = await h.process_command("/buy", "005930", chat_id="1001")
+    assert "28주" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_buy_unknown_stock(fake_redis):
+    h = _handler(fake_redis, pool=_StubPool())
+    res = await h.process_command("/buy", "없는종목 10", chat_id="1001")
+    assert "찾을 수 없" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_sell_explicit_quantity(fake_redis):
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/sell", "005930 5", chat_id="1001")
+    assert "매도 요청 발행" in res.reply
+    assert res.published.kind == "manual_sell"
+    assert res.published.payload == {"ticker": "005930", "quantity": 5}
+
+
+@pytest.mark.asyncio
+async def test_sell_full_uses_kis_position(fake_redis):
+    from prime_jennie_runtime.kis_gateway.schemas import PortfolioState, Position
+
+    state = PortfolioState(
+        positions=[
+            Position(
+                stock_code="005930",
+                stock_name="삼성전자",
+                quantity=15,
+                average_buy_price=70000,
+                total_buy_amount=1_050_000,
+            )
+        ],
+        cash_balance=0,
+        total_asset=0,
+        stock_eval_amount=0,
+        position_count=1,
+        timestamp=FROZEN_NOW,
+    )
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool, kis=_StubKis(balance=state))
+    res = await h.process_command("/sell", "005930 전량", chat_id="1001")
+    assert res.published.payload["quantity"] == 15
+
+
+@pytest.mark.asyncio
+async def test_sell_full_no_position(fake_redis):
+    from prime_jennie_runtime.kis_gateway.schemas import PortfolioState
+
+    state = PortfolioState(
+        positions=[],
+        cash_balance=0,
+        total_asset=0,
+        stock_eval_amount=0,
+        position_count=0,
+        timestamp=FROZEN_NOW,
+    )
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool, kis=_StubKis(balance=state))
+    res = await h.process_command("/sell", "005930 전량", chat_id="1001")
+    assert "보유하고 있지 않습니다" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_sellall_requires_confirmation(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/sellall", "", chat_id="1001")
+    assert "확인" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_sellall_with_confirmation(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/sellall", "확인", chat_id="1001")
+    assert "전체 청산 요청 발행" in res.reply
+    assert res.published.kind == "manual_sellall"
+
+
+@pytest.mark.asyncio
+async def test_manual_trade_daily_limit(fake_redis):
+    h = _handler(fake_redis)
+    # MANUAL_TRADE_DAILY_LIMIT 까지는 통과
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h._pool = pool
+    for _ in range(20):
+        await h.process_command("/buy", "005930 1", chat_id="1001")
+    # 21번째는 거부
+    res = await h.process_command("/buy", "005930 1", chat_id="1001")
+    assert "한도" in res.reply
+
+
+# ----- ControlConsumer 측 manual trade handler -----
+
+
+class _RecordingKis:
+    def __init__(self, *, balance=None):
+        self.calls: list[tuple[str, dict]] = []
+        self._balance = balance
+
+    async def buy(self, order):
+        from prime_jennie_runtime.kis_gateway.schemas import OrderResult
+
+        self.calls.append(("buy", order.model_dump()))
+        return OrderResult(
+            success=True,
+            order_no="order_123",
+            stock_code=order.stock_code,
+            quantity=order.quantity,
+            price=0,
+        )
+
+    async def sell(self, order):
+        from prime_jennie_runtime.kis_gateway.schemas import OrderResult
+
+        self.calls.append(("sell", order.model_dump()))
+        return OrderResult(
+            success=True,
+            order_no="order_456",
+            stock_code=order.stock_code,
+            quantity=order.quantity,
+            price=0,
+        )
+
+    async def get_balance(self):
+        return self._balance
+
+
+@pytest.mark.asyncio
+async def test_consumer_manual_buy_calls_kis(fake_redis):
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    kis = _RecordingKis()
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t", kis_client=kis)
+    await consumer.apply(
+        ControlCommand(
+            kind="manual_buy",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="t",
+            payload={"ticker": "005930", "quantity": 10},
+        )
+    )
+    assert kis.calls == [
+        ("buy", {"stock_code": "005930", "quantity": 10, "order_type": "market", "price": 0})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_consumer_manual_buy_skipped_when_dryrun(fake_redis):
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    await fake_redis.set("control.state:dryrun", b"1")
+    kis = _RecordingKis()
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t", kis_client=kis)
+    await consumer.apply(
+        ControlCommand(
+            kind="manual_buy",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="t",
+            payload={"ticker": "005930", "quantity": 10},
+        )
+    )
+    assert kis.calls == []
+
+
+@pytest.mark.asyncio
+async def test_consumer_manual_sellall_iterates_positions(fake_redis):
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.kis_gateway.schemas import PortfolioState, Position
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    state = PortfolioState(
+        positions=[
+            Position(
+                stock_code="005930",
+                stock_name="삼성전자",
+                quantity=10,
+                average_buy_price=70000,
+                total_buy_amount=700000,
+            ),
+            Position(
+                stock_code="035720",
+                stock_name="카카오",
+                quantity=20,
+                average_buy_price=50000,
+                total_buy_amount=1_000_000,
+            ),
+        ],
+        cash_balance=0,
+        total_asset=0,
+        stock_eval_amount=0,
+        position_count=2,
+        timestamp=FROZEN_NOW,
+    )
+    kis = _RecordingKis(balance=state)
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t", kis_client=kis)
+    await consumer.apply(
+        ControlCommand(
+            kind="manual_sellall",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="t",
+        )
+    )
+    sell_calls = [c for c in kis.calls if c[0] == "sell"]
+    assert len(sell_calls) == 2
+    assert {c[1]["stock_code"] for c in sell_calls} == {"005930", "035720"}
+
+
 @pytest.mark.asyncio
 async def test_liquidate_consumer_handlers(fake_redis):
     """ControlConsumer 측 핸들러 — apply 시 forced_liquidation:stocks 갱신."""

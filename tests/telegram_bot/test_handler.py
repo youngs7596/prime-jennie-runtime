@@ -275,8 +275,7 @@ async def test_liquidate_invalid_arg(fake_redis):
 @pytest.mark.asyncio
 async def test_unknown_command_no_publish(fake_redis):
     h = _handler(fake_redis)
-    result = await h.process_command("/buy", "005930 10", chat_id="1001")
-    # Phase 2.1 에서 /buy 는 구현 범위 외 — unknown 반환, publish 없음
+    result = await h.process_command("/nonexistent", "", chat_id="1001")
     assert "알 수 없는" in result.reply
     assert result.published is None
 

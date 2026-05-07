@@ -236,6 +236,8 @@ async def test_dryrun_invalid_arg(fake_redis):
 
 @pytest.mark.asyncio
 async def test_liquidate_arm(fake_redis):
+    # arm 은 forced_liquidation:stocks 에 멤버가 있어야 publish (v2 호환)
+    await fake_redis.sadd("forced_liquidation:stocks", b"005930")
     h = _handler(fake_redis)
     result = await h.process_command("/liquidate", "arm", chat_id="1001")
     assert result.published is not None

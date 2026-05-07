@@ -33,6 +33,7 @@ from prime_jennie_runtime.infra.redis_streams import (
 )
 
 from .control import (
+    KEY_FORCED_LIQUIDATION,
     KEY_MAX_BUY_COUNT,
     KEY_MUTE_UNTIL,
     KEY_PRICE_ALERTS,
@@ -236,16 +237,70 @@ class CommandHandler:
         )
 
     async def _handle_liquidate(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
-        arg = args.strip().lower()
-        if arg == "arm":
+        parts = args.strip().split(maxsplit=1)
+        sub = parts[0].lower() if parts else ""
+        sub_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "arm":
+            members = await self._redis.smembers(KEY_FORCED_LIQUIDATION)
+            if not members:
+                return CommandResult(
+                    reply="대상 종목이 없습니다. 먼저 <code>/liquidate add</code> 로 등록하세요."
+                )
             cmd = await self._publish("liquidate_arm", chat_id)
-            return CommandResult(reply="강제 청산 armed (실행은 fast loop 에서)", published=cmd)
-        if arg == "disarm":
+            return CommandResult(
+                reply=f"강제 청산 armed ({len(members)}종목 — 다음 틱에서 매도)",
+                published=cmd,
+            )
+        if sub == "disarm":
             cmd = await self._publish("liquidate_disarm", chat_id)
             return CommandResult(reply="강제 청산 disarm", published=cmd)
-        if arg == "status":
+        if sub == "status":
             armed = await self._redis.get(STATE_KEY_LIQUIDATE_ARMED)
-            return CommandResult(reply=f"강제 청산 armed: {_on_off(armed)}")
+            members = await self._redis.smembers(KEY_FORCED_LIQUIDATION)
+            if not members:
+                return CommandResult(reply=f"강제 청산 armed: {_on_off(armed)}\n대상: 없음")
+            lines = [
+                "<b>강제 청산 상태</b>",
+                f"armed: {_on_off(armed)}",
+                f"대상 ({len(members)}종목):",
+            ]
+            for m in sorted(members):
+                code = m.decode() if isinstance(m, bytes) else str(m)
+                stock = await resolve_stock(self._pool, code)
+                name = stock[1] if stock else code
+                lines.append(f"  {name}({code})")
+            return CommandResult(reply="\n".join(lines))
+
+        if sub == "list":
+            members = await self._redis.smembers(KEY_FORCED_LIQUIDATION)
+            if not members:
+                return CommandResult(reply="강제 청산 대상이 없습니다.")
+            lines = [f"<b>강제 청산 대상 ({len(members)}종목)</b>"]
+            for m in sorted(members):
+                code = m.decode() if isinstance(m, bytes) else str(m)
+                stock = await resolve_stock(self._pool, code)
+                name = stock[1] if stock else code
+                lines.append(f"  {name}({code})")
+            return CommandResult(reply="\n".join(lines))
+
+        if sub == "clear":
+            cmd = await self._publish("liquidate_clear", chat_id)
+            return CommandResult(reply="강제 청산 대상 전체 초기화 + 스위치 OFF", published=cmd)
+
+        if sub in ("add", "remove"):
+            if not sub_arg:
+                return CommandResult(reply=f"사용법: <code>/liquidate {sub} 종목명|코드</code>")
+            stock = await resolve_stock(self._pool, sub_arg)
+            if stock is None:
+                return CommandResult(reply=f"종목을 찾을 수 없습니다: {sub_arg}")
+            code, name = stock
+            if sub == "add":
+                cmd = await self._publish("liquidate_add", chat_id, payload={"ticker": code})
+                return CommandResult(reply=f"강제 청산 대상 추가: {name}({code})", published=cmd)
+            cmd = await self._publish("liquidate_remove", chat_id, payload={"ticker": code})
+            return CommandResult(reply=f"강제 청산 대상 제거: {name}({code})", published=cmd)
+
         return CommandResult(reply=RESPONSE_LIQUIDATE_USAGE)
 
     # ----- 알림 음소거 -----

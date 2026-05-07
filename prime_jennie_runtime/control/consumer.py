@@ -26,6 +26,7 @@ from prime_jennie_runtime.infra.redis_streams import (
     TypedStreamConsumer,
 )
 from prime_jennie_runtime.telegram_bot.control import (
+    KEY_FORCED_LIQUIDATION,
     STATE_KEY_DRYRUN,
     STATE_KEY_LIQUIDATE_ARMED,
     STATE_KEY_PAUSE,
@@ -120,6 +121,26 @@ async def _liquidate_disarm(redis: aioredis.Redis, cmd: ControlCommand) -> None:
     await redis.delete(STATE_KEY_LIQUIDATE_ARMED)
 
 
+async def _liquidate_add(redis: aioredis.Redis, cmd: ControlCommand) -> None:
+    ticker = str(cmd.payload.get("ticker", "")).strip()
+    if not ticker:
+        logger.warning("liquidate_add missing ticker payload")
+        return
+    await redis.sadd(KEY_FORCED_LIQUIDATION, ticker.encode())
+
+
+async def _liquidate_remove(redis: aioredis.Redis, cmd: ControlCommand) -> None:
+    ticker = str(cmd.payload.get("ticker", "")).strip()
+    if not ticker:
+        logger.warning("liquidate_remove missing ticker payload")
+        return
+    await redis.srem(KEY_FORCED_LIQUIDATION, ticker.encode())
+
+
+async def _liquidate_clear(redis: aioredis.Redis, cmd: ControlCommand) -> None:
+    await redis.delete(KEY_FORCED_LIQUIDATION, STATE_KEY_LIQUIDATE_ARMED)
+
+
 _HANDLERS: dict[str, Callable[[aioredis.Redis, ControlCommand], Awaitable[None]]] = {
     "emergency_stop": _emergency_stop,
     "pause": _pause,
@@ -127,6 +148,9 @@ _HANDLERS: dict[str, Callable[[aioredis.Redis, ControlCommand], Awaitable[None]]
     "set_dryrun": _set_dryrun,
     "liquidate_arm": _liquidate_arm,
     "liquidate_disarm": _liquidate_disarm,
+    "liquidate_add": _liquidate_add,
+    "liquidate_remove": _liquidate_remove,
+    "liquidate_clear": _liquidate_clear,
 }
 
 

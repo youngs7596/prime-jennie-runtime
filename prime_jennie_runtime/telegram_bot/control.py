@@ -19,6 +19,9 @@ ControlKind = Literal[
     "set_dryrun",
     "liquidate_arm",
     "liquidate_disarm",
+    "liquidate_add",
+    "liquidate_remove",
+    "liquidate_clear",
 ]
 
 
@@ -51,6 +54,9 @@ KEY_MUTE_UNTIL = "notification:mute_until"
 KEY_PRICE_ALERTS = "price_alerts"
 KEY_MAX_BUY_COUNT = "config:max_buy_count"
 KEY_WATCHLIST_MANUAL = "watchlist:manual"
+
+# 강제 청산 대상 Redis Set (v2 호환). fast-loop 의 ControlConsumer 가 멤버 추가/제거.
+KEY_FORCED_LIQUIDATION = "forced_liquidation:stocks"
 
 
 def rate_limit_key(chat_id: str) -> str:
@@ -102,9 +108,19 @@ RESPONSE_NOT_ALLOWED = "허용되지 않은 chat 입니다."
 RESPONSE_RATE_LIMITED = "너무 빠릅니다. 잠시 후 다시 시도하세요."
 RESPONSE_STOP_CONFIRM = "긴급 정지: <code>/stop 확인</code> 로만 실행됩니다."
 RESPONSE_DRYRUN_USAGE = "사용법: <code>/dryrun on|off</code>"
-RESPONSE_LIQUIDATE_USAGE = "사용법: <code>/liquidate arm|disarm|status</code>"
+RESPONSE_LIQUIDATE_USAGE = (
+    "사용법:\n"
+    "<code>/liquidate add 종목</code> — 대상 추가\n"
+    "<code>/liquidate remove 종목</code> — 대상 제거\n"
+    "<code>/liquidate list</code> — 대상 목록\n"
+    "<code>/liquidate clear</code> — 전체 초기화\n"
+    "<code>/liquidate arm</code> — 스위치 ON\n"
+    "<code>/liquidate disarm</code> — 스위치 OFF\n"
+    "<code>/liquidate status</code> — 상태 조회"
+)
 
 __all__ = [
+    "KEY_FORCED_LIQUIDATION",
     "KEY_MAX_BUY_COUNT",
     "KEY_MUTE_UNTIL",
     "KEY_PRICE_ALERTS",

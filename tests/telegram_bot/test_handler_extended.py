@@ -404,3 +404,113 @@ async def test_report_aliases_diagnose(fake_redis):
     h = _handler(fake_redis, pool=pool, kis=kis)
     res = await h.process_command("/report", "", chat_id="1001")
     assert "시스템 진단" in res.reply
+
+
+# ----- /liquidate sub-commands (A6 확장) -----
+
+
+@pytest.mark.asyncio
+async def test_liquidate_add_publishes(fake_redis):
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/liquidate", "add 005930", chat_id="1001")
+    assert "추가" in res.reply
+    assert res.published is not None
+    assert res.published.kind == "liquidate_add"
+    assert res.published.payload["ticker"] == "005930"
+
+
+@pytest.mark.asyncio
+async def test_liquidate_remove_publishes(fake_redis):
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/liquidate", "remove 005930", chat_id="1001")
+    assert "제거" in res.reply
+    assert res.published.kind == "liquidate_remove"
+
+
+@pytest.mark.asyncio
+async def test_liquidate_clear_publishes(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/liquidate", "clear", chat_id="1001")
+    assert "초기화" in res.reply
+    assert res.published.kind == "liquidate_clear"
+
+
+@pytest.mark.asyncio
+async def test_liquidate_list_empty(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/liquidate", "list", chat_id="1001")
+    assert "없습니다" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_liquidate_list_with_members(fake_redis):
+    await fake_redis.sadd("forced_liquidation:stocks", b"005930")
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/liquidate", "list", chat_id="1001")
+    assert "삼성전자" in res.reply
+
+
+@pytest.mark.asyncio
+async def test_liquidate_arm_blocks_when_empty(fake_redis):
+    h = _handler(fake_redis)
+    res = await h.process_command("/liquidate", "arm", chat_id="1001")
+    assert "대상 종목이 없습니다" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_liquidate_arm_with_members_publishes(fake_redis):
+    await fake_redis.sadd("forced_liquidation:stocks", b"005930")
+    h = _handler(fake_redis)
+    res = await h.process_command("/liquidate", "arm", chat_id="1001")
+    assert "armed" in res.reply
+    assert res.published.kind == "liquidate_arm"
+
+
+@pytest.mark.asyncio
+async def test_liquidate_consumer_handlers(fake_redis):
+    """ControlConsumer 측 핸들러 — apply 시 forced_liquidation:stocks 갱신."""
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t")
+
+    await consumer.apply(
+        ControlCommand(
+            kind="liquidate_add",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="test",
+            payload={"ticker": "005930"},
+        )
+    )
+    members = await fake_redis.smembers("forced_liquidation:stocks")
+    assert b"005930" in members
+
+    await consumer.apply(
+        ControlCommand(
+            kind="liquidate_remove",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="test",
+            payload={"ticker": "005930"},
+        )
+    )
+    members = await fake_redis.smembers("forced_liquidation:stocks")
+    assert b"005930" not in members
+
+    await fake_redis.sadd("forced_liquidation:stocks", b"x", b"y")
+    await fake_redis.set("control.state:liquidate_armed", b"1")
+    await consumer.apply(
+        ControlCommand(
+            kind="liquidate_clear",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="test",
+        )
+    )
+    assert not await fake_redis.smembers("forced_liquidation:stocks")
+    assert await fake_redis.get("control.state:liquidate_armed") is None

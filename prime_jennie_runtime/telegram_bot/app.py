@@ -3,13 +3,10 @@
 v2 `services/telegram/app.py`의 lifespan 패턴 포팅.
 threading → asyncio task로 치환 (fast_loop과 동일한 async 모델).
 
-Phase 1 범위:
-  - `v3:notifications` 소비자 기동/정리
+기동 task:
+  - `v3:notifications` 소비자 — 항상 기동
+  - Telegram getUpdates long-poll — bot_token + allowed_chat_ids 둘 다 있을 때만
   - 헬스체크 엔드포인트
-
-Phase 2로 연기:
-  - /start, /stop, /poll 폴링 엔드포인트 (양방향 명령)
-  - CommandHandler 연동
 """
 
 from __future__ import annotations
@@ -26,6 +23,8 @@ from prime_jennie_runtime.infra.redis_streams import STREAM_NOTIFICATIONS
 
 from .bot import TelegramBot
 from .consumer import NotificationConsumer
+from .handler import CommandHandler
+from .long_poll import LongPollLoop
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +56,28 @@ async def lifespan(app: FastAPI):
     app.state.consumer_task = task
     logger.info("Telegram notification consumer task launched")
 
+    long_poll: LongPollLoop | None = None
+    long_poll_task: asyncio.Task | None = None
+    if config.telegram.bot_token and config.telegram.allowed_chat_ids:
+        long_poll = LongPollLoop(
+            config=config.telegram,
+            handler=CommandHandler(redis_client, config.telegram),
+            bot=bot,
+        )
+        long_poll_task = asyncio.create_task(long_poll.run(), name="telegram-long-poll")
+        app.state.long_poll = long_poll
+        app.state.long_poll_task = long_poll_task
+        logger.info(
+            "Telegram long-poll task launched (allowed_chat_ids=%d)",
+            len(config.telegram.allowed_chat_ids),
+        )
+    else:
+        logger.info(
+            "Telegram long-poll disabled (bot_token_set=%s allowed_chat_ids=%d)",
+            bool(config.telegram.bot_token),
+            len(config.telegram.allowed_chat_ids),
+        )
+
     try:
         yield
     finally:
@@ -66,6 +87,16 @@ async def lifespan(app: FastAPI):
             await task
         except (asyncio.CancelledError, Exception):
             pass
+        if long_poll is not None:
+            long_poll.stop()
+        if long_poll_task is not None:
+            long_poll_task.cancel()
+            try:
+                await long_poll_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if long_poll is not None:
+            await long_poll.close()
         await bot.close()
         logger.info("Telegram bot shut down")
 

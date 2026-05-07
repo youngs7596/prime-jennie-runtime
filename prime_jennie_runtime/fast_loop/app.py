@@ -54,8 +54,11 @@ class PostgresSheetFetcher:
         )
         if row is None:
             return []
+        raw = row["sheet_json"]
         try:
-            return [PositionSheet.model_validate(row["sheet_json"])]
+            if isinstance(raw, (str, bytes, bytearray)):
+                return [PositionSheet.model_validate_json(raw)]
+            return [PositionSheet.model_validate(raw)]
         except Exception:
             logger.exception("invalid sheet_json in DB: sheet_id=%s", sheet_id)
             return []

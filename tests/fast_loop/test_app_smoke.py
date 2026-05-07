@@ -48,6 +48,26 @@ async def test_postgres_sheet_fetcher_invalid_json_returns_empty():
     assert await fetcher("any") == []
 
 
+async def test_postgres_sheet_fetcher_handles_jsonb_string():
+    # asyncpg jsonb 컬럼은 codec 미등록 시 string 으로 반환되므로
+    # model_validate_json 경로가 살아있어야 한다.
+    sheet = _minimal_sheet()
+    pool = _FakePool(row={"sheet_json": sheet.model_dump_json()})
+    fetcher = fast_app.PostgresSheetFetcher(pool)  # type: ignore[arg-type]
+    result = await fetcher(sheet.sheet_id)
+    assert len(result) == 1
+    assert result[0].sheet_id == sheet.sheet_id
+
+
+async def test_postgres_sheet_fetcher_handles_dict():
+    sheet = _minimal_sheet()
+    pool = _FakePool(row={"sheet_json": sheet.model_dump(mode="json")})
+    fetcher = fast_app.PostgresSheetFetcher(pool)  # type: ignore[arg-type]
+    result = await fetcher(sheet.sheet_id)
+    assert len(result) == 1
+    assert result[0].sheet_id == sheet.sheet_id
+
+
 async def test_balance_sizer_returns_zero_when_stopped():
     kis = AsyncMock()
     sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_blocking_snapshot()))

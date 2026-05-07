@@ -18,6 +18,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
 
@@ -26,6 +27,11 @@ from prime_jennie_runtime.infra.redis_streams import (
     STREAM_CONTROL_COMMANDS,
     TypedStreamPublisher,
 )
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from prime_jennie_runtime.fast_loop.kis_client import KisClient
 
 from .control import (
     RESPONSE_DRYRUN_USAGE,
@@ -63,10 +69,15 @@ class CommandHandler:
         redis_client: aioredis.Redis,
         config: TelegramConfig,
         now_fn: Callable[[], datetime] | None = None,
+        *,
+        pool: asyncpg.Pool | None = None,
+        kis_client: KisClient | None = None,
     ) -> None:
         self._redis = redis_client
         self._config = config
         self._now = now_fn or (lambda: datetime.now(UTC))
+        self._pool = pool
+        self._kis = kis_client
         self._publisher: TypedStreamPublisher[ControlCommand] = TypedStreamPublisher(
             redis_client, STREAM_CONTROL_COMMANDS, ControlCommand
         )

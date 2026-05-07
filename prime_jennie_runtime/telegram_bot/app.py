@@ -7,6 +7,9 @@ threading → asyncio task로 치환 (fast_loop과 동일한 async 모델).
   - `v3:notifications` 소비자 — 항상 기동
   - Telegram getUpdates long-poll — bot_token + allowed_chat_ids 둘 다 있을 때만
   - 헬스체크 엔드포인트
+
+장기능 명령 (/balance /portfolio /price /pnl /buy /sell …) 핸들러를 위해
+asyncpg pool + KIS gateway HTTP client 도 lifespan 에서 함께 주입한다.
 """
 
 from __future__ import annotations
@@ -15,9 +18,11 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+import asyncpg
 import redis.asyncio as aioredis
 from fastapi import FastAPI
 
+from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.infra.config import AppConfig
 from prime_jennie_runtime.infra.redis_streams import STREAM_NOTIFICATIONS
 
@@ -56,20 +61,47 @@ async def lifespan(app: FastAPI):
     app.state.consumer_task = task
     logger.info("Telegram notification consumer task launched")
 
+    pool: asyncpg.Pool | None = None
+    kis_client: KisClient | None = None
     long_poll: LongPollLoop | None = None
     long_poll_task: asyncio.Task | None = None
     if config.telegram.bot_token and config.telegram.allowed_chat_ids:
+        try:
+            pool = await asyncpg.create_pool(
+                host=config.postgres.host,
+                port=config.postgres.port,
+                user=config.postgres.user,
+                password=config.postgres.password,
+                database=config.postgres.db,
+                min_size=1,
+                max_size=2,
+            )
+        except Exception:
+            logger.exception(
+                "telegram-bot PG pool init failed — DB-dependent commands will degrade"
+            )
+        try:
+            kis_client = KisClient(config.kis)
+        except Exception:
+            logger.exception(
+                "telegram-bot KIS client init failed — KIS-dependent commands will degrade"
+            )
+
         long_poll = LongPollLoop(
             config=config.telegram,
-            handler=CommandHandler(redis_client, config.telegram),
+            handler=CommandHandler(redis_client, config.telegram, pool=pool, kis_client=kis_client),
             bot=bot,
         )
         long_poll_task = asyncio.create_task(long_poll.run(), name="telegram-long-poll")
+        app.state.pool = pool
+        app.state.kis_client = kis_client
         app.state.long_poll = long_poll
         app.state.long_poll_task = long_poll_task
         logger.info(
-            "Telegram long-poll task launched (allowed_chat_ids=%d)",
+            "Telegram long-poll task launched (allowed_chat_ids=%d pool=%s kis=%s)",
             len(config.telegram.allowed_chat_ids),
+            "ok" if pool is not None else "missing",
+            "ok" if kis_client is not None else "missing",
         )
     else:
         logger.info(
@@ -97,6 +129,10 @@ async def lifespan(app: FastAPI):
                 pass
         if long_poll is not None:
             await long_poll.close()
+        if kis_client is not None:
+            await kis_client.close()
+        if pool is not None:
+            await pool.close()
         await bot.close()
         logger.info("Telegram bot shut down")
 

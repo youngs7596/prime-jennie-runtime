@@ -237,7 +237,11 @@ services:
       <<: *common-env
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
       TELEGRAM_DRY_RUN: ${TELEGRAM_DRY_RUN:-false}
+      KIS_GATEWAY_URL: http://kis-gateway:8080
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
     depends_on:
       redis:
         condition: service_healthy

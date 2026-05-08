@@ -418,3 +418,135 @@ async def test_tick_loop_entry_blocked_when_price_below_fails(fake_redis):
     # 매수 안 함, 큐에 남음
     assert kis.buy_calls == []
     assert queue.contains_sheet(sheet.sheet_id) is True
+
+
+# =====================================================================
+# Forced liquidation — armed + ticker∈forced_liquidation set 트리거
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_forced_liquidation_triggers(fake_redis):
+    """liquidate_armed=1 + ticker in forced_liquidation:stocks 면 즉시 매도."""
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=68000.0)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(sl_pct=0.10)  # 정상 SL 트리거 안 되도록 큰 값
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=70000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        high_watermark=70000.0,
+    )
+    await tracker.register(state)
+
+    # 강제 청산 armed + 멤버 등록
+    await fake_redis.set("control.state:liquidate_armed", b"1")
+    await fake_redis.sadd("forced_liquidation:stocks", b"005930")
+
+    async def fetch(sheet_id: str):
+        return [sheet] if sheet_id == sheet.sheet_id else []
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        entry_executor=entry_exec,
+        group="tick_g_forced",
+        consumer="tcf",
+    )
+    await loop.ensure_group()
+
+    await fake_redis.xadd(
+        "kis:prices",
+        {
+            "payload": json.dumps(
+                {
+                    "ticker": "005930",
+                    "price": 69500.0,  # SL 트리거 미만
+                    "ts": "2026-04-16T09:30:00+09:00",
+                }
+            )
+        },
+    )
+    messages = await fake_redis.xreadgroup(
+        "tick_g_forced", "tcf", {"kis:prices": ">"}, count=1, block=100
+    )
+    for _stream, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+    # forced 청산으로 sell 1회 발생
+    assert len(kis.sell_calls) == 1
+    assert tracker.get(state.sheet_id) is None
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_forced_liquidation_blocked_by_stop(fake_redis):
+    """STOP 우선 — armed/멤버 있어도 STOP 면 ExitExecutor 가 차단."""
+    from prime_jennie_runtime.control.state import SystemState
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=68000.0)
+    system_state = SystemState(fake_redis)
+    exit_exec = ExitExecutor(kis, tracker, notifier, system_state=system_state)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(sl_pct=0.10)
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=70000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        high_watermark=70000.0,
+    )
+    await tracker.register(state)
+
+    await fake_redis.set("control.state:stop", b"1")
+    await fake_redis.set("control.state:liquidate_armed", b"1")
+    await fake_redis.sadd("forced_liquidation:stocks", b"005930")
+
+    async def fetch(sheet_id: str):
+        return [sheet] if sheet_id == sheet.sheet_id else []
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        entry_executor=entry_exec,
+        group="tick_g_forced_stop",
+        consumer="tcfs",
+    )
+    await loop.ensure_group()
+
+    await fake_redis.xadd(
+        "kis:prices",
+        {
+            "payload": json.dumps(
+                {"ticker": "005930", "price": 69500.0, "ts": "2026-04-16T09:30:00+09:00"}
+            )
+        },
+    )
+    messages = await fake_redis.xreadgroup(
+        "tick_g_forced_stop", "tcfs", {"kis:prices": ">"}, count=1, block=100
+    )
+    for _stream, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+    # STOP 우선 → KIS 호출 0
+    assert kis.sell_calls == []
+    # tracker 유지
+    assert tracker.get(state.sheet_id) is not None

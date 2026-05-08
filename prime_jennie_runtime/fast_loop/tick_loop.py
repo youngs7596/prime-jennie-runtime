@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
-from prime_jennie_runtime.fast_loop.domain import TickData
+from prime_jennie_runtime.fast_loop.domain import ExitDecision, TickData
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_evaluator import evaluate as evaluate_exit
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
@@ -32,6 +32,10 @@ from prime_jennie_runtime.fast_loop.pending_entry import (
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.infra.redis_streams import STREAM_PRICES
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
+from prime_jennie_runtime.telegram_bot.control import (
+    KEY_FORCED_LIQUIDATION,
+    STATE_KEY_LIQUIDATE_ARMED,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +129,38 @@ class TickLoop:
         if tick is None:
             return
 
+        # ── forced liquidation: armed && ticker ∈ forced_liquidation 이면
+        #     보유 중 sheet 들 모두 즉시 청산 (정상 exit rule 우선) ──
+        await self._evaluate_forced_liquidation(tick)
+
         # ── exit path: 보유 중 시트 평가 ──
         await self._evaluate_exits(tick)
 
         # ── entry path: pending 큐 시트 conditions 재평가 ──
         await self._evaluate_pending_entries(tick)
+
+    async def _evaluate_forced_liquidation(self, tick: TickData) -> None:
+        """liquidate_armed + ticker∈forced_liquidation 이면 강제 시장가 청산.
+
+        STOP 키가 설정돼 있으면 ExitExecutor 가 (상위 layer 에서) blocked_stop
+        outcome 을 반환 → 자동 차단. 사용자가 STOP 풀고 청산하려면 /resume
+        선행 필요. (사용자 mental model: STOP = global kill switch)
+        """
+        sheet_ids = self._tracker.sheet_ids_for(tick.ticker)
+        if not sheet_ids:
+            return
+        armed = await self._redis.get(STATE_KEY_LIQUIDATE_ARMED)
+        if not armed:
+            return
+        is_member = await self._redis.sismember(KEY_FORCED_LIQUIDATION, tick.ticker.encode())
+        if not is_member:
+            return
+        for sheet_id in list(sheet_ids):
+            state = self._tracker.get(sheet_id)
+            if state is None:
+                continue
+            decision = ExitDecision(should_close=True, reason="forced_liquidation", portion=1.0)
+            await self._exit_executor.execute(state, decision)
 
     async def _evaluate_exits(self, tick: TickData) -> None:
         sheet_ids = self._tracker.sheet_ids_for(tick.ticker)

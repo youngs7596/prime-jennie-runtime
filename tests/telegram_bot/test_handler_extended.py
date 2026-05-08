@@ -576,6 +576,130 @@ async def test_sellall_with_confirmation(fake_redis):
     assert res.published.kind == "manual_sellall"
 
 
+# ----- STOP/PAUSE 시 수동 매매 차단 (Fix #3) -----
+
+
+@pytest.mark.asyncio
+async def test_buy_blocked_by_stop(fake_redis):
+    await fake_redis.set("control.state:stop", b"1")
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/buy", "005930 10", chat_id="1001")
+    assert "긴급정지" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_buy_blocked_by_pause(fake_redis):
+    await fake_redis.set("control.state:pause", b"manual")
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/buy", "005930 10", chat_id="1001")
+    assert "일시정지" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_sell_blocked_by_stop(fake_redis):
+    await fake_redis.set("control.state:stop", b"1")
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/sell", "005930 5", chat_id="1001")
+    assert "긴급정지" in res.reply
+    assert res.published is None
+
+
+@pytest.mark.asyncio
+async def test_sell_allowed_during_pause(fake_redis):
+    """PAUSE 는 청산 허용 (docstring '진입만 중단')."""
+    await fake_redis.set("control.state:pause", b"manual")
+    pool = _StubPool(by_code={"005930": {"stock_code": "005930", "stock_name": "삼성전자"}})
+    h = _handler(fake_redis, pool=pool)
+    res = await h.process_command("/sell", "005930 5", chat_id="1001")
+    assert "매도 요청 발행" in res.reply
+    assert res.published.kind == "manual_sell"
+
+
+@pytest.mark.asyncio
+async def test_sellall_blocked_by_stop(fake_redis):
+    await fake_redis.set("control.state:stop", b"1")
+    h = _handler(fake_redis)
+    res = await h.process_command("/sellall", "확인", chat_id="1001")
+    assert "긴급정지" in res.reply
+    assert res.published is None
+
+
+# ----- ControlConsumer 방어적 가드 -----
+
+
+@pytest.mark.asyncio
+async def test_consumer_manual_trade_blocked_by_stop(fake_redis):
+    """publish 후 STOP 이 들어와도 consumer 가 막아야 한다."""
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    await fake_redis.set("control.state:stop", b"1")
+    kis = _RecordingKis()
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t", kis_client=kis)
+    await consumer.apply(
+        ControlCommand(
+            kind="manual_buy",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="t",
+            payload={"ticker": "005930", "quantity": 10},
+        )
+    )
+    assert kis.calls == []  # KIS 호출 없음
+
+
+@pytest.mark.asyncio
+async def test_consumer_manual_buy_blocked_by_pause(fake_redis):
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    await fake_redis.set("control.state:pause", b"manual")
+    kis = _RecordingKis()
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t", kis_client=kis)
+    await consumer.apply(
+        ControlCommand(
+            kind="manual_buy",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="t",
+            payload={"ticker": "005930", "quantity": 10},
+        )
+    )
+    assert kis.calls == []
+
+
+@pytest.mark.asyncio
+async def test_consumer_manual_sell_passes_during_pause(fake_redis):
+    """PAUSE 는 청산 허용."""
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    from prime_jennie_runtime.control.consumer import ControlCommandConsumer
+    from prime_jennie_runtime.telegram_bot.control import ControlCommand
+
+    await fake_redis.set("control.state:pause", b"manual")
+    kis = _RecordingKis()
+    consumer = ControlCommandConsumer(fake_redis, consumer_name="t", kis_client=kis)
+    await consumer.apply(
+        ControlCommand(
+            kind="manual_sell",
+            issued_at=dt(2026, 5, 8, tzinfo=UTC),
+            issued_by="t",
+            payload={"ticker": "005930", "quantity": 10},
+        )
+    )
+    assert len(kis.calls) == 1 and kis.calls[0][0] == "sell"
+
+
 @pytest.mark.asyncio
 async def test_manual_trade_daily_limit(fake_redis):
     h = _handler(fake_redis)

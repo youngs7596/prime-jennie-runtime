@@ -103,6 +103,22 @@ class ControlCommandConsumer:
                 "manual trade %s received but ControlConsumer has no kis_client", command.kind
             )
             return
+        # 방어적 STOP 체크 — handler 가 publish 직전에 차단하지만 publish 직후
+        # STOP 이 들어오는 race window 가 있어 consumer 측에서도 한 번 더 검사.
+        stopped = bool(await self._redis.get(STATE_KEY_STOP))
+        if stopped:
+            logger.warning(
+                "manual trade blocked by STOP: kind=%s payload=%s",
+                command.kind,
+                command.payload,
+            )
+            return
+        # PAUSE 는 manual_buy 만 차단 (manual_sell/sellall 은 청산이라 허용).
+        if command.kind == "manual_buy":
+            paused = bool(await self._redis.get(STATE_KEY_PAUSE))
+            if paused:
+                logger.warning("manual_buy blocked by PAUSE: payload=%s", command.payload)
+                return
         dryrun = bool(await self._redis.get(STATE_KEY_DRYRUN))
         if dryrun:
             logger.info(

@@ -553,7 +553,19 @@ class CommandHandler:
             logger.exception("manual_trade_limit check failed")
             return True  # fail-open (다른 가드가 잡음)
 
+    async def _is_stopped(self) -> bool:
+        return bool(await self._redis.get(STATE_KEY_STOP))
+
+    async def _is_paused(self) -> bool:
+        return bool(await self._redis.get(STATE_KEY_PAUSE))
+
     async def _handle_buy(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        if await self._is_stopped():
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume</code>")
+        if await self._is_paused():
+            return CommandResult(
+                reply="일시정지 상태입니다 (진입 차단). 재개: <code>/resume</code>"
+            )
         if not await self._check_manual_trade_limit(chat_id):
             return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
         parts = args.strip().split()
@@ -582,6 +594,9 @@ class CommandHandler:
         return CommandResult(reply=f"매수 요청 발행: {name}({code}) {qty}주", published=cmd)
 
     async def _handle_sell(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        if await self._is_stopped():
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume</code>")
+        # PAUSE 는 청산 허용 (docstring "진입만 중단")
         if not await self._check_manual_trade_limit(chat_id):
             return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
         parts = args.strip().split()
@@ -619,6 +634,8 @@ class CommandHandler:
         return CommandResult(reply=f"매도 요청 발행: {name}({code}) {label}", published=cmd)
 
     async def _handle_sellall(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        if await self._is_stopped():
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume</code>")
         if args.strip() != "확인":
             return CommandResult(reply="전체 청산: <code>/sellall 확인</code> 으로 실행")
         cmd = await self._publish("manual_sellall", chat_id, reason="telegram_sellall")

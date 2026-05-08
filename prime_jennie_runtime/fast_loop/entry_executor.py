@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.domain import PositionState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
@@ -53,6 +54,7 @@ class EntryExecutor:
         tracker: PositionTracker,
         notifier: Notifier,
         recorder: TradeRecorder | None = None,
+        system_state: SystemState | None = None,
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 3.0,
@@ -61,6 +63,7 @@ class EntryExecutor:
         self._tracker = tracker
         self._notifier = notifier
         self._recorder: TradeRecorder = recorder or NoopTradeRecorder()
+        self._system_state = system_state
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
 
@@ -69,6 +72,9 @@ class EntryExecutor:
 
         quantity는 호출자가 시트의 final_pct + 계좌 잔고에서 계산해서 전달.
         (sheet만으로는 quantity 정해지지 않음 — final_pct는 비율일 뿐)
+
+        DRY_RUN 키 ON 이면 KIS 호출 없이 시뮬레이션 outcome 반환 +
+        notifier 에 dryrun 알림.
         """
         order = _build_order_request(sheet, quantity)
         if order is None:
@@ -78,6 +84,37 @@ class EntryExecutor:
                 success=False,
                 reason="invalid_order_request",
             )
+
+        if self._system_state is not None:
+            snap = await self._system_state.snapshot()
+            if snap.dryrun:
+                now = datetime.now(UTC)
+                logger.warning(
+                    "entry DRY_RUN: skipping KIS sheet=%s ticker=%s qty=%d",
+                    sheet.sheet_id,
+                    sheet.ticker,
+                    quantity,
+                )
+                await self._notifier.emit(
+                    TradeNotification(
+                        kind="entry_filled",
+                        sheet_id=sheet.sheet_id,
+                        ticker=sheet.ticker,
+                        side="buy",
+                        quantity=quantity,
+                        price=0.0,
+                        ts=now,
+                        reason="dryrun",
+                    )
+                )
+                return EntryOutcome(
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    success=True,
+                    filled_qty=quantity,
+                    filled_price=0.0,
+                    reason="dryrun",
+                )
 
         logger.info(
             "entry submitting sheet=%s ticker=%s qty=%d type=%s price=%s",

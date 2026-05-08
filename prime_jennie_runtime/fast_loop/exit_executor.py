@@ -100,6 +100,38 @@ class ExitExecutor:
                     ticker=state.ticker,
                     reason=f"blocked_stop:{decision.reason}",
                 )
+            if snap.dryrun:
+                qty_dry = max(1, int(state.quantity * decision.portion))
+                qty_dry = min(qty_dry, state.quantity)
+                now_dry = datetime.now(UTC)
+                logger.warning(
+                    "exit DRY_RUN: skipping KIS sheet=%s ticker=%s qty=%d reason=%s",
+                    state.sheet_id,
+                    state.ticker,
+                    qty_dry,
+                    decision.reason,
+                )
+                await self._notifier.emit(
+                    TradeNotification(
+                        kind="exit_filled",
+                        sheet_id=state.sheet_id,
+                        ticker=state.ticker,
+                        side="sell",
+                        quantity=qty_dry,
+                        price=0.0,
+                        ts=now_dry,
+                        reason=f"dryrun:{decision.reason}",
+                    )
+                )
+                return ExitOutcome(
+                    success=True,
+                    sheet_id=state.sheet_id,
+                    ticker=state.ticker,
+                    closed_qty=qty_dry,
+                    avg_price=0.0,
+                    reason=f"dryrun:{decision.reason}",
+                    fully_closed=qty_dry >= state.quantity,
+                )
 
         # sell 주문
         remaining = state.quantity

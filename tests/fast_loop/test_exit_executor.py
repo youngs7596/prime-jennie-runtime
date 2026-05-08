@@ -163,3 +163,28 @@ async def test_exit_sl_raise_unaffected_by_stop(fake_redis):
     assert outcome.success is True
     restored = tracker.get(state.sheet_id)
     assert restored.breakeven_sl_price == 70210.0
+
+
+@pytest.mark.asyncio
+async def test_exit_dryrun_skips_kis(fake_redis):
+    """DRY_RUN 키 ON 이면 KIS sell 호출 없이 시뮬레이션 outcome + notification."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=66500.0)
+    system_state = SystemState(fake_redis)
+    executor = ExitExecutor(kis, tracker, notifier, system_state=system_state)
+
+    await fake_redis.set("control.state:dryrun", b"1")
+
+    state = _state()
+    await tracker.register(state)
+
+    decision = ExitDecision(should_close=True, reason="fixed_sl", portion=1.0)
+    outcome = await executor.execute(state, decision)
+
+    assert outcome.success is True
+    assert outcome.reason.startswith("dryrun:")
+    assert outcome.closed_qty == 10
+    assert kis.sell_calls == []  # KIS 호출 0
+    # dryrun 도 notification 은 발행 (사용자 가시성)
+    assert await fake_redis.xlen(STREAM_NOTIFICATIONS) == 1

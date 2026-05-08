@@ -127,3 +127,26 @@ async def test_entry_zero_quantity(fake_redis):
     assert outcome.success is False
     assert outcome.reason == "invalid_order_request"
     assert kis.buy_calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_dryrun_skips_kis(fake_redis):
+    """DRY_RUN 키 ON 이면 KIS buy 호출 없이 시뮬레이션 outcome + notification."""
+    from prime_jennie_runtime.control.state import SystemState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=70000.0)
+    system_state = SystemState(fake_redis)
+    executor = EntryExecutor(kis, tracker, notifier, system_state=system_state)
+
+    await fake_redis.set("control.state:dryrun", b"1")
+
+    sheet = _sheet(trigger="market", price=None)
+    outcome = await executor.execute(sheet, quantity=10)
+
+    assert outcome.success is True
+    assert outcome.reason == "dryrun"
+    assert outcome.filled_qty == 10
+    assert kis.buy_calls == []  # KIS 호출 0
+    assert await fake_redis.xlen(STREAM_NOTIFICATIONS) == 1

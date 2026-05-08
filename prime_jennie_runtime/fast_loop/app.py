@@ -197,7 +197,11 @@ async def run() -> None:
         sheet_fetcher = PostgresSheetFetcher(pool)
 
         entry_executor = EntryExecutor(
-            kis=kis, tracker=tracker, notifier=notifier, recorder=recorder
+            kis=kis,
+            tracker=tracker,
+            notifier=notifier,
+            recorder=recorder,
+            system_state=system_state,
         )
         exit_executor = ExitExecutor(
             kis=kis,

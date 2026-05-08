@@ -60,8 +60,12 @@ strategies:
         value: 5
 
   EARNINGS_DRIFT:
-    base_pct: 0.03
-    max_notional_krw: 3000000
+    # 2026-05-08: base_pct 0.03 → 0.05, max_notional 3M → 5M 으로 GAP_UP_REBOUND/
+    # SECTOR_MOMENTUM 과 동일 사이즈로 상향. KOSPI 대세 상승장에서 EARNINGS_DRIFT
+    # 만 보수 사이징 유지할 근거 약함 (v2 실증의 alpha 차이 크지 않음 + 지금 scout
+    # 가 EARNINGS_DRIFT 일색이라 사실상 전체 사이즈 결정자).
+    base_pct: 0.05
+    max_notional_krw: 5000000
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 15

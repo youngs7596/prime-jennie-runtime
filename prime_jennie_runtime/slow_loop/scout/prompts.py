@@ -107,10 +107,14 @@ news_events 활용 원칙 — 점수 비교 대신 이벤트 조합으로 판단
                              (예: `if ne.get('risk_events'): continue`)
 - **노이즈/저신뢰 필터**:   `article_count < 2` 이면 뉴스 시그널 미사용 (다른 팩터로만 판단)
 - **신선도 필터**:          `staleness_hours > 48` 이면 뉴스 시그널 미사용
-- **이벤트 가중**:          `events_by_impact.get('high', {{}})` 에서 특정 event_type 건수로
-                             conviction 보정. 예:
+- **이벤트 가중**:          `events_by_impact.get('high', {{}})` 에서 호재 event_type 건수
+                             합으로 conviction 보정. 특정 한 종류 (earnings 등) 만 가중하면
+                             strategy_tag 가 한쪽으로 쏠리니 호재 이벤트군을 동등 취급. 예:
                                high = ne.get('events_by_impact', {{}}).get('high', {{}})
-                               conviction += 0.15 * min(high.get('earnings', 0), 3)
+                               positive_count = sum(high.get(et, 0) for et in
+                                   ("earnings", "contract", "product",
+                                    "investment", "shareholder_return"))
+                               conviction += 0.10 * min(positive_count, 3)
 - **news_events[ticker]** 는 항상 존재하지만 0건 entry 일 수 있음. `.get()` 방어적 접근 필수
 
 품질 기준:
@@ -118,6 +122,12 @@ news_events 활용 원칙 — 점수 비교 대신 이벤트 조합으로 판단
 - 뉴스 팩터는 `staleness_hours <= 48` 인 경우만 사용 (그 외는 뉴스 비중 0)
 - 점수 평균 비교 금지 (sentiment_score 평균은 제공되지 않음) — 이벤트 존재성·카운트 기반
 - 한 종목에 다 걸지 말고 섹터 분산 고려
+- **strategy_tag 분산**: 후보의 실제 setup 에 맞춰 분류. 단순 호재 = EARNINGS_DRIFT 가
+  아님. 5개 이상 후보 산출 시 최소 2종 이상의 strategy_tag 사용.
+    - GAP_UP_REBOUND: 갭상승/단기 모멘텀 (1-3일 내 진입)
+    - SECTOR_MOMENTUM: 섹터 강세 동조 / 중기 추세
+    - EARNINGS_DRIFT: 실적 발표 직후 PED (1-2주 보유)
+    - MEAN_REVERT_RSI: 과매도 (RSI≤30) 후 반등 후보
 - fallback_strategy 명시 (통과 종목 0개 대응)
 - market_data 가 짧은 종목 (예: 20일 미만) 은 장기 지표 계산에서 제외
 

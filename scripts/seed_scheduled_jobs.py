@@ -45,15 +45,12 @@ _DEFAULT_UNIVERSE = ["005930", "000660", "035720", "005380", "051910"]
 # 초기 시드 — Phase 2.9. universe 는 v2 운영 시 자주 모니터하던 대형주 샘플.
 # 영석님이 control-ui 또는 SQL 로 조정. cron 은 v2 DAG 의 schedule 을 최대한 맞춤.
 SEEDS: list[SeedJob] = [
-    # Track C — KIS 분봉/일봉 (v2 collect_minute_chart: */5 9-15 * * 1-5)
-    SeedJob(
-        id="price_scheduler.collect_minute",
-        owner="price_scheduler",
-        handler_key="collect_minute",
-        cron="*/5 9-15 * * 1-5",
-        kwargs={"universe": _DEFAULT_UNIVERSE},
-    ),
-    # v2 daily_market_data_collector: 0 16 * * 1-5
+    # Track C — KIS 일봉 (v2 daily_market_data_collector: 0 16 * * 1-5).
+    # 분봉은 `job_worker.collect_minute_chart` (top30+watchlist) 가 단일 수집자.
+    # price_scheduler.collect_minute (5종목 sample universe) 은 Phase 2.9 시드 시점의
+    # placeholder 였으나 collect_minute_chart 와 완전 중복(top30 안에 5종목 모두 포함)으로
+    # 2026-05-08 obsolete 처리. 운영 DB 에서도 enabled=false. 새 환경에서도 시드하지
+    # 않기 위해 SeedJob 자체 제거.
     SeedJob(
         id="price_scheduler.collect_daily",
         owner="price_scheduler",
@@ -216,8 +213,10 @@ SEEDS: list[SeedJob] = [
         cron="0 22 * * 5",
         kwargs={"period_days": 30},
     ),
-    # Track B — collect_minute_chart (v2 utility_jobs_dag: */5 9-15 * * 1-5, 백테스트 보조).
-    # price_scheduler.collect_minute (universe-driven) 와 별개 — 이건 top30+watchlist 자동 발견.
+    # Track B — collect_minute_chart (v2 utility_jobs_dag: */5 9-15 * * 1-5).
+    # KIS 분봉의 단일 수집자 (top30 시총 + 최신 watchlist). 18 req/s pacing 으로 KIS
+    # 시세 한도(19/sec) 마진 유지. 2026-05-08 이전엔 price_scheduler.collect_minute 와
+    # 동시 실행되었으나 후자는 obsolete 잔재로 disabled.
     SeedJob(
         id="job_worker.collect_minute_chart",
         owner="job_worker",

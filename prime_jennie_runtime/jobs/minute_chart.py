@@ -8,8 +8,8 @@ v3 어댑터:
 - v2 in-line INSERT 검사 → PostgresPriceRepo.upsert_minute (executemany 일괄).
 - v2 universe = StockMasterDB top30 by market_cap + 최신 watchlist_histories.
   v3 schema 동일 (009_v2_trading_ops.sql) → asyncpg query 로 재현.
-- price_scheduler.collect_minute (universe-driven) 와는 별개 — 이건 운영 수집,
-  collect_minute_chart 는 backtest 보조 수집이라 v2 그대로 분리 유지.
+- 2026-05-08 부터 KIS 분봉 단일 수집자. price_scheduler.collect_minute 은 5종목
+  sample placeholder 였던 잔재 잡으로 obsolete (top30 안에 모두 포함되어 100% 중복).
 """
 
 from __future__ import annotations

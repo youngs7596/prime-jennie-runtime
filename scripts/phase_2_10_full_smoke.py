@@ -127,9 +127,9 @@ async def step_scheduled_jobs_seed(
     # news_pipeline 은 2026-04-21 이후 Redis Stream 상시 소비로 전환 → scheduled_jobs
     # 에 행을 두지 않음 (migration 013). 대신 컨테이너 heartbeat 로 검증.
     expected = {
-        "price_scheduler.collect_minute",
         "price_scheduler.collect_daily",
         "slow_loop.scout_daily",
+        "job_worker.collect_minute_chart",
     }
     conn = await asyncpg.connect(host=host, port=port, user=user, password=password, database=db)
     try:

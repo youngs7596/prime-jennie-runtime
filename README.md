@@ -186,7 +186,7 @@ psql -h localhost -U pj_admin -d prime_jennie_v3 \
 | `slow_loop.scout_daily` | `30 8-14 * * 1-5` | Scout 30분 간격 (08:30~14:30) |
 | `slow_loop.macro_validate_store` | `30 8 * * 1-5` | Macro Gate 매일 |
 | `news_pipeline.crawl_cycle` | `*/10 * * * *` | 한국 뉴스 24/7 10분 주기 |
-| `price_scheduler.collect_minute` | `*/5 9-15 * * 1-5` | KIS 분봉 적재 |
+| `job_worker.collect_minute_chart` | `*/5 9-15 * * 1-5` | KIS 분봉 적재 (top30 + watchlist) |
 | `job_worker.global_news_crawl` | `0 */2 * * *` | WSJ/Bloomberg/Reuters RSS |
 | `job_worker.global_news_digest` | `30 7,11 * * 1-5` | Macro council 30분 전 fresh digest |
 

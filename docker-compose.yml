@@ -120,6 +120,13 @@ services:
       # DeepSeek Gate 100%/Size 86% 일치 확인됨). 모델 비교 재실행 필요 시 1 로.
       MACRO_SHADOW_ENABLED: ${MACRO_SHADOW_ENABLED:-0}
       SCOUT_SHADOW_ENABLED: ${SCOUT_SHADOW_ENABLED:-0}
+      # closed_conditions(fx_shock/high_volatility/sector_contagion) 발동 시
+      # post_processor 가 자동으로 LLM=open 을 closed 강제하는 dual-check 를 우회.
+      # 2026-05-08 이란 종전 임박 KOSPI V자 반등으로 high_volatility 트리거 (σ_20d≈37%)
+      # 가 정상 작동 중이지만, 대세 상승장 환경에서 신규 매수 차단이 부적절하다는
+      # 사용자 결정으로 활성화. 다른 트리거(fx_shock/sector_contagion)도 함께 bypass
+      # 됨을 인지. 변동성 진정 후 다시 0 으로 되돌릴 것.
+      MACRO_AUTO_OVERRIDE_DISABLED: ${MACRO_AUTO_OVERRIDE_DISABLED:-1}
       # screening-executor docker sandbox seccomp profile.
       # 배포 호스트 기준 절대경로 (docker-in-docker: 호스트 데몬이 읽는다).
       # 예: SCREENING_SECCOMP_PROFILE=/opt/prime-jennie-runtime/infra/screening/seccomp.json

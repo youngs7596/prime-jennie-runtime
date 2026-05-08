@@ -18,7 +18,11 @@ from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.domain import ExitDecision, PositionState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
-from prime_jennie_runtime.fast_loop.persistence import NoopTradeRecorder, TradeRecorder
+from prime_jennie_runtime.fast_loop.persistence import (
+    NoopTradeRecorder,
+    StockNameResolver,
+    TradeRecorder,
+)
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.schemas import TradeNotification
 from prime_jennie_runtime.kis_gateway.schemas import OrderRequest
@@ -49,6 +53,7 @@ class ExitExecutor:
         recorder: TradeRecorder | None = None,
         sheet_fetcher: Callable[[str], Awaitable[list[PositionSheet]]] | None = None,
         system_state: SystemState | None = None,
+        stock_resolver: StockNameResolver | None = None,
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 2.0,
@@ -59,8 +64,29 @@ class ExitExecutor:
         self._recorder: TradeRecorder = recorder or NoopTradeRecorder()
         self._sheet_fetcher = sheet_fetcher
         self._system_state = system_state
+        self._stock_resolver = stock_resolver
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
+
+    async def _resolve_name(self, ticker: str) -> str:
+        if self._stock_resolver is None:
+            return ""
+        try:
+            return await self._stock_resolver(ticker)
+        except Exception:
+            logger.debug("stock_resolver raised for %s", ticker)
+            return ""
+
+    @staticmethod
+    def _compute_pnl(
+        entry_price: float, filled_price: float, qty: int
+    ) -> tuple[float | None, float | None]:
+        """청산 손익 계산. entry_price 또는 filled_price 가 0 이하면 None 반환 (DRY_RUN 등)."""
+        if entry_price <= 0 or filled_price <= 0 or qty <= 0:
+            return None, None
+        pnl_amount = (filled_price - entry_price) * qty
+        pnl_pct = (filled_price / entry_price - 1.0) * 100.0
+        return pnl_amount, pnl_pct
 
     async def execute(self, state: PositionState, decision: ExitDecision) -> ExitOutcome:
         """decision에 따라 sell 주문 또는 SL 상향만.
@@ -116,11 +142,13 @@ class ExitExecutor:
                         kind="exit_filled",
                         sheet_id=state.sheet_id,
                         ticker=state.ticker,
+                        stock_name=await self._resolve_name(state.ticker),
                         side="sell",
                         quantity=qty_dry,
                         price=0.0,
                         ts=now_dry,
                         reason=f"dryrun:{decision.reason}",
+                        entry_avg_price=state.entry_price,
                     )
                 )
                 return ExitOutcome(
@@ -199,17 +227,22 @@ class ExitExecutor:
                     reason=decision.reason,
                 )
 
+        pnl_amount, pnl_pct = self._compute_pnl(state.entry_price, filled_price, filled_qty)
         await self._notifier.emit(
             TradeNotification(
                 kind="exit_filled",
                 sheet_id=state.sheet_id,
                 ticker=state.ticker,
+                stock_name=await self._resolve_name(state.ticker),
                 side="sell",
                 quantity=filled_qty,
                 price=filled_price,
                 ts=now,
                 reason=decision.reason,
                 is_partial=is_partial,
+                entry_avg_price=state.entry_price if state.entry_price > 0 else None,
+                pnl_amount=pnl_amount,
+                pnl_pct=pnl_pct,
             )
         )
 

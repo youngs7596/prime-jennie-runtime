@@ -23,7 +23,11 @@ from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.domain import PositionState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
-from prime_jennie_runtime.fast_loop.persistence import NoopTradeRecorder, TradeRecorder
+from prime_jennie_runtime.fast_loop.persistence import (
+    NoopTradeRecorder,
+    StockNameResolver,
+    TradeRecorder,
+)
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.schemas import TradeNotification
 from prime_jennie_runtime.kis_gateway.schemas import OrderRequest
@@ -55,6 +59,7 @@ class EntryExecutor:
         notifier: Notifier,
         recorder: TradeRecorder | None = None,
         system_state: SystemState | None = None,
+        stock_resolver: StockNameResolver | None = None,
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 3.0,
@@ -64,8 +69,18 @@ class EntryExecutor:
         self._notifier = notifier
         self._recorder: TradeRecorder = recorder or NoopTradeRecorder()
         self._system_state = system_state
+        self._stock_resolver = stock_resolver
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
+
+    async def _resolve_name(self, ticker: str) -> str:
+        if self._stock_resolver is None:
+            return ""
+        try:
+            return await self._stock_resolver(ticker)
+        except Exception:
+            logger.debug("stock_resolver raised for %s", ticker)
+            return ""
 
     async def execute(self, sheet: PositionSheet, *, quantity: int) -> EntryOutcome:
         """주문 제출 → 체결 확인 → 추적 등록. 실패 시 취소.
@@ -100,6 +115,7 @@ class EntryExecutor:
                         kind="entry_filled",
                         sheet_id=sheet.sheet_id,
                         ticker=sheet.ticker,
+                        stock_name=await self._resolve_name(sheet.ticker),
                         side="buy",
                         quantity=quantity,
                         price=0.0,
@@ -182,6 +198,7 @@ class EntryExecutor:
                 kind="entry_filled",
                 sheet_id=sheet.sheet_id,
                 ticker=sheet.ticker,
+                stock_name=await self._resolve_name(sheet.ticker),
                 side="buy",
                 quantity=filled_qty,
                 price=filled_price,

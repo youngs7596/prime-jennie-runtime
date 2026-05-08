@@ -5,17 +5,24 @@ v2 `services/telegram/app.py:_format_trade_message` 확장.
 
 HTML parse_mode 사용 시 `<`, `>`, `&`는 텔레그램이 태그로 해석하므로
 사용자 제공 문자열(ticker, title, body, reason)은 반드시 escape 필요.
+
+시간은 항상 KST (Asia/Seoul) 로 표기. notification 의 ts 가 UTC datetime
+이라도 astimezone 으로 변환. naive datetime 인 경우 KST 로 가정 (테스트 호환).
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from html import escape
+from zoneinfo import ZoneInfo
 
 from prime_jennie_runtime.fast_loop.schemas import (
     GenericAlertNotification,
     RiskLevelChangeNotification,
     TradeNotification,
 )
+
+KST = ZoneInfo("Asia/Seoul")
 
 # ─── 이모지 ────────────────────────────────────────────────
 EMOJI_ENTRY = "\u2705"  # ✅ 매수/진입
@@ -32,17 +39,43 @@ def _fmt_price(value: float) -> str:
     return f"{value:,.2f}"
 
 
+def _fmt_amount_krw(value: float) -> str:
+    """원화 금액 표기 — 정수 단위 콤마 + '원' 접미사."""
+    sign = "-" if value < 0 else ""
+    return f"{sign}{abs(int(round(value))):,}원"
+
+
+def _to_kst(notif_ts: datetime) -> datetime:
+    """UTC/aware datetime → KST. naive 는 KST 로 가정 (이미 KST 인 테스트 호환)."""
+    if notif_ts.tzinfo is None:
+        return notif_ts.replace(tzinfo=KST)
+    return notif_ts.astimezone(KST)
+
+
 def _fmt_ts(notif_ts) -> str:
-    """datetime → HH:MM:SS (KST 가정, v2와 동일)."""
+    """datetime → 'YYYY-MM-DD HH:MM:SS KST'. timezone 정보 항상 KST 로 변환."""
     try:
-        return notif_ts.strftime("%H:%M:%S")
+        kst = _to_kst(notif_ts)
+        return kst.strftime("%Y-%m-%d %H:%M:%S KST")
     except AttributeError:
         return str(notif_ts)
 
 
 def format_trade(notif: TradeNotification) -> str:
-    """체결 알림 포매팅."""
+    """체결 알림 포매팅.
+
+    표기 순서:
+      [진입/청산 체결] (부분?)
+      종목명 (종목코드) (매수/매도)
+      수량: N주 | 단가: P
+      거래액: total_amount원
+      손익: ±amount원 (±pct%)        ← 청산 + entry_avg_price 있을 때만
+      평단: entry_avg                ← 청산 + entry_avg_price 있을 때만
+      사유: reason                    ← reason 있을 때만
+      시각: YYYY-MM-DD HH:MM:SS KST
+    """
     ticker = escape(notif.ticker)
+    stock_name = escape(notif.stock_name) if notif.stock_name else ""
     reason = escape(notif.reason) if notif.reason else ""
     side_ko = "매수" if notif.side == "buy" else "매도"
 
@@ -54,11 +87,32 @@ def format_trade(notif: TradeNotification) -> str:
     if notif.is_partial:
         header += " (부분)"
 
+    # 종목명 + 코드 표기. stock_name 이 ticker 자체와 같거나 비어있으면 코드만.
+    if stock_name and stock_name != ticker:
+        symbol_line = f"<b>{stock_name}</b> ({ticker}) ({side_ko})"
+    else:
+        symbol_line = f"{ticker} ({side_ko})"
+
     lines = [
         header,
-        f"{ticker} ({side_ko})",
-        f"수량: {notif.quantity:,}주 | 가격: {_fmt_price(notif.price)}",
+        symbol_line,
+        f"수량: {notif.quantity:,}주 | 단가: {_fmt_price(notif.price)}",
     ]
+
+    # 거래액 — DRY_RUN 으로 price=0 인 경우는 의미 없으니 생략.
+    if notif.price > 0 and notif.quantity > 0:
+        total = notif.price * notif.quantity
+        lines.append(f"거래액: {_fmt_amount_krw(total)}")
+
+    # 청산 시 손익
+    if notif.kind == "exit_filled" and notif.pnl_amount is not None and notif.pnl_pct is not None:
+        sign = "+" if notif.pnl_amount >= 0 else ""
+        lines.append(
+            f"손익: {sign}{_fmt_amount_krw(notif.pnl_amount)} ({sign}{notif.pnl_pct:.2f}%)"
+        )
+        if notif.entry_avg_price is not None and notif.entry_avg_price > 0:
+            lines.append(f"평단: {_fmt_price(notif.entry_avg_price)}")
+
     if reason:
         lines.append(f"사유: {reason}")
     lines.append(f"시각: {_fmt_ts(notif.ts)}")

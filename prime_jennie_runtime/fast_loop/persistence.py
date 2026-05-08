@@ -255,8 +255,40 @@ class PostgresTradeRecorder:
         return stock_code  # fallback
 
 
+class StockNameResolver(Protocol):
+    """ticker → 한국어 종목명. 못 찾으면 ticker 자체 반환."""
+
+    async def __call__(self, stock_code: str) -> str: ...
+
+
+class PostgresStockNameResolver:
+    """``stock_masters`` 에서 종목명을 조회. 결과 메모리 캐싱 (장중 변동 없음)."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+        self._cache: dict[str, str] = {}
+
+    async def __call__(self, stock_code: str) -> str:
+        if stock_code in self._cache:
+            return self._cache[stock_code]
+        try:
+            row = await self._pool.fetchrow(
+                "SELECT stock_name FROM stock_masters WHERE stock_code = $1",
+                stock_code,
+            )
+            if row and row["stock_name"]:
+                name = str(row["stock_name"])
+                self._cache[stock_code] = name
+                return name
+        except Exception:
+            logger.debug("stock_masters lookup failed for %s", stock_code)
+        return stock_code  # fallback: ticker 그대로
+
+
 __all__ = [
     "TradeRecorder",
     "NoopTradeRecorder",
     "PostgresTradeRecorder",
+    "StockNameResolver",
+    "PostgresStockNameResolver",
 ]

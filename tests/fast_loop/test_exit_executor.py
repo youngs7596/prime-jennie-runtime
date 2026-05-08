@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -163,6 +164,37 @@ async def test_exit_sl_raise_unaffected_by_stop(fake_redis):
     assert outcome.success is True
     restored = tracker.get(state.sheet_id)
     assert restored.breakeven_sl_price == 70210.0
+
+
+@pytest.mark.asyncio
+async def test_exit_notification_carries_pnl_and_stock_name(fake_redis):
+    """청산 알림에 pnl_amount/pnl_pct/entry_avg_price/stock_name 이 채워져야 함."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=66500.0)
+
+    async def resolver(stock_code: str) -> str:
+        return "삼성전자" if stock_code == "005930" else stock_code
+
+    executor = ExitExecutor(kis, tracker, notifier, stock_resolver=resolver)
+    state = _state()
+    await tracker.register(state)
+
+    decision = ExitDecision(should_close=True, reason="fixed_sl", portion=1.0)
+    outcome = await executor.execute(state, decision)
+
+    assert outcome.success is True
+    entries = await fake_redis.xrange(STREAM_NOTIFICATIONS)
+    assert len(entries) == 1
+    _msg_id, fields = entries[0]
+    payload = json.loads(fields[b"payload"].decode())
+    assert payload["kind"] == "exit_filled"
+    assert payload["stock_name"] == "삼성전자"
+    assert payload["entry_avg_price"] == 70000.0
+    # (66500 - 70000) * 10 = -35,000
+    assert payload["pnl_amount"] == pytest.approx(-35000.0)
+    # (66500/70000 - 1) * 100 = -5.0
+    assert payload["pnl_pct"] == pytest.approx(-5.0)
 
 
 @pytest.mark.asyncio

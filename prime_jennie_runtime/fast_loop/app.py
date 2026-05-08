@@ -36,7 +36,10 @@ from prime_jennie_runtime.fast_loop.pending_entry import (
     EntryConditionEvaluator,
     PendingEntryQueue,
 )
-from prime_jennie_runtime.fast_loop.persistence import PostgresTradeRecorder
+from prime_jennie_runtime.fast_loop.persistence import (
+    PostgresStockNameResolver,
+    PostgresTradeRecorder,
+)
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.risk_throttle import IntradayRiskThrottle
 from prime_jennie_runtime.fast_loop.risk_updater import run_risk_updater
@@ -180,6 +183,7 @@ async def run() -> None:
         notifier = Notifier(redis_client)
         system_state = SystemState(redis_client)
         recorder = PostgresTradeRecorder(pool)
+        stock_resolver = PostgresStockNameResolver(pool)
 
         control_consumer = ControlCommandConsumer(
             redis_client, consumer_name=f"control-fast-{cfg.env}", kis_client=kis
@@ -202,6 +206,7 @@ async def run() -> None:
             notifier=notifier,
             recorder=recorder,
             system_state=system_state,
+            stock_resolver=stock_resolver,
         )
         exit_executor = ExitExecutor(
             kis=kis,
@@ -210,6 +215,7 @@ async def run() -> None:
             recorder=recorder,
             sheet_fetcher=sheet_fetcher,
             system_state=system_state,
+            stock_resolver=stock_resolver,
         )
         sizer = BalanceAwareSizer(kis, system_state, risk_throttle=risk_throttle)
 

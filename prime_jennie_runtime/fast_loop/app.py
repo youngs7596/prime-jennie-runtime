@@ -205,6 +205,7 @@ async def run() -> None:
             notifier=notifier,
             recorder=recorder,
             sheet_fetcher=sheet_fetcher,
+            system_state=system_state,
         )
         sizer = BalanceAwareSizer(kis, system_state, risk_throttle=risk_throttle)
 

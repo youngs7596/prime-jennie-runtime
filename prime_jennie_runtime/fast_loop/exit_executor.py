@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.domain import ExitDecision, PositionState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
@@ -47,6 +48,7 @@ class ExitExecutor:
         notifier: Notifier,
         recorder: TradeRecorder | None = None,
         sheet_fetcher: Callable[[str], Awaitable[list[PositionSheet]]] | None = None,
+        system_state: SystemState | None = None,
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 2.0,
@@ -56,6 +58,7 @@ class ExitExecutor:
         self._notifier = notifier
         self._recorder: TradeRecorder = recorder or NoopTradeRecorder()
         self._sheet_fetcher = sheet_fetcher
+        self._system_state = system_state
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
 
@@ -65,6 +68,10 @@ class ExitExecutor:
         - should_close=False + new_sl_price: breakeven_sl_price 갱신만, 주문 X
         - should_close=True + portion=1.0: 전량 시장가
         - should_close=True + portion<1.0: 부분 시장가 (scale_out)
+
+        ``system_state.stopped`` 가 True 면 (긴급정지) sell 주문 발행 없이 skip —
+        STOP 명령 의 설계 의도 ("진입/청산 모두 중단") 대로 청산 path 도 봉쇄.
+        SL 상향 같은 주문 미동반 결정은 stop 영향 없이 진행.
         """
         if not decision.should_close:
             # SL 상향 보조 rule (breakeven_sl_raise)
@@ -77,6 +84,22 @@ class ExitExecutor:
                 ticker=state.ticker,
                 reason=decision.reason,
             )
+
+        if self._system_state is not None:
+            snap = await self._system_state.snapshot()
+            if snap.stopped:
+                logger.warning(
+                    "exit blocked by STOP: sheet=%s ticker=%s reason=%s",
+                    state.sheet_id,
+                    state.ticker,
+                    decision.reason,
+                )
+                return ExitOutcome(
+                    success=False,
+                    sheet_id=state.sheet_id,
+                    ticker=state.ticker,
+                    reason=f"blocked_stop:{decision.reason}",
+                )
 
         # sell 주문
         remaining = state.quantity

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.domain import ExitDecision, PositionState
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
 from prime_jennie_runtime.fast_loop.notifier import Notifier
@@ -117,3 +118,48 @@ async def test_exit_sell_not_filled(fake_redis):
     assert outcome.success is False
     # tracker 유지 (아직 미청산)
     assert tracker.get(state.sheet_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_exit_blocked_by_stop(fake_redis):
+    """STOP 키가 설정돼 있으면 exit 주문 발행 거부 (사용자 요청 STOP 의 진짜 의미)."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=66500.0)
+    system_state = SystemState(fake_redis)
+    executor = ExitExecutor(kis, tracker, notifier, system_state=system_state)
+
+    # STOP 활성화
+    await fake_redis.set("control.state:stop", b"1")
+
+    state = _state()
+    await tracker.register(state)
+
+    decision = ExitDecision(should_close=True, reason="fixed_sl", portion=1.0)
+    outcome = await executor.execute(state, decision)
+
+    assert outcome.success is False
+    assert outcome.reason.startswith("blocked_stop")
+    assert kis.sell_calls == []  # KIS 호출 자체 안 함
+    # tracker 그대로 유지 — 청산 미실행
+    assert tracker.get(state.sheet_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_exit_sl_raise_unaffected_by_stop(fake_redis):
+    """SL 상향 (주문 미동반) 은 STOP 영향 없이 진행."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient()
+    system_state = SystemState(fake_redis)
+    executor = ExitExecutor(kis, tracker, notifier, system_state=system_state)
+
+    await fake_redis.set("control.state:stop", b"1")
+
+    state = _state()
+    await tracker.register(state)
+    decision = ExitDecision(should_close=False, reason="breakeven_sl_raise", new_sl_price=70210.0)
+    outcome = await executor.execute(state, decision)
+    assert outcome.success is True
+    restored = tracker.get(state.sheet_id)
+    assert restored.breakeven_sl_price == 70210.0

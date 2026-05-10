@@ -134,17 +134,53 @@ async def test_balance_sizer_critical_zero_blocks_entry():
     assert await sizer(_minimal_sheet(final_pct=0.1)) == 0
 
 
+async def test_balance_sizer_uses_total_asset_not_cash():
+    """분모가 total_asset 이라 cash 가 작아도 시트 의도대로 사이즈."""
+    kis = AsyncMock()
+    # cash 100만, 평가액 9백만 → total 1천만. cash 만 보면 10% = 10만 = 5주.
+    # total 보면 10% = 100만 = 50주 (단, cash 100만 이내라 50주 가능)
+    kis.get_balance.return_value = _fake_portfolio(cash=1_000_000, stock_eval=9_000_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
+    sheet = _minimal_sheet(final_pct=0.1)
+    assert await sizer(sheet) == 50
+
+
+async def test_balance_sizer_clamped_by_cash():
+    """target 이 cash 초과하면 cash 한도로 클램프."""
+    kis = AsyncMock()
+    # total 1천만, cash 50만 (대부분 stock 평가). 10% = 100만이 target 이지만
+    # cash 50만이 상한 → 25주.
+    kis.get_balance.return_value = _fake_portfolio(cash=500_000, stock_eval=9_500_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
+    sheet = _minimal_sheet(final_pct=0.1)
+    assert await sizer(sheet) == 25
+
+
+async def test_balance_sizer_clamped_by_max_notional():
+    """target 이 max_notional_krw 초과하면 시트 cap 적용."""
+    kis = AsyncMock()
+    # total 1억, cash 5천만, final_pct 10% → target 1천만.
+    # 시트 max_notional 3백만 → 3백만 / 2만 = 150주.
+    kis.get_balance.return_value = _fake_portfolio(cash=50_000_000, stock_eval=50_000_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
+    sheet = _minimal_sheet(final_pct=0.1, max_notional_krw=3_000_000)
+    assert await sizer(sheet) == 150
+
+
 # ─── helpers ─────────────────────────────────────────────
 
 
-def _fake_portfolio(cash: int):
+def _fake_portfolio(cash: int, stock_eval: int = 0):
     return type(
         "PF",
         (),
         {
             "cash_balance": cash,
-            "total_asset": cash,
-            "stock_eval_amount": 0,
+            "total_asset": cash + stock_eval,
+            "stock_eval_amount": stock_eval,
             "position_count": 0,
             "positions": [],
             "timestamp": datetime.now(tz=UTC),
@@ -164,7 +200,7 @@ def _fake_stock(price: int):
     )()
 
 
-def _minimal_sheet(*, final_pct: float = 0.05) -> PositionSheet:
+def _minimal_sheet(*, final_pct: float = 0.05, max_notional_krw: int = 5_000_000) -> PositionSheet:
     now = datetime(2026, 4, 17, 9, 0, 0, tzinfo=KST)
     return PositionSheet(
         sheet_id="ps_20260417_005930_0001",
@@ -177,7 +213,7 @@ def _minimal_sheet(*, final_pct: float = 0.05) -> PositionSheet:
             "macro_multiplier": 1.0,
             "risk_multiplier": 1.0,
             "final_pct": final_pct,
-            "max_notional_krw": 5_000_000,
+            "max_notional_krw": max_notional_krw,
         },
         entry={"trigger": "market", "valid_until": now + timedelta(hours=1)},
         exit={

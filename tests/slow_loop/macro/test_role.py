@@ -35,7 +35,8 @@ def test_macro_role_system_prompt_has_closed_conditions():
     assert "지정학적 critical" in role.system_prompt
     assert "KRW/USD" in role.system_prompt
     assert "반-어드바이저" not in role.system_prompt  # 설계 메모, 프롬프트에는 없어야
-    assert 'gate="open"과 size_multiplier=0.0' in role.system_prompt
+    assert 'gate="open"' in role.system_prompt
+    assert "size_multiplier=0.0" in role.system_prompt
 
 
 def test_macro_role_requires_context():

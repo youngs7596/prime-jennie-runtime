@@ -12,6 +12,14 @@
 
 ## CHANGELOG
 
+### v0.3 (2026-05-10)
+open 시 4단계 (0.25/0.50/0.75/1.0) 를 2단계 (0.75/1.0) 로 축소.
+
+- **§2.2 이산화 테이블 단순화**: open 은 (0.0, 0.75] → 0.75, (0.75, 1.0] → 1.0.
+- **§2.2.1 open+0.0 모순 강제값 0.25 → 0.75 로 변경** (`OPEN_FLOOR` 상수).
+- **§4.1 System Prompt 가이드 갱신**: open 은 "매수 진행" 의 명확한 신호. 0.75 미만 보수 신호는 closed 로.
+- **이유**: base_pct 3% × macro 0.25/0.50 = 0.75~1.5% 슬롯이 cash 잔여분에 곱해지면 종목당 1주도 못 사는 상황 발생. open 의 의미를 "유의미한 규모 매수" 로 재정의.
+
 ### v0.2 (2026-04-16)
 Claude Code v2 컨텍스트 리뷰 반영. 이산화 경계값 모호성 제거.
 
@@ -101,35 +109,33 @@ Macro Gate가 출력하는 `size_multiplier`는 연속값(0.0 ~ 1.0)이지만, �
 | LLM 출력 `x` 범위 | 실제 적용 값 | 의미 |
 |---|---|---|
 | `gate == "closed"` | **0.0** | 신규 진입 금지 (`x` 무시) |
-| `x == 0.0` | **0.0** | — (open + 0.0은 비정상. §2.2.1 참조) |
-| `0.0 < x <= 0.25` | **0.25** | 극도로 보수 |
-| `0.25 < x <= 0.50` | **0.50** | 보수 |
-| `0.50 < x <= 0.75` | **0.75** | 중립 |
+| `x == 0.0` | **OPEN_FLOOR (0.75)** | open + 0.0 은 모순 → 강제. §2.2.1 참조 |
+| `0.0 < x <= 0.75` | **0.75** | 보수 ~ 중립. open 의 기본값 |
 | `0.75 < x <= 1.0` | **1.0** | 적극 |
 | `x > 1.0` | **1.0** | clamp (비정상 출력 방어) |
-| `x < 0.0` | **0.0** | clamp (비정상 출력 방어) |
+| `x < 0.0` | **0.0 → OPEN_FLOOR** | clamp 후 모순 처리 |
 
-**경계값 처리**: 정확히 0.25는 첫 구간에 속하여 **0.25**로 매핑. 정확히 0.50은 두 번째 구간에 속하여 **0.50**. 일반 원칙: **경계값은 아래 구간에 포함** (half-open `(low, high]`).
+**경계값 처리**: 정확히 0.75는 첫 구간에 속하여 **0.75**로 매핑. 일반 원칙: **경계값은 아래 구간에 포함** (half-open `(low, high]`).
 
 **구현 의사코드**:
 
 ```python
+OPEN_FLOOR = 0.75
+
 def discretize(x: float, gate: str) -> float:
     if gate == "closed":
         return 0.0
-    
+
     # clamp
     x = max(0.0, min(1.0, x))
-    
+
     if x == 0.0:
-        # open + 0.0은 정의상 비정상. 로그 후 0.25로 강제.
+        # open + 0.0 은 정의상 비정상. 로그 후 OPEN_FLOOR 로 강제.
         emit_observer("pj.macro.inconsistent_open_zero")
-        return 0.25
-    
-    # half-open (low, high]
-    if x <= 0.25: return 0.25
-    if x <= 0.50: return 0.50
-    if x <= 0.75: return 0.75
+        return OPEN_FLOOR
+
+    # 2 단계 (low, high]
+    if x <= OPEN_FLOOR: return OPEN_FLOOR
     return 1.0
 ```
 
@@ -143,11 +149,11 @@ def discretize(x: float, gate: str) -> float:
 
 `gate == "open"`인데 `size_multiplier == 0.0`인 출력은 **논리적으로 모순**이다 (열렸지만 크기 0). 처리:
 
-- `discretize()`가 0.25로 강제 보정
+- `discretize()` 가 `OPEN_FLOOR (0.75)` 로 강제 보정
 - `pj.macro.inconsistent_open_zero` observer 이벤트
 - 영석 Telegram 알림 (프롬프트 품질 이슈 시그널)
 
-Macro Gate 프롬프트에도 이 제약을 명시: "gate=open과 size_multiplier=0.0은 동시에 내보낼 수 없다. 0으로 판단되면 gate=closed."
+Macro Gate 프롬프트에도 이 제약을 명시: "gate=open 과 size_multiplier=0.0 은 동시에 내보낼 수 없다. 0 으로 판단되면 gate=closed."
 
 ### 2.3 gate == "closed" 조건
 
@@ -288,16 +294,14 @@ gate = "closed" 조건 (하나라도 충족 시 반드시 closed):
 
 1개 미만 충족 시 open. 이 조건은 엄격히 지킵니다.
 
-size_multiplier 가이드:
-- 1.00: 거시 매우 양호, 변동성 낮음, 뚜렷한 상승 환경
-- 0.75: 중립 ~ 약한 긍정
-- 0.50: 불확실, 혼재 신호
-- 0.25: 부정적이나 closed 조건 미충족, 극히 보수적 운용
-- 출력은 연속값이지만 0.25 단위로 이산화됨을 감안 (경계값은 아래 구간에 포함, 즉 0.50 출력은 0.50으로 매핑)
+size_multiplier 가이드 (open 은 2단계 — 0.75 / 1.0):
+- 1.00: 거시 양호, 뚜렷한 상승 환경 또는 명확한 긍정 신호 우세
+- 0.75: 중립 ~ 혼재 신호. open 의 기본값. 보수적이지만 매수는 진행
+- 0.75 미만으로 내려갈 정도로 부정적이면 gate=closed (출력은 연속값이지만 (0, 0.75] 은 모두 0.75 로 이산화됨)
 
 중요 제약 — 모순 방지:
 - gate="open"과 size_multiplier=0.0은 동시에 내보낼 수 없습니다. 크기가 0이면 정의상 closed입니다.
-- 0에 가까운 값이면 size_multiplier=0.01 이상으로 내놓되 reasoning에 보수 이유 명시, 또는 gate=closed로 전환하십시오.
+- 보수 신호 강할 땐 size 를 더 낮추는 것이 아니라 gate=closed 로 가십시오.
 
 top_risks는 최대 5개. 각 리스크는 category/severity/description 구조.
 severity "critical"이 1개 이상이면 gate 판단에 강하게 반영.
@@ -306,8 +310,8 @@ reasoning은 500자 이내. 결론→근거 순서. 감정어 배제, 사실과 
 
 과거 run 연속성 고려:
 - 제공되는 최근 7일 run 이력을 참고하십시오
-- 급격한 게이트 전환(전일 1.00 → 오늘 0.25)은 명확한 사유와 함께
-- 반대로 상황이 명확히 개선되었는데도 관성적으로 낮은 multiplier를 유지하지 마십시오
+- 급격한 게이트 전환 (전일 1.00 → 오늘 closed) 은 명확한 사유와 함께
+- 반대로 상황이 명확히 개선되었는데도 관성적으로 0.75 를 유지하지 마십시오
 ```
 
 ### 4.2 User Prompt 템플릿
@@ -382,7 +386,7 @@ Digest ID: {wsj_digest_id}
 3개 시나리오:
 
 1. **평온한 정상 시장** → `gate=open, size=1.00`
-2. **미중 긴장 + KOSPI 약세** → `gate=open, size=0.50`, risks에 geopolitical + sector_contagion
+2. **미중 긴장 + KOSPI 약세** → `gate=open, size=0.75`, risks에 geopolitical + sector_contagion
 3. **이란-이스라엘 충돌 발생일 아침** → `gate=closed, size=0.0`, risks에 geopolitical critical
 
 각 예제는 user prompt + 이상적 output 쌍. 토큰 예산 각 400토큰 이내.
@@ -613,9 +617,9 @@ FORBIDDEN_PATTERNS = [
 | MG02 | KRW/USD +3.2% 급변 | `gate=closed` (auto-override 발동 가능) |
 | MG03 | LLM이 closed 조건 놓침 | auto_override_applied=true, Telegram 알림 |
 | MG04 | size_multiplier=0.73 출력 | discretize → 0.75 |
-| MG05 | size_multiplier=0.26 출력 | discretize → 0.50 |
+| MG05 | size_multiplier=0.26 출력 | discretize → 0.75 (open 은 floor 0.75) |
 | MG06 | gate=closed with size=0.3 | size 강제로 0.0 |
-| MG07 | 전일 1.00 → 오늘 0.25 | abrupt_transition 이벤트 |
+| MG07 | 전일 1.00 → 오늘 closed | abrupt_transition 이벤트 |
 | MG08 | 24시간 stale 상태 | stale_detected, Scout 발행 중단 |
 | MG09 | LLM 3회 실패 | 직전 상태 유지, 알림 |
 | MG10 | WSJ digest 부재 | news_digest_ref="unavailable", 실행 계속 |

@@ -3,7 +3,7 @@
 MACRO_GATE_SPEC §5. 순서:
 1. check_closed_conditions(snap) — 결정론 closed 조건 재검증
 2. LLM이 open인데 트리거 있으면 → closed 강제 (auto_override)
-3. discretize(size_multiplier, gate) — 이산화. open+0.0 모순은 0.25로
+3. discretize(size_multiplier, gate) — 이산화. open 은 2단계 (0.75 / 1.0). open+0.0 모순은 0.75 로
 4. abrupt_transition 체크 (경고 이벤트)
 5. pj.macro.gate_closed / pj.macro.auto_override / pj.macro.inconsistent_open_zero / pj.macro.abrupt_transition 이벤트 발행
 
@@ -22,7 +22,7 @@ from prime_jennie_runtime.infra.observer_impl import pj_event
 
 from .closed_conditions import check_closed_conditions
 from .continuity import abrupt_transition
-from .discretize import discretize_sync
+from .discretize import OPEN_FLOOR, discretize_sync
 from .schemas import MacroGateOutput, MarketSnapshot, RecentMacroRun
 
 
@@ -102,7 +102,7 @@ async def run_post_processing(
                 role="macro_gate",
                 ok=False,
                 original=raw.size_multiplier,
-                forced_to=0.25,
+                forced_to=OPEN_FLOOR,
             )
         )
 

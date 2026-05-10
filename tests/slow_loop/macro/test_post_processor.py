@@ -133,10 +133,10 @@ async def test_mg21_inconsistent_open_zero():
     raw = _output(gate="open", size=0.0)
     result = await run_post_processing(raw, _normal_snapshot(), [], obs)
     assert result.inconsistent_open_zero is True
-    assert result.output.size_multiplier == 0.25
+    assert result.output.size_multiplier == 0.75
     events = _find_events(obs, "pj.macro.inconsistent_open_zero")
     assert events
-    assert events[0].metadata["forced_to"] == 0.25
+    assert events[0].metadata["forced_to"] == 0.75
 
 
 # =====================================================================
@@ -146,8 +146,9 @@ async def test_mg21_inconsistent_open_zero():
 
 @pytest.mark.asyncio
 async def test_mg07_abrupt_transition_event():
+    """전일 open 1.0 → 오늘 closed 0.0 같은 급격 전환은 abrupt 이벤트."""
     obs = CollectingObserver()
-    raw = _output(gate="open", size=0.25)  # ← 전일 1.00에서 급락
+    raw = _output(gate="closed", size=0.0)  # ← 전일 1.00 → closed 로 급락
     history = [
         RecentMacroRun(
             macro_run_id="macro_prev",
@@ -161,7 +162,7 @@ async def test_mg07_abrupt_transition_event():
     events = _find_events(obs, "pj.macro.abrupt_transition")
     assert events
     assert events[0].metadata["prev_size"] == 1.0
-    assert events[0].metadata["new_size"] == 0.25
+    assert events[0].metadata["new_size"] == 0.0
 
 
 @pytest.mark.asyncio

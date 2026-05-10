@@ -31,20 +31,18 @@ gate = "closed" 조건 (하나라도 충족 시 반드시 closed):
 국내 매크로 뉴스 해석 (`## 국내 매크로 뉴스` 섹션은 `[event_type/impact/sentiment score]` 태그):
 - `impact=high` + `event_type ∈ {geopolitical, bankruptcy, market_movement}` 이 2건 이상이면 closed 조건 #1/#3/#5 재검토
 - `impact=high` + `event_type=regulation` 으로 **섹터 전반 규제** 은 size_multiplier 를 한 단계 내리는 신호 (단 단일 종목 규제는 과민반응 금지)
-- `impact=high` + `event_type ∈ {earnings, contract, shareholder_return}` positive 우세는 낙관 편향 근거 (size 0.75+)
+- `impact=high` + `event_type ∈ {earnings, contract, shareholder_return}` positive 우세는 낙관 편향 근거 (size 1.00 으로 상향 검토)
 - `event_type=other` 비중이 높으면 노이즈로 취급 — size 판단에 가중치 낮게
 - sentiment_score 절댓값보다 event_type 과 impact 를 먼저 본다. "-0.3 earnings high" 는 작은 숫자지만 중요 신호.
 
-size_multiplier 가이드:
-- 1.00: 거시 매우 양호, 변동성 낮음, 뚜렷한 상승 환경
-- 0.75: 중립 ~ 약한 긍정
-- 0.50: 불확실, 혼재 신호
-- 0.25: 부정적이나 closed 조건 미충족, 극히 보수적 운용
-- 출력은 연속값이지만 0.25 단위로 이산화됨을 감안 (경계값은 아래 구간에 포함, 즉 0.50 출력은 0.50으로 매핑)
+size_multiplier 가이드 (open 은 2단계 — 0.75 / 1.0):
+- 1.00: 거시 양호, 뚜렷한 상승 환경 또는 명확한 긍정 신호 우세
+- 0.75: 중립 ~ 혼재 신호. open 의 기본값. 보수적이지만 매수는 진행
+- 0.75 미만으로 내려갈 정도로 부정적이면 gate=closed 가 옳음 (출력은 연속값이지만 (0, 0.75] 은 모두 0.75 로 이산화됨)
 
 중요 제약 — 모순 방지:
-- gate="open"과 size_multiplier=0.0은 동시에 내보낼 수 없습니다. 크기가 0이면 정의상 closed입니다.
-- 0에 가까운 값이면 size_multiplier=0.01 이상으로 내놓되 reasoning에 보수 이유 명시, 또는 gate=closed로 전환하십시오.
+- gate="open" 과 size_multiplier=0.0 은 동시에 내보낼 수 없습니다. 크기가 0 이면 정의상 closed 입니다.
+- 보수 신호 강할 땐 size 를 더 낮추는 것이 아니라 gate=closed 로 가십시오. open 은 "매수 진행" 의 의미가 명확해야 합니다.
 
 top_risks는 최대 5개. 각 리스크는 category/severity/description 구조.
 severity "critical"이 1개 이상이면 gate 판단에 강하게 반영.

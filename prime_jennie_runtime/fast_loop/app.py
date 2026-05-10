@@ -75,7 +75,15 @@ class PostgresSheetFetcher:
 
 
 class BalanceAwareSizer:
-    """계좌 잔고 × final_pct × intraday_mult / current_price → 정수 수량.
+    """총자산 × final_pct × intraday_mult / current_price → 정수 수량.
+
+    분모는 ``total_asset`` (cash + stock_eval) — v2 의 sizing 분모와 동일.
+    cash_balance 만 쓰면 보유 종목 다수 보유 시 cash 가 잠겨 신규 슬롯이
+    사실상 미니 사이즈가 되는 문제 회피.
+
+    notional 캡:
+    - sheet.size.max_notional_krw — 시트가 명시한 종목당 최대 금액
+    - cash_balance — 가용 현금. 초과 시 KIS 가 거부하므로 사전 클램프.
 
     stop/pause 상태면 0 반환 → PositionSheetConsumer 가 entry skip.
     ``cache_ttl_sec`` 동안 잔고/시세를 캐시하여 연쇄 시트 처리 시 rate limit 회피.
@@ -97,7 +105,8 @@ class BalanceAwareSizer:
         self._system = system_state
         self._ttl = cache_ttl_sec
         self._risk_throttle = risk_throttle
-        self._cached_balance: tuple[float, int] | None = None  # (expires_at, krw)
+        # (expires_at, total_asset, cash_balance)
+        self._cached_balance: tuple[float, int, int] | None = None
 
     async def __call__(self, sheet: PositionSheet) -> int:
         snapshot = await self._system.snapshot()
@@ -110,7 +119,7 @@ class BalanceAwareSizer:
             )
             return 0
 
-        balance_krw = await self._get_cached_balance()
+        total_asset, cash_balance = await self._get_cached_balance()
         try:
             stock = await self._kis.get_snapshot(sheet.ticker)
         except Exception:
@@ -122,19 +131,21 @@ class BalanceAwareSizer:
         intraday_mult = (
             self._risk_throttle.current_multiplier() if self._risk_throttle is not None else 1.0
         )
-        notional = int(balance_krw * sheet.size.final_pct * intraday_mult)
+        target_notional = int(total_asset * sheet.size.final_pct * intraday_mult)
+        notional = min(target_notional, sheet.size.max_notional_krw, cash_balance)
         qty = notional // int(stock.price)
         return max(qty, 0)
 
-    async def _get_cached_balance(self) -> int:
+    async def _get_cached_balance(self) -> tuple[int, int]:
         loop = asyncio.get_running_loop()
         now = loop.time()
         if self._cached_balance is not None and now < self._cached_balance[0]:
-            return self._cached_balance[1]
+            return self._cached_balance[1], self._cached_balance[2]
         portfolio = await self._kis.get_balance()
-        krw = int(portfolio.cash_balance)
-        self._cached_balance = (now + self._ttl, krw)
-        return krw
+        total = int(portfolio.total_asset)
+        cash = int(portfolio.cash_balance)
+        self._cached_balance = (now + self._ttl, total, cash)
+        return total, cash
 
 
 async def run() -> None:

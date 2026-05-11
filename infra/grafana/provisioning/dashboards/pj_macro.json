@@ -1,0 +1,160 @@
+{
+  "annotations": { "list": [] },
+  "description": "Macro gate / size_multiplier 추이 + slow_loop scout / macro_run 빈도.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "최근 24 시간 macro_run / scout_run 실행 횟수.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "green", "value": 5 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container_name=~\".*slow-loop.*\"} |~ \"macro_run_id|macro run completed\" [24h]))",
+          "legendFormat": "macro_run",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum(count_over_time({container_name=~\".*slow-loop.*\"} |~ \"scout run completed|scout_run_id\" [24h]))",
+          "legendFormat": "scout_run",
+          "refId": "B"
+        }
+      ],
+      "title": "Slow loop runs (24h)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "post_processor 의 closed_conditions / auto_override 트리거 횟수.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": {
+        "displayLabels": ["name", "value"],
+        "legend": { "displayMode": "list", "placement": "right", "showLegend": true, "values": [] },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "sum by (kind) (count_over_time({container_name=~\".*slow-loop.*\"} |~ \"auto_override|closed_conditions|gate_closed|high_volatility|fx_shock|sector_contagion\" | regexp \"(?P<kind>auto_override|closed_conditions|gate_closed|high_volatility|fx_shock|sector_contagion)\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Macro override / closed_conditions (24h)",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "size_multiplier 로그 — slow_loop 결과 publish 시 출력되는 값을 추출.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": true,
+            "stacking": { "group": "A", "mode": "none" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "green", "value": 0.75 }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 6 },
+      "id": 3,
+      "options": {
+        "legend": { "calcs": ["min", "max", "lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "avg_over_time({container_name=~\".*slow-loop.*\"} |~ \"size_multiplier\" | regexp \"size_multiplier[=: ]+(?P<sm>[0-9]+\\\\.[0-9]+)\" | unwrap sm [10m])",
+          "legendFormat": "size_multiplier",
+          "refId": "A"
+        }
+      ],
+      "title": "size_multiplier (avg 10m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Macro / Scout 실행 로그 — gate 결정 흐름 확인.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 15 },
+      "id": 4,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "expr": "{container_name=~\".*slow-loop.*\"} |~ \"macro|scout|gate|size_multiplier|auto_override\"",
+          "refId": "A"
+        }
+      ],
+      "title": "Macro / Scout tail",
+      "type": "logs"
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": ["prime-jennie", "macro", "slow-loop"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "Asia/Seoul",
+  "title": "PJ Macro",
+  "uid": "pj-macro",
+  "version": 1,
+  "weekStart": ""
+}

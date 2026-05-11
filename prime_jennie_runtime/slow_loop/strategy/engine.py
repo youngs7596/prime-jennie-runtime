@@ -185,6 +185,7 @@ class StrategyEngine:
             risk_multiplier=risk_mult,
             final_pct=final_pct,
             max_notional_krw=entry.max_notional_krw,
+            max_notional_pct=entry.max_notional_pct,
         )
 
         # 5. entry 조립 — Scout entry_hint 반영. conditions_hint 가 비어있으면

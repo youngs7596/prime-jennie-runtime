@@ -170,6 +170,40 @@ async def test_balance_sizer_clamped_by_max_notional():
     assert await sizer(sheet) == 150
 
 
+async def test_balance_sizer_clamped_by_max_notional_pct():
+    """v2 동등: 자산비례 cap (pct). pct cap 이 target 보다 작을 때 발동."""
+    kis = AsyncMock()
+    # total 2.1억, cash 1.5억. final_pct 10% → target 2100만.
+    # pct 3% = 630만 (target 보다 작음, krw cap 5천만보다 작음) → 630만 / 2만 = 315주
+    kis.get_balance.return_value = _fake_portfolio(cash=150_000_000, stock_eval=60_000_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
+    sheet = _minimal_sheet(final_pct=0.10, max_notional_krw=50_000_000, max_notional_pct=0.03)
+    assert await sizer(sheet) == 315
+
+
+async def test_balance_sizer_pct_cap_loses_to_krw_cap():
+    """절대 한도 (max_notional_krw) 가 pct cap 보다 작을 때 절대 한도 발동."""
+    kis = AsyncMock()
+    # total 5억, cash 5억. final_pct 10% → target 5천만.
+    # pct 12% = 6천만, krw cap 50M = 5천만 → krw cap 발동. 5천만 / 2만 = 2500주.
+    kis.get_balance.return_value = _fake_portfolio(cash=500_000_000, stock_eval=0)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
+    sheet = _minimal_sheet(final_pct=0.10, max_notional_krw=50_000_000, max_notional_pct=0.12)
+    assert await sizer(sheet) == 2500
+
+
+async def test_balance_sizer_pct_cap_none_backward_compat():
+    """max_notional_pct=None 이면 기존 동작 (krw cap + cash 만)."""
+    kis = AsyncMock()
+    kis.get_balance.return_value = _fake_portfolio(cash=50_000_000, stock_eval=50_000_000)
+    kis.get_snapshot.return_value = _fake_stock(price=20_000)
+    sizer = fast_app.BalanceAwareSizer(kis=kis, system_state=_FakeSystemState(_open_snapshot()))
+    sheet = _minimal_sheet(final_pct=0.1, max_notional_krw=3_000_000)  # pct None
+    assert await sizer(sheet) == 150
+
+
 # ─── helpers ─────────────────────────────────────────────
 
 
@@ -200,21 +234,29 @@ def _fake_stock(price: int):
     )()
 
 
-def _minimal_sheet(*, final_pct: float = 0.05, max_notional_krw: int = 5_000_000) -> PositionSheet:
+def _minimal_sheet(
+    *,
+    final_pct: float = 0.05,
+    max_notional_krw: int = 5_000_000,
+    max_notional_pct: float | None = None,
+) -> PositionSheet:
     now = datetime(2026, 4, 17, 9, 0, 0, tzinfo=KST)
+    size_dict: dict = {
+        "base_pct": final_pct,
+        "macro_multiplier": 1.0,
+        "risk_multiplier": 1.0,
+        "final_pct": final_pct,
+        "max_notional_krw": max_notional_krw,
+    }
+    if max_notional_pct is not None:
+        size_dict["max_notional_pct"] = max_notional_pct
     return PositionSheet(
         sheet_id="ps_20260417_005930_0001",
         generated_at=now,
         valid_until=now + timedelta(hours=6),
         ticker="005930",
         strategy_tag="SECTOR_MOMENTUM",
-        size={
-            "base_pct": final_pct,
-            "macro_multiplier": 1.0,
-            "risk_multiplier": 1.0,
-            "final_pct": final_pct,
-            "max_notional_krw": max_notional_krw,
-        },
+        size=size_dict,
         entry={"trigger": "market", "valid_until": now + timedelta(hours=1)},
         exit={
             "rules": [

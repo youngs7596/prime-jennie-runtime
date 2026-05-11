@@ -1,9 +1,15 @@
-# Strategy Policy v3.0.2 — strategy_tag별 base_pct, exit rules, entry conditions.
+# Strategy Policy v3.0.3 — strategy_tag별 base_pct, exit rules, entry conditions.
 # Strategy Engine이 ScreeningCandidate를 PositionSheet로 조립할 때 참고.
-# base_pct, max_notional_krw, exit rule, entry condition 파라미터 모두 영석이 수동 관리.
+# base_pct, max_notional_krw, max_notional_pct, exit rule, entry condition 파라미터
+# 모두 영석이 수동 관리.
+#
+# 2026-05-11: max_notional_pct (자산비례 cap) 도입 — v2 sizing 동등 (12%).
+# fast_loop BalanceAwareSizer 가 min(total_asset × pct, max_notional_krw, cash) 적용.
+# max_notional_krw 는 절대 안전 한도 (자산 폭증 시 cap, 평소 발동 X).
 #
 # 참고:
 # - v2 실증: Breakeven +3%→+0.3%, Profit Floor +15%→+10%, Death Cross MA5/MA20 min_loss 1%
+#   v2 position sizing: MAX_POSITION_PCT_DEFAULT 12%, A+ 18%
 # - POSITION_SHEET_SPEC §4.2 / §5.3 권장 순서대로 rule 배열
 # - fixed_sl, time_stop은 모든 정책에 반드시 포함
 # - default_entry_conditions: scout entry_hint 의 conditions_hint 가 비어있을 때 보강.
@@ -12,12 +18,13 @@
 #   strict 한 시그널 기반 (price_above breakout 등) 도입은 v2 scanner reference + 운영
 #   데이터 누적 후 점진 추가.
 
-policy_version: "v3.0.2"
+policy_version: "v3.0.3"
 
 strategies:
   GAP_UP_REBOUND:
     base_pct: 0.05
-    max_notional_krw: 5000000
+    max_notional_pct: 0.12
+    max_notional_krw: 50000000
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 20
@@ -35,7 +42,8 @@ strategies:
 
   SECTOR_MOMENTUM:
     base_pct: 0.05
-    max_notional_krw: 5000000
+    max_notional_pct: 0.12
+    max_notional_krw: 50000000
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 20
@@ -61,11 +69,11 @@ strategies:
 
   EARNINGS_DRIFT:
     # 2026-05-08: base_pct 0.03 → 0.05, max_notional 3M → 5M 으로 GAP_UP_REBOUND/
-    # SECTOR_MOMENTUM 과 동일 사이즈로 상향. KOSPI 대세 상승장에서 EARNINGS_DRIFT
-    # 만 보수 사이징 유지할 근거 약함 (v2 실증의 alpha 차이 크지 않음 + 지금 scout
-    # 가 EARNINGS_DRIFT 일색이라 사실상 전체 사이즈 결정자).
+    # SECTOR_MOMENTUM 과 동일 사이즈로 상향.
+    # 2026-05-11: max_notional_pct 0.12 (v2 동등). max_notional_krw 50M 안전 한도.
     base_pct: 0.05
-    max_notional_krw: 5000000
+    max_notional_pct: 0.12
+    max_notional_krw: 50000000
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 15
@@ -81,7 +89,8 @@ strategies:
 
   MEAN_REVERT_RSI:
     base_pct: 0.03
-    max_notional_krw: 3000000
+    max_notional_pct: 0.08
+    max_notional_krw: 30000000
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 15

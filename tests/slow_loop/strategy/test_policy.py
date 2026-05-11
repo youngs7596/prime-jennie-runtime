@@ -9,7 +9,7 @@ from prime_jennie_runtime.slow_loop.strategy.policy import load_policy
 
 def test_load_default_policy():
     policy = load_policy()
-    assert policy.version == "v3.0.2"
+    assert policy.version == "v3.0.3"
 
 
 def test_all_four_tags_present():
@@ -24,6 +24,9 @@ def test_each_entry_has_required_fields():
         entry = policy.get(tag)
         assert 0 < entry.base_pct <= 0.10
         assert entry.max_notional_krw > 0
+        # v2 sizing 동등: 모든 전략에 max_notional_pct 정의
+        assert entry.max_notional_pct is not None, f"{tag} missing max_notional_pct"
+        assert 0 < entry.max_notional_pct <= 0.25
         # 모든 정책은 fixed_sl + time_stop 필수
         rule_types = {r["type"] for r in entry.default_exit_rules}
         assert "fixed_sl" in rule_types, f"{tag} missing fixed_sl"

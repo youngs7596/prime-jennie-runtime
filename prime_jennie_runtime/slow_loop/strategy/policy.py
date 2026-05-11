@@ -25,6 +25,8 @@ class StrategyEntry:
     max_notional_krw: int
     default_exit_rules: list[dict[str, Any]]
     default_entry_conditions: list[dict[str, Any]]
+    # v2 sizing 동등: 자산비례 cap. None 이면 절대값(max_notional_krw)만 사용.
+    max_notional_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -58,5 +60,8 @@ def load_policy(path: Path | str | None = None) -> StrategyPolicy:
             max_notional_krw=int(cfg["max_notional_krw"]),
             default_exit_rules=list(cfg["default_exit_rules"]),
             default_entry_conditions=list(cfg.get("default_entry_conditions", [])),
+            max_notional_pct=(
+                float(cfg["max_notional_pct"]) if "max_notional_pct" in cfg else None
+            ),
         )
     return StrategyPolicy(version=str(raw["policy_version"]), entries=entries)

@@ -81,8 +81,9 @@ class BalanceAwareSizer:
     cash_balance 만 쓰면 보유 종목 다수 보유 시 cash 가 잠겨 신규 슬롯이
     사실상 미니 사이즈가 되는 문제 회피.
 
-    notional 캡:
-    - sheet.size.max_notional_krw — 시트가 명시한 종목당 최대 금액
+    notional 캡 (모두 적용 후 min):
+    - total_asset × sheet.size.max_notional_pct — 자산비례 cap (v2 동등, 12%)
+    - sheet.size.max_notional_krw — 절대 안전 한도
     - cash_balance — 가용 현금. 초과 시 KIS 가 거부하므로 사전 클램프.
 
     stop/pause 상태면 0 반환 → PositionSheetConsumer 가 entry skip.
@@ -132,7 +133,10 @@ class BalanceAwareSizer:
             self._risk_throttle.current_multiplier() if self._risk_throttle is not None else 1.0
         )
         target_notional = int(total_asset * sheet.size.final_pct * intraday_mult)
-        notional = min(target_notional, sheet.size.max_notional_krw, cash_balance)
+        caps = [target_notional, sheet.size.max_notional_krw, cash_balance]
+        if sheet.size.max_notional_pct is not None:
+            caps.append(int(total_asset * sheet.size.max_notional_pct))
+        notional = min(caps)
         qty = notional // int(stock.price)
         return max(qty, 0)
 

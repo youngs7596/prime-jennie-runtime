@@ -165,6 +165,8 @@ class SizeSection(BaseModel):
     risk_multiplier: Annotated[float, Field(ge=0, le=1.0)]
     final_pct: Annotated[float, Field(ge=0, le=0.10)]
     max_notional_krw: Annotated[int, Field(gt=0)]
+    # v2 sizing 동등: 자산비례 cap. None 이면 절대값(max_notional_krw)만 사용.
+    max_notional_pct: Annotated[float, Field(gt=0, le=0.25)] | None = None
 
 
 class EntrySection(BaseModel):

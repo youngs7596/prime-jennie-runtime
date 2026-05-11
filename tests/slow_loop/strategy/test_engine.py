@@ -245,6 +245,77 @@ def test_policy_version_bumped_to_v3_0_4():
 
 
 # =====================================================================
+# price_above 자동 부착 (GAP_UP_REBOUND, 2026-05-11)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_gap_up_rebound_auto_price_above_from_hint():
+    """GAP_UP_REBOUND 에서 scout 가 price_hint 만 주면 price_above 자동 부착."""
+    from prime_jennie_runtime.slow_loop.strategy.engine import PRICE_ABOVE_BREAKOUT_MULT
+
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = _candidate(tag="GAP_UP_REBOUND")
+    # _candidate 는 price_hint=71200.0 limit trigger.
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    types = [c.type for c in sheet.entry.conditions]
+    assert "price_above" in types
+    # value 는 price_hint × 1.001 (정적 fallback)
+    pa = next(c for c in sheet.entry.conditions if c.type == "price_above")
+    assert pa.value == pytest.approx(71200.0 * PRICE_ABOVE_BREAKOUT_MULT, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_gap_up_rebound_respects_scout_explicit_price_above():
+    """Scout 가 직접 price_above 를 conditions_hint 로 박았으면 engine 은 덮어쓰지 않음."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="005930",
+        strategy_tag="GAP_UP_REBOUND",
+        conviction=0.8,
+        entry_hint=EntryHint(
+            trigger="limit",
+            price_hint=71200.0,
+            conditions_hint=[{"type": "price_above", "value": 70000.0}],
+        ),
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    # scout 가 박은 값 (70000.0) 그대로
+    pa_conds = [c for c in sheet.entry.conditions if c.type == "price_above"]
+    assert len(pa_conds) == 1
+    assert pa_conds[0].value == pytest.approx(70000.0, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_non_gap_up_rebound_no_auto_price_above():
+    """SECTOR_MOMENTUM 등 다른 전략에선 자동 부착 안 함."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    for tag in ("SECTOR_MOMENTUM", "EARNINGS_DRIFT", "MEAN_REVERT_RSI"):
+        sheet = await engine.build_sheet(_candidate(tag=tag), _inputs())
+        assert sheet is not None
+        types = {c.type for c in sheet.entry.conditions}
+        assert "price_above" not in types, f"{tag} unexpected price_above"
+
+
+@pytest.mark.asyncio
+async def test_gap_up_rebound_market_trigger_no_price_hint_no_auto():
+    """price_hint 없으면 (market trigger 등) 자동 부착 skip — 기준값 없음."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="005930",
+        strategy_tag="GAP_UP_REBOUND",
+        conviction=0.8,
+        entry_hint=EntryHint(trigger="market"),  # price_hint=None
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    types = {c.type for c in sheet.entry.conditions}
+    assert "price_above" not in types
+
+
+# =====================================================================
 # protocol 형태 체크
 # =====================================================================
 

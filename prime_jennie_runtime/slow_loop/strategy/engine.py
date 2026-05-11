@@ -8,6 +8,17 @@ None이 반환되는 경우:
 - final_pct < MIN_POSITION_PCT
 - strategy_tag 정책 미존재 (폐기된 RSI_REBOUND 등)
 - 같은 ticker 오늘 활성 시트 이미 존재 (중복 방지, T10)
+
+price_above 자동 부착 (2026-05-11):
+- GAP_UP_REBOUND 는 시초 갭상승 후 직전 봉 high 돌파 확인 후 진입이 안전.
+- scout 가 `price_hint` 를 채워주면, scout 의 conditions_hint 가 price_above 를
+  포함하지 않는 한 engine 이 자동으로 `price_above price_hint × 1.001` 조건을
+  부착해 EntryConditionEvaluator (fast_loop/pending_entry) 가 돌파 확인 후
+  실 매수를 트리거하게 한다.
+- scout 가 price_hint 미설정 / 정책 yaml 의 default_entry_conditions 에 명시한
+  경우엔 본 자동부착이 안 일어남 — scout 의도 우선.
+- 추후 Scout 가 price_above 를 conditions_hint 로 정확히 박아주면 본 자동부착
+  로직은 제거 검토 (Scout F agent 의 별도 작업).
 """
 
 from __future__ import annotations
@@ -37,6 +48,12 @@ from .risk_throttle import RiskThrottleSnapshot
 from .sheet_id import generate_sheet_id
 
 logger = logging.getLogger(__name__)
+
+
+# GAP_UP_REBOUND price_above 자동 부착 시 사용하는 breakout 배수.
+# +10bps (1.001) — scout price_hint 위 호가 살짝 돌파 확인 임계. v2 buy-scanner
+# 의 "직전 봉 high + 0.1%" 휴리스틱과 동등. 운영 데이터 누적 후 조정 검토.
+PRICE_ABOVE_BREAKOUT_MULT: float = 1.001
 
 
 # exit rules 권장 순서 (POSITION_SHEET_SPEC §5.3)
@@ -194,6 +211,22 @@ class StrategyEngine:
         scout_conditions = list(candidate.entry_hint.conditions_hint or [])
         if not scout_conditions and entry.default_entry_conditions:
             scout_conditions = [dict(c) for c in entry.default_entry_conditions]
+        # GAP_UP_REBOUND price_above 자동 부착 — scout 가 price_hint 를 주고
+        # conditions_hint 에 price_above 가 없으면, price_hint × 1.001 임계로
+        # breakout 확인. PRICE_ABOVE_BREAKOUT_MULT 는 정적 fallback (1.001 = +10bps).
+        if (
+            tag == "GAP_UP_REBOUND"
+            and candidate.entry_hint.price_hint is not None
+            and candidate.entry_hint.price_hint > 0
+            and not any(c.get("type") == "price_above" for c in scout_conditions)
+        ):
+            scout_conditions.append(
+                {
+                    "type": "price_above",
+                    "value": float(candidate.entry_hint.price_hint)
+                    * PRICE_ABOVE_BREAKOUT_MULT,
+                }
+            )
         entry_section = EntrySection(
             trigger=candidate.entry_hint.trigger,
             price=candidate.entry_hint.price_hint,

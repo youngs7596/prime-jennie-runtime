@@ -13,6 +13,11 @@ v2 engine (monolith SimulatedPortfolio) 은 제거됨. v3 는 실시간 운영�
 from .data_loader import load_daily_bars
 from .domain import BacktestConfig, DailyBar, SheetBacktestResult, Trade
 from .metrics import BacktestSummary, ReasonStats, format_report, summarize
+from .persistence import (
+    BacktestPersistence,
+    BacktestPersistenceResult,
+    to_backtest_sheet_id,
+)
 from .runner import simulate_sheet
 from .tool_adapter import (
     BacktestConfigOverride,
@@ -28,6 +33,8 @@ from .tool_adapter import (
 __all__ = [
     "BacktestConfig",
     "BacktestConfigOverride",
+    "BacktestPersistence",
+    "BacktestPersistenceResult",
     "BacktestSummary",
     "BacktestToolAdapter",
     "BacktestToolAdapterArgs",
@@ -44,4 +51,5 @@ __all__ = [
     "load_daily_bars",
     "simulate_sheet",
     "summarize",
+    "to_backtest_sheet_id",
 ]

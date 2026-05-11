@@ -31,8 +31,9 @@ ALLOWED_STRATEGY_TAGS = frozenset(
 # 폐기된 strategy_tag
 DEPRECATED_STRATEGY_TAGS = frozenset({"RSI_REBOUND"})
 
-# sheet_id 정규식
-SHEET_ID_RE = re.compile(r"^ps_\d{8}_\d{6}_[0-9a-f]{4}$")
+# sheet_id 정규식 — 운영 시트는 `ps_` prefix, 백테스트 영속화 시트는 `bt_` prefix
+# (backtest/persistence.py 가 운영 sheet 와 namespace 분리용으로 사용).
+SHEET_ID_RE = re.compile(r"^(?:ps|bt)_\d{8}_\d{6}_[0-9a-f]{4}$")
 
 
 # =====================================================================

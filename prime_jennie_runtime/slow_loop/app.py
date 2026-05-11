@@ -49,6 +49,7 @@ from minyoung_mah import (
     default_resilience,
 )
 
+from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.observer_impl import (
@@ -81,7 +82,7 @@ from .scout.role import ScoutRole
 from .strategy.engine import StrategyEngine
 from .strategy.policy import load_policy
 from .strategy.publisher import PositionSheetPublisher
-from .strategy.risk_throttle import NoOpRiskThrottle
+from .strategy.risk_throttle import RedisRiskThrottleSnapshot
 
 OWNER = "slow_loop"
 
@@ -273,9 +274,12 @@ def _build_slow_loop_components(
         )
 
     policy = load_policy()
-    engine = StrategyEngine(policy=policy, risk_throttle=NoOpRiskThrottle())
+    # fast_loop 가 Redis 에 적재한 intraday:risk:level 을 시트 발행 시 그대로 반영.
+    risk_throttle = RedisRiskThrottleSnapshot(redis_client=redis_client)
+    engine = StrategyEngine(policy=policy, risk_throttle=risk_throttle)
     publisher = PositionSheetPublisher(client=redis_client, db_engine=db_engine)
     state_store = MacroStateStore(client=redis_client)
+    system_state = SystemState(redis_client=redis_client)
 
     return SlowLoopComponents(
         orchestrator=orchestrator,
@@ -292,6 +296,7 @@ def _build_slow_loop_components(
         db_engine=db_engine,
         shadow_orchestrator=shadow_orchestrator,
         redis_client=redis_client,
+        system_state=system_state,
     )
 
 

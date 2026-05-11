@@ -30,6 +30,7 @@ from minyoung_mah import (
     StaticPipeline,
 )
 
+from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.infra.observer_impl import pj_event
 from prime_jennie_runtime.position_sheet.schema import MacroStateSnapshot
 
@@ -148,6 +149,7 @@ class SlowLoopComponents:
     db_engine: Any = None  # AsyncEngine | None — macro_runs/scout_runs 기록용
     shadow_orchestrator: Any = None  # Orchestrator | None — Macro 를 DeepSeek 로 shadow 평가
     redis_client: Any = None  # aioredis.Redis | None — LLM stats 누적용 (llm:stats:{date}:{svc})
+    system_state: SystemState | None = None  # control.state:* 읽기. None 이면 STOP/PAUSE 미체크.
 
 
 def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
@@ -200,6 +202,52 @@ async def run_slow_loop(
         SlowLoopResult — 발행된 시트 ID, 거부된 ticker, skipped 이유 포함.
     """
     observer = comp.observer
+
+    # --- 0. control.state 게이트 ---
+    # /pause /stop 같은 긴급 제어가 활성이면 Macro/Scout LLM 호출 + 시트 발행 모두
+    # skip. fast_loop entry_executor 가 이미 진입을 차단하지만, 새 시트 발행 자체를
+    # 막지 않으면 사용자가 STOP 후에도 자꾸 sheet 가 쌓여 confusing. 따라서 사용자
+    # 의도(긴급 제어)를 우선해 가장 앞단에서 막는다.
+    if comp.system_state is not None:
+        sys_snap = await comp.system_state.snapshot()
+        if sys_snap.stopped:
+            logger.warning(
+                "slow_loop skipped: SystemState.stopped — sheet 발행 + LLM 호출 모두 차단"
+            )
+            await observer.emit(
+                pj_event(
+                    "pj.slow_loop.skipped_control",
+                    role="slow_loop",
+                    ok=True,
+                    reason="stopped",
+                )
+            )
+            return SlowLoopResult(skipped_reason="control_stopped")
+        if sys_snap.paused:
+            logger.warning(
+                "slow_loop skipped: SystemState.paused (reason=%s) — sheet 발행 + LLM 호출 차단",
+                sys_snap.pause_reason,
+            )
+            await observer.emit(
+                pj_event(
+                    "pj.slow_loop.skipped_control",
+                    role="slow_loop",
+                    ok=True,
+                    reason="paused",
+                    pause_reason=sys_snap.pause_reason,
+                )
+            )
+            return SlowLoopResult(skipped_reason="control_paused")
+
+    # --- 0.5. Risk Throttle 스냅샷 갱신 ---
+    # fast_loop risk_updater 가 Redis 에 적재한 최신 level 을 engine 이 시트 발행 시
+    # 사용할 수 있도록 한 번 갱신. 실패는 fail-open (기존 캐시 또는 1.0 유지).
+    risk_snap = getattr(comp.engine, "_risk", None)
+    if risk_snap is not None and hasattr(risk_snap, "refresh"):
+        try:
+            await risk_snap.refresh()
+        except Exception:
+            logger.exception("risk throttle refresh failed — using last known multiplier")
 
     # --- 1. Macro phase ---
     macro_ctx = await comp.macro_builder.build(

@@ -434,6 +434,11 @@ async def run_slow_loop(
         "sector_momentum": scout_ctx.sector_momentum,
         "macro_size_multiplier": post.output.size_multiplier,
         "market_data_records": market_data_records,
+        # Forward 컨센서스 — 현재 EmptyConsensusFeeder 라 None 값만 들어옴.
+        # Scout 코드는 missing 으로 취급. 후속 작업에서 RealConsensusFeeder 가 채움.
+        "consensus_data": {
+            t: e.model_dump(mode="json") for t, e in scout_ctx.consensus_data.items()
+        },
     }
 
     async def _primary_scout_validated():

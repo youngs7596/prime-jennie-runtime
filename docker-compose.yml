@@ -84,6 +84,9 @@ services:
     environment:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
+      # Slack 통합 (선택) — 설정 시 entry/exit/risk_level_change 알림 미러.
+      # 미설정 시 notifier 는 Redis stream 만 발행 (기존 동작).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     depends_on:
       redis:
         condition: service_healthy

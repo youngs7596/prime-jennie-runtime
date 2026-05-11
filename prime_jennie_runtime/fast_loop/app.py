@@ -25,6 +25,7 @@ import redis.asyncio as aioredis
 
 from prime_jennie_runtime.control.consumer import ControlCommandConsumer
 from prime_jennie_runtime.control.state import SystemState
+from prime_jennie_runtime.fast_loop.bar_engine import BarEngine, BarEngineIndicatorProvider
 from prime_jennie_runtime.fast_loop.consumer import PositionSheetConsumer
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
@@ -193,7 +194,11 @@ async def run() -> None:
         pending_queue = PendingEntryQueue(redis_client)
         pending_restored = await pending_queue.load_from_redis()
         logger.info("pending entry queue restored %d sheets from redis", pending_restored)
-        entry_evaluator = EntryConditionEvaluator()
+        # 1분봉 indicator 인프라 — tick_loop 가 매 tick 마다 update 호출 →
+        # ma20 / RSI / recent_high lookup 을 EntryConditionEvaluator 에 제공.
+        bar_engine = BarEngine()
+        indicators = BarEngineIndicatorProvider(bar_engine)
+        entry_evaluator = EntryConditionEvaluator(indicators=indicators)
 
         notifier = Notifier(redis_client)
         system_state = SystemState(redis_client)
@@ -251,6 +256,7 @@ async def run() -> None:
             entry_evaluator=entry_evaluator,
             entry_executor=entry_executor,
             account_sizer=sizer,
+            bar_engine=bar_engine,
         )
         await tick_loop.ensure_group()
 

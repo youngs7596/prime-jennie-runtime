@@ -6,7 +6,9 @@ POSITION_SHEET_SPEC §4.1 / §4.3 명세 검증:
     - Redis 백업 + 부팅 시 load_from_redis 복구
     - conditions 빈 리스트면 즉시 통과
     - price_below / price_above 평가 정확
-    - volume_over_ma20 / spread_under_bps 는 unsupported (False)
+    - spread_under_bps 호가 평가 + no_quote 보류
+    - volume_over_ma20 — provider 미주입 / warm-up / pass / fail 4 케이스
+    - rsi_under — provider 미주입 / warm-up / pass / fail 4 케이스
     - 09:00 KST 이전 시트는 보류
 """
 
@@ -222,12 +224,106 @@ def test_evaluator_price_above_fail():
     assert result.reason.startswith("price_above_fail")
 
 
-def test_evaluator_volume_over_ma20_unsupported():
+def test_evaluator_volume_over_ma20_no_provider_blocks():
+    """provider 미주입 시 warm-up 과 동일 — no_data 사유로 보류."""
     sheet = _make_sheet(conditions=[{"type": "volume_over_ma20", "min_ratio": 1.5}])
     evaluator = EntryConditionEvaluator()
     result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
     assert result.passed is False
-    assert result.reason == "volume_over_ma20_unsupported"
+    assert result.reason == "volume_over_ma20_no_data"
+
+
+def test_evaluator_volume_over_ma20_warmup_blocks():
+    """ma20 가 None (warm-up) 이면 보류."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class WarmupProvider(IndicatorProvider):
+        def volume_ma20(self, ticker: str) -> float | None:
+            return None
+
+        def intraday_cum_volume(self, ticker: str) -> float | None:
+            return 5_000_000.0
+
+    sheet = _make_sheet(conditions=[{"type": "volume_over_ma20", "min_ratio": 1.5}])
+    evaluator = EntryConditionEvaluator(indicators=WarmupProvider())
+    result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
+    assert result.passed is False
+    assert result.reason == "volume_over_ma20_no_data"
+
+
+def test_evaluator_volume_over_ma20_pass():
+    """cum_volume / ma20 = 2.0 ≥ min_ratio 1.5 → 통과."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class Stub(IndicatorProvider):
+        def volume_ma20(self, ticker: str) -> float | None:
+            return 1_000_000.0
+
+        def intraday_cum_volume(self, ticker: str) -> float | None:
+            return 2_000_000.0
+
+    sheet = _make_sheet(conditions=[{"type": "volume_over_ma20", "min_ratio": 1.5}])
+    evaluator = EntryConditionEvaluator(indicators=Stub())
+    result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
+    assert result.passed is True
+    assert result.reason == "all_passed"
+
+
+def test_evaluator_volume_over_ma20_fail():
+    """cum_volume / ma20 = 1.0 < min_ratio 1.5 → 차단."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class Stub(IndicatorProvider):
+        def volume_ma20(self, ticker: str) -> float | None:
+            return 1_000_000.0
+
+        def intraday_cum_volume(self, ticker: str) -> float | None:
+            return 1_000_000.0
+
+    sheet = _make_sheet(conditions=[{"type": "volume_over_ma20", "min_ratio": 1.5}])
+    evaluator = EntryConditionEvaluator(indicators=Stub())
+    result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
+    assert result.passed is False
+    assert result.reason.startswith("volume_over_ma20_fail")
+
+
+def test_evaluator_rsi_under_no_provider_blocks():
+    """provider 미주입 시 RSI None → 보류."""
+    sheet = _make_sheet(conditions=[{"type": "rsi_under", "threshold": 70}])
+    evaluator = EntryConditionEvaluator()
+    result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
+    assert result.passed is False
+    assert result.reason == "rsi_under_no_data"
+
+
+def test_evaluator_rsi_under_pass():
+    """RSI 55 < threshold 70 → 통과."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class Stub(IndicatorProvider):
+        def rsi_1m(self, ticker: str) -> float | None:
+            return 55.0
+
+    sheet = _make_sheet(conditions=[{"type": "rsi_under", "threshold": 70}])
+    evaluator = EntryConditionEvaluator(indicators=Stub())
+    result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
+    assert result.passed is True
+    assert result.reason == "all_passed"
+
+
+def test_evaluator_rsi_under_fail():
+    """RSI 75 ≥ threshold 70 → 차단 (overextension)."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class Stub(IndicatorProvider):
+        def rsi_1m(self, ticker: str) -> float | None:
+            return 75.0
+
+    sheet = _make_sheet(conditions=[{"type": "rsi_under", "threshold": 70}])
+    evaluator = EntryConditionEvaluator(indicators=Stub())
+    result = evaluator.evaluate(sheet, _tick(), now=_market_open_now())
+    assert result.passed is False
+    assert result.reason.startswith("rsi_under_fail")
 
 
 def test_evaluator_spread_under_bps_pass():

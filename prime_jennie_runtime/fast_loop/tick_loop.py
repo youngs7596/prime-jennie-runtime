@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
+from prime_jennie_runtime.fast_loop.bar_engine import BarEngine
 from prime_jennie_runtime.fast_loop.domain import ExitDecision, TickData
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_evaluator import evaluate as evaluate_exit
@@ -65,6 +66,7 @@ class TickLoop:
         entry_executor: EntryExecutor,
         account_sizer: AccountSizer,
         *,
+        bar_engine: BarEngine | None = None,
         clock: Clock = _default_clock,
         group: str = "fast_loop_ticks",
         consumer: str = "fast_loop_tick_1",
@@ -79,6 +81,9 @@ class TickLoop:
         self._entry_evaluator = entry_evaluator
         self._entry_executor = entry_executor
         self._sizer = account_sizer
+        # 분봉 indicator 인프라. None 이면 update 만 스킵 — 평가자는 IndicatorProvider
+        # 기본 동작 (모두 None) 으로 condition 평가에서 자연스럽게 "보류".
+        self._bar_engine = bar_engine
         self._clock = clock
         self._group = group
         self._consumer = consumer
@@ -128,6 +133,14 @@ class TickLoop:
         tick = _parse_tick(data)
         if tick is None:
             return
+
+        # 분봉 집계 — entry/exit 평가 전에 미리 누적. update 가 분봉을 닫으면
+        # 이후 indicator lookup 이 새 bar 를 반영. 동기 / 락 보호.
+        if self._bar_engine is not None:
+            try:
+                self._bar_engine.update(tick.ticker, tick.price, tick.volume, ts=tick.ts)
+            except Exception:
+                logger.exception("bar_engine update failed ticker=%s", tick.ticker)
 
         # ── forced liquidation: armed && ticker ∈ forced_liquidation 이면
         #     보유 중 sheet 들 모두 즉시 청산 (정상 exit rule 우선) ──

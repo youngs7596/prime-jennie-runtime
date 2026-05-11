@@ -149,8 +149,24 @@ class SpreadUnderBpsCondition(BaseModel):
     max_bps: float
 
 
+class RsiUnderCondition(BaseModel):
+    """1분봉 RSI 가 threshold 미만일 때만 진입 (overextension filter).
+
+    design Phase 0 §4.5 의 Overextension Filter 를 entry condition 으로 부착.
+    fast_loop ``BarEngine`` 의 ``rsi`` lookup 결과 사용. warm-up 동안 (분봉
+    수 부족) RSI 가 None 이면 평가자는 보류 (False) 처리 — 안전 측면.
+    """
+
+    type: Literal["rsi_under"] = "rsi_under"
+    threshold: Annotated[float, Field(gt=0, le=100)]
+
+
 EntryCondition = Annotated[
-    PriceBelowCondition | PriceAboveCondition | VolumeOverMa20Condition | SpreadUnderBpsCondition,
+    PriceBelowCondition
+    | PriceAboveCondition
+    | VolumeOverMa20Condition
+    | SpreadUnderBpsCondition
+    | RsiUnderCondition,
     Field(discriminator="type"),
 ]
 

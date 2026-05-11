@@ -24,6 +24,7 @@ import httpx
 
 from prime_jennie_runtime.infra.config import KISConfig
 
+from .order_client import OrderClient
 from .schemas import DailyPrice, MinutePrice, StockSnapshot
 from .token_manager import TokenRecord, load_token, save_token
 
@@ -77,6 +78,8 @@ class KISApi:
         self._token_expires_at: float = 0.0
         self._token_lock = asyncio.Lock()
         self._load_cached_token()
+        # 주문 로직은 별도 모듈 — KISApi 는 thin wrapper 로 위임 (단일 책임 분리)
+        self._order_client = OrderClient(self)
 
     # ─── Authentication ──────────────────────────────────────────
 
@@ -349,7 +352,7 @@ class KISApi:
 
         return prices
 
-    # ─── Trading ─────────────────────────────────────────────────
+    # ─── Trading (delegated to OrderClient) ──────────────────────
 
     async def place_order(
         self,
@@ -359,135 +362,21 @@ class KISApi:
         quantity: int,
         price: int = 0,
     ) -> dict[str, Any]:
-        """주문 실행 (매수 TTTC0802U / 매도 TTTC0801U, 모의계좌는 V 접두)."""
-        tr_id = "TTTC0802U" if order_type == "buy" else "TTTC0801U"
-        if self._config.is_paper:
-            tr_id = "VTTC0802U" if order_type == "buy" else "VTTC0801U"
-
-        # 시장가: ORD_DVSN=01, 지정가: ORD_DVSN=00
-        ord_dvsn = "01" if price == 0 else "00"
-
-        data = await self._request(
-            "POST",
-            "/uapi/domestic-stock/v1/trading/order-cash",
-            tr_id=tr_id,
-            json_data={
-                "CANO": self._config.account_no,
-                "ACNT_PRDT_CD": self._config.account_product_code,
-                "PDNO": stock_code,
-                "ORD_DVSN": ord_dvsn,
-                "ORD_QTY": str(quantity),
-                "ORD_UNPR": str(price),
-            },
+        """``OrderClient.place_order`` 위임 — 주문 로직은 별도 모듈."""
+        return await self._order_client.place_order(
+            order_type=order_type,
+            stock_code=stock_code,
+            quantity=quantity,
+            price=price,
         )
 
-        output = data.get("output", {})
-        return {
-            "order_no": output.get("ODNO", ""),
-            "order_time": output.get("ORD_TMD", ""),
-        }
-
     async def cancel_order(self, order_no: str) -> bool:
-        """주문 취소 (TTTC0803U)."""
-        tr_id = "VTTC0803U" if self._config.is_paper else "TTTC0803U"
-
-        try:
-            await self._request(
-                "POST",
-                "/uapi/domestic-stock/v1/trading/order-rvsecncl",
-                tr_id=tr_id,
-                json_data={
-                    "CANO": self._config.account_no,
-                    "ACNT_PRDT_CD": self._config.account_product_code,
-                    "KRX_FWDG_ORD_ORGNO": "",
-                    "ORGN_ODNO": order_no,
-                    "ORD_DVSN": "00",
-                    "RVSE_CNCL_DVSN_CD": "02",  # 취소
-                    "ORD_QTY": "0",
-                    "ORD_UNPR": "0",
-                    "QTY_ALL_ORD_YN": "Y",
-                },
-            )
-            return True
-        except KISApiError as e:
-            logger.error("Cancel order failed: %s", e)
-            return False
+        """``OrderClient.cancel_order`` 위임."""
+        return await self._order_client.cancel_order(order_no)
 
     async def check_order_status(self, order_no: str) -> dict[str, Any] | None:
-        """주문 체결 조회 (TTTC0081R).
-
-        레거시 2단계 로직:
-          Step 1: CCLD_DVSN="01" (체결만) → tot_ccld_qty > 0 이면 체결 존재
-          Step 2: CCLD_DVSN="00" (전체) → rmn_qty == 0 이면 전량 체결
-        """
-        tr_id = "VTTC0081R" if self._config.is_paper else "TTTC0081R"
-
-        today = date.today().strftime("%Y%m%d")
-        base_params = {
-            "CANO": self._config.account_no,
-            "ACNT_PRDT_CD": self._config.account_product_code,
-            "INQR_STRT_DT": today,
-            "INQR_END_DT": today,
-            "SLL_BUY_DVSN_CD": "00",  # 전체
-            "INQR_DVSN": "00",
-            "PDNO": "",
-            "CCLD_DVSN": "",
-            "ORD_GNO_BRNO": "",
-            "ODNO": order_no,
-            "INQR_DVSN_3": "00",
-            "INQR_DVSN_1": "",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
-        }
-
-        try:
-            # Step 1: 체결 건만 조회
-            params_filled = {**base_params, "CCLD_DVSN": "01"}
-            data1 = await self._request(
-                "GET",
-                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-                tr_id=tr_id,
-                params=params_filled,
-            )
-
-            filled_qty = 0
-            avg_price = 0.0
-            for row in data1.get("output1", []):
-                if row.get("odno") == order_no:
-                    filled_qty += int(row.get("tot_ccld_qty", 0))
-                    price_val = float(row.get("avg_prvs", 0))
-                    if price_val > 0:
-                        avg_price = price_val
-
-            if filled_qty == 0:
-                return {"filled": False, "filled_qty": 0, "avg_price": 0.0}
-
-            # Step 2: 전체 조회로 잔여 수량 확인
-            params_all = {**base_params, "CCLD_DVSN": "00"}
-            data2 = await self._request(
-                "GET",
-                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-                tr_id=tr_id,
-                params=params_all,
-            )
-
-            fully_filled = False
-            for row in data2.get("output1", []):
-                if row.get("odno") == order_no:
-                    rmn_qty = int(row.get("rmn_qty", -1))
-                    if rmn_qty == 0:
-                        fully_filled = True
-                    break
-
-            return {
-                "filled": fully_filled,
-                "filled_qty": filled_qty,
-                "avg_price": avg_price,
-            }
-
-        except Exception as e:
-            logger.error("check_order_status failed for %s: %s", order_no, e)
-            return None
+        """``OrderClient.check_order_status`` 위임 — 2단계 체결 조회."""
+        return await self._order_client.check_order_status(order_no)
 
     # ─── Account ─────────────────────────────────────────────────
 

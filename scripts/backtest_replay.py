@@ -36,6 +36,7 @@ from sqlalchemy import text
 
 from prime_jennie_runtime.backtest import (
     BacktestConfig,
+    BacktestPersistence,
     SheetBacktestResult,
     format_report,
     load_daily_bars,
@@ -155,7 +156,13 @@ async def _main(args: argparse.Namespace) -> int:
         slippage_pct=args.slippage,
     )
 
+    persistence: BacktestPersistence | None = None
+    if args.persist:
+        persistence = BacktestPersistence(engine, backtest_run_id=args.backtest_run_id)
+        logger.info("DB persistence enabled (backtest_run_id=%s)", persistence.backtest_run_id)
+
     results: list[SheetBacktestResult] = []
+    persisted_count = 0
     for sheet in sheets:
         r = await _backtest_one(
             engine,
@@ -174,6 +181,22 @@ async def _main(args: argparse.Namespace) -> int:
             sheet.strategy_tag,
             r.pnl_pct,
             status,
+        )
+
+        if persistence is not None:
+            try:
+                out = await persistence.persist_one(sheet, r)
+                if out.persisted:
+                    persisted_count += 1
+            except Exception:
+                logger.exception("persist failed for %s", sheet.sheet_id)
+
+    if persistence is not None:
+        logger.info(
+            "persisted %d outcomes (of %d sheets) under run=%s",
+            persisted_count,
+            len(results),
+            persistence.backtest_run_id,
         )
 
     summary = summarize(results)
@@ -214,6 +237,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--sell-fee", type=float, default=0.195)
     p.add_argument("--slippage", type=float, default=0.1)
     p.add_argument("--output", help="JSON 결과 파일 경로 (선택)")
+    p.add_argument(
+        "--persist",
+        action="store_true",
+        help="결과를 position_sheets/executions/outcomes 에 영속화 (sheet_id 는 bt_ prefix). "
+        "meta evaluation pipeline 이 이 행을 채점한다.",
+    )
+    p.add_argument(
+        "--backtest-run-id",
+        default=None,
+        help="복수 시트 한 묶음으로 영속화할 run_id. 미지정 시 자동 생성.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 

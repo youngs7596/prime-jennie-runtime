@@ -9,7 +9,7 @@ from prime_jennie_runtime.slow_loop.strategy.policy import load_policy
 
 def test_load_default_policy():
     policy = load_policy()
-    assert policy.version == "v3.0.3"
+    assert policy.version == "v3.0.4"
 
 
 def test_all_four_tags_present():

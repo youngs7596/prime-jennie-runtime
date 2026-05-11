@@ -1,4 +1,4 @@
-# Strategy Policy v3.0.3 — strategy_tag별 base_pct, exit rules, entry conditions.
+# Strategy Policy v3.0.4 — strategy_tag별 base_pct, exit rules, entry conditions.
 # Strategy Engine이 ScreeningCandidate를 PositionSheet로 조립할 때 참고.
 # base_pct, max_notional_krw, max_notional_pct, exit rule, entry condition 파라미터
 # 모두 영석이 수동 관리.
@@ -7,10 +7,18 @@
 # fast_loop BalanceAwareSizer 가 min(total_asset × pct, max_notional_krw, cash) 적용.
 # max_notional_krw 는 절대 안전 한도 (자산 폭증 시 cap, 평소 발동 X).
 #
+# 2026-05-11 (v3.0.4): overextension_exit 정책 배치.
+# 코드 (_check_overextension) 는 이미 1분봉 RSI 임계 청산 구현됨.
+# 단기 모멘텀 전략 (GAP_UP_REBOUND, EARNINGS_DRIFT) 의 최우선 청산 룰로 부착.
+# rsi_threshold=80 보수적 — 70~75 는 false trigger 빈도 우려, v2 short-term
+# 운영 데이터에서 80 도달 시 평균 reversal 확률 높음. 운영 후 정량 평가 후
+# 70 시도 검토.
+#
 # 참고:
 # - v2 실증: Breakeven +3%→+0.3%, Profit Floor +15%→+10%, Death Cross MA5/MA20 min_loss 1%
 #   v2 position sizing: MAX_POSITION_PCT_DEFAULT 12%, A+ 18%
-# - POSITION_SHEET_SPEC §4.2 / §5.3 권장 순서대로 rule 배열
+# - POSITION_SHEET_SPEC §4.2 / §5.3 권장 순서대로 rule 배열 (overextension_exit 이
+#   가장 앞 — first_match 평가에서 단기 과열 신호를 가장 빨리 잡기 위함)
 # - fixed_sl, time_stop은 모든 정책에 반드시 포함
 # - default_entry_conditions: scout entry_hint 의 conditions_hint 가 비어있을 때 보강.
 #   현재는 호가 안전장치 (spread_under_bps) 만 부착 — KIS H0STCNT0 호가1 기반.
@@ -18,7 +26,7 @@
 #   strict 한 시그널 기반 (price_above breakout 등) 도입은 v2 scanner reference + 운영
 #   데이터 누적 후 점진 추가.
 
-policy_version: "v3.0.3"
+policy_version: "v3.0.4"
 
 strategies:
   GAP_UP_REBOUND:
@@ -29,6 +37,11 @@ strategies:
       - type: spread_under_bps
         max_bps: 20
     default_exit_rules:
+      # overextension_exit: 1분봉 RSI 80 초과 시 즉시 청산 (당일 갭상승 후 단기
+      # 과열 컷). first_match 평가에서 가장 앞에 배치 — engine.py 의 _EXIT_RULE_ORDER
+      # 가 자동 정렬하지만 YAML 도 인텐트 명확히 하기 위해 앞에 둠.
+      - type: overextension_exit
+        rsi_threshold: 80
       - type: trailing_tp
         activate_pct: 0.05
         drop_pct: 0.03
@@ -78,6 +91,10 @@ strategies:
       - type: spread_under_bps
         max_bps: 15
     default_exit_rules:
+      # overextension_exit: 어닝 후 단기 모멘텀 과열 컷 (RSI 80 초과).
+      # GAP_UP_REBOUND 와 동일 임계 — 보수 시작 후 운영 데이터로 조정.
+      - type: overextension_exit
+        rsi_threshold: 80
       - type: trailing_tp
         activate_pct: 0.07
         drop_pct: 0.04

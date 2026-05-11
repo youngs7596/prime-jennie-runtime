@@ -207,6 +207,44 @@ async def test_all_sheets_have_fixed_sl_and_time_stop():
 
 
 # =====================================================================
+# overextension_exit policy (v3.0.4)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_overextension_exit_attached_to_short_term_tags():
+    """v3.0.4: GAP_UP_REBOUND / EARNINGS_DRIFT 에 overextension_exit 자동 부착."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    for tag in ("GAP_UP_REBOUND", "EARNINGS_DRIFT"):
+        sheet = await engine.build_sheet(_candidate(tag=tag), _inputs())
+        assert sheet is not None, f"{tag} rejected unexpectedly"
+        types = [r.type for r in sheet.exit.rules]
+        assert "overextension_exit" in types, f"{tag} missing overextension_exit"
+        # first_match 평가에서 가장 앞 (engine 의 _EXIT_RULE_ORDER 정렬)
+        assert types[0] == "overextension_exit", f"{tag} overextension_exit not first: {types}"
+        # rsi_threshold 80 (보수)
+        rule = next(r for r in sheet.exit.rules if r.type == "overextension_exit")
+        assert rule.rsi_threshold == 80.0
+
+
+@pytest.mark.asyncio
+async def test_overextension_exit_not_on_other_tags():
+    """SECTOR_MOMENTUM / MEAN_REVERT_RSI 는 overextension_exit 미부착 (정책 의도)."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    for tag in ("SECTOR_MOMENTUM", "MEAN_REVERT_RSI"):
+        sheet = await engine.build_sheet(_candidate(tag=tag), _inputs())
+        assert sheet is not None
+        types = {r.type for r in sheet.exit.rules}
+        assert "overextension_exit" not in types, f"{tag} unexpectedly has overextension_exit"
+
+
+def test_policy_version_bumped_to_v3_0_4():
+    """overextension_exit 도입과 함께 policy_version 증가."""
+    policy = load_policy()
+    assert policy.version == "v3.0.4"
+
+
+# =====================================================================
 # protocol 형태 체크
 # =====================================================================
 

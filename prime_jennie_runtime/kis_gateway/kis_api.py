@@ -24,10 +24,30 @@ import httpx
 
 from prime_jennie_runtime.infra.config import KISConfig
 
+from .order_client import OrderClient
 from .schemas import DailyPrice, MinutePrice, StockSnapshot
 from .token_manager import TokenRecord, load_token, save_token
 
 logger = logging.getLogger(__name__)
+
+# 5xx 재시도 정책 (EGW00201 throttle 은 별도 1회 backoff 로 처리)
+_RETRY_5XX_MAX = 3
+_RETRY_5XX_BASE_SEC = 1.0
+
+
+def _is_egw_throttle(resp: httpx.Response) -> bool:
+    """500 + msg_cd=EGW00201 (초당 거래건수 초과) 응답인지 확인.
+
+    이 케이스는 위 ``_request`` 에서 별도 backoff 분기로 이미 처리되므로,
+    일반 5xx 재시도 루프가 같은 응답을 다시 재시도하지 않도록 분리.
+    """
+    if resp.status_code != 500:
+        return False
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return body.get("msg_cd") == "EGW00201"
 
 
 class KISApiError(Exception):
@@ -58,6 +78,8 @@ class KISApi:
         self._token_expires_at: float = 0.0
         self._token_lock = asyncio.Lock()
         self._load_cached_token()
+        # 주문 로직은 별도 모듈 — KISApi 는 thin wrapper 로 위임 (단일 책임 분리)
+        self._order_client = OrderClient(self)
 
     # ─── Authentication ──────────────────────────────────────────
 
@@ -129,7 +151,20 @@ class KISApi:
         params: dict[str, Any] | None = None,
         json_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """KIS API 공통 요청. 연결 오류 1회 재시도, 인증 오류 시 토큰 재발급 후 재시도."""
+        """KIS API 공통 요청.
+
+        재시도 정책:
+          - 연결 오류 (RemoteProtocol/Connect/Read): 1회 짧게 재시도
+          - 500 EGW00201 (rate throttle): 1초 backoff 후 1회 재시도
+          - 503 및 일반 5xx (서버 일시 장애): 지수 백오프 3회 (1s/2s/4s)
+          - 401/403 (인증 오류): 토큰 재발급 후 1회 재시도
+
+        Circuit breaker 와의 관계: ``_request`` 는 ``AsyncCircuitBreaker.call`` 안에서
+        실행되므로 breaker 가 OPEN 이면 ``_request`` 가 호출되기 전 ``CircuitBreakerError``
+        가 발생한다. 즉 여기서의 재시도는 breaker 가 CLOSED/HALF_OPEN 일 때만 일어나며,
+        실패 누적이 ``fail_max`` 를 넘으면 breaker 가 OPEN 으로 전이해 후속 호출이
+        즉시 차단된다 — retry 와 breaker 가 충돌하지 않음.
+        """
         headers = await self._headers(tr_id)
 
         try:
@@ -157,6 +192,28 @@ class KISApi:
                 resp = await self._client.request(
                     method, path, headers=headers, params=params, json=json_data
                 )
+
+        # 5xx (502/503/504 + EGW00201 이 아닌 500): 일시 장애로 간주하고 지수 백오프 재시도.
+        # 2026-05-11 운영 중 503 (Service Unavailable) 다발 — KIS 점검 또는 자체 게이트웨이
+        # 일시 과부하 — 단발 재시도로 회복되는 경우 대부분.
+        if 500 <= resp.status_code < 600 and not _is_egw_throttle(resp):
+            for attempt in range(_RETRY_5XX_MAX):
+                delay = _RETRY_5XX_BASE_SEC * (2**attempt)
+                logger.warning(
+                    "KIS %s %s -> %d, backoff %.1fs (attempt %d/%d)",
+                    method,
+                    path,
+                    resp.status_code,
+                    delay,
+                    attempt + 1,
+                    _RETRY_5XX_MAX,
+                )
+                await asyncio.sleep(delay)
+                resp = await self._client.request(
+                    method, path, headers=headers, params=params, json=json_data
+                )
+                if resp.status_code < 500 or _is_egw_throttle(resp):
+                    break
 
         # 인증 오류 의심 → 토큰 재발급 후 재시도 (1회).
         # 401/403 만 대상. 500 은 throttle/서버 오류라 재인증이 도움 안 됨 (오히려
@@ -295,7 +352,7 @@ class KISApi:
 
         return prices
 
-    # ─── Trading ─────────────────────────────────────────────────
+    # ─── Trading (delegated to OrderClient) ──────────────────────
 
     async def place_order(
         self,
@@ -305,135 +362,21 @@ class KISApi:
         quantity: int,
         price: int = 0,
     ) -> dict[str, Any]:
-        """주문 실행 (매수 TTTC0802U / 매도 TTTC0801U, 모의계좌는 V 접두)."""
-        tr_id = "TTTC0802U" if order_type == "buy" else "TTTC0801U"
-        if self._config.is_paper:
-            tr_id = "VTTC0802U" if order_type == "buy" else "VTTC0801U"
-
-        # 시장가: ORD_DVSN=01, 지정가: ORD_DVSN=00
-        ord_dvsn = "01" if price == 0 else "00"
-
-        data = await self._request(
-            "POST",
-            "/uapi/domestic-stock/v1/trading/order-cash",
-            tr_id=tr_id,
-            json_data={
-                "CANO": self._config.account_no,
-                "ACNT_PRDT_CD": self._config.account_product_code,
-                "PDNO": stock_code,
-                "ORD_DVSN": ord_dvsn,
-                "ORD_QTY": str(quantity),
-                "ORD_UNPR": str(price),
-            },
+        """``OrderClient.place_order`` 위임 — 주문 로직은 별도 모듈."""
+        return await self._order_client.place_order(
+            order_type=order_type,
+            stock_code=stock_code,
+            quantity=quantity,
+            price=price,
         )
 
-        output = data.get("output", {})
-        return {
-            "order_no": output.get("ODNO", ""),
-            "order_time": output.get("ORD_TMD", ""),
-        }
-
     async def cancel_order(self, order_no: str) -> bool:
-        """주문 취소 (TTTC0803U)."""
-        tr_id = "VTTC0803U" if self._config.is_paper else "TTTC0803U"
-
-        try:
-            await self._request(
-                "POST",
-                "/uapi/domestic-stock/v1/trading/order-rvsecncl",
-                tr_id=tr_id,
-                json_data={
-                    "CANO": self._config.account_no,
-                    "ACNT_PRDT_CD": self._config.account_product_code,
-                    "KRX_FWDG_ORD_ORGNO": "",
-                    "ORGN_ODNO": order_no,
-                    "ORD_DVSN": "00",
-                    "RVSE_CNCL_DVSN_CD": "02",  # 취소
-                    "ORD_QTY": "0",
-                    "ORD_UNPR": "0",
-                    "QTY_ALL_ORD_YN": "Y",
-                },
-            )
-            return True
-        except KISApiError as e:
-            logger.error("Cancel order failed: %s", e)
-            return False
+        """``OrderClient.cancel_order`` 위임."""
+        return await self._order_client.cancel_order(order_no)
 
     async def check_order_status(self, order_no: str) -> dict[str, Any] | None:
-        """주문 체결 조회 (TTTC0081R).
-
-        레거시 2단계 로직:
-          Step 1: CCLD_DVSN="01" (체결만) → tot_ccld_qty > 0 이면 체결 존재
-          Step 2: CCLD_DVSN="00" (전체) → rmn_qty == 0 이면 전량 체결
-        """
-        tr_id = "VTTC0081R" if self._config.is_paper else "TTTC0081R"
-
-        today = date.today().strftime("%Y%m%d")
-        base_params = {
-            "CANO": self._config.account_no,
-            "ACNT_PRDT_CD": self._config.account_product_code,
-            "INQR_STRT_DT": today,
-            "INQR_END_DT": today,
-            "SLL_BUY_DVSN_CD": "00",  # 전체
-            "INQR_DVSN": "00",
-            "PDNO": "",
-            "CCLD_DVSN": "",
-            "ORD_GNO_BRNO": "",
-            "ODNO": order_no,
-            "INQR_DVSN_3": "00",
-            "INQR_DVSN_1": "",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
-        }
-
-        try:
-            # Step 1: 체결 건만 조회
-            params_filled = {**base_params, "CCLD_DVSN": "01"}
-            data1 = await self._request(
-                "GET",
-                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-                tr_id=tr_id,
-                params=params_filled,
-            )
-
-            filled_qty = 0
-            avg_price = 0.0
-            for row in data1.get("output1", []):
-                if row.get("odno") == order_no:
-                    filled_qty += int(row.get("tot_ccld_qty", 0))
-                    price_val = float(row.get("avg_prvs", 0))
-                    if price_val > 0:
-                        avg_price = price_val
-
-            if filled_qty == 0:
-                return {"filled": False, "filled_qty": 0, "avg_price": 0.0}
-
-            # Step 2: 전체 조회로 잔여 수량 확인
-            params_all = {**base_params, "CCLD_DVSN": "00"}
-            data2 = await self._request(
-                "GET",
-                "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-                tr_id=tr_id,
-                params=params_all,
-            )
-
-            fully_filled = False
-            for row in data2.get("output1", []):
-                if row.get("odno") == order_no:
-                    rmn_qty = int(row.get("rmn_qty", -1))
-                    if rmn_qty == 0:
-                        fully_filled = True
-                    break
-
-            return {
-                "filled": fully_filled,
-                "filled_qty": filled_qty,
-                "avg_price": avg_price,
-            }
-
-        except Exception as e:
-            logger.error("check_order_status failed for %s: %s", order_no, e)
-            return None
+        """``OrderClient.check_order_status`` 위임 — 2단계 체결 조회."""
+        return await self._order_client.check_order_status(order_no)
 
     # ─── Account ─────────────────────────────────────────────────
 

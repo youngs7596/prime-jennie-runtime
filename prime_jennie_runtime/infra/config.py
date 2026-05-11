@@ -6,8 +6,16 @@
 
 from __future__ import annotations
 
+import logging
+import os
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# docker-compose 의 KIS gateway 서비스 이름 + 포트 — env 누락 시 fallback.
+_DEFAULT_KIS_GATEWAY_URL = "http://kis-gateway:8080"
 
 
 class PostgresConfig(BaseSettings):
@@ -69,7 +77,10 @@ class KISConfig(BaseSettings):
     app_secret: str = ""
     account_no: str = ""
     account_product_code: str = "01"
-    gateway_url: str = "http://localhost:8080"
+    # docker-compose 의 서비스 이름 기본값 — env 누락 시 localhost 로 가서 ConnectError
+    # 나는 사고 (2026-04 자산 스냅샷 사고) 재발 방지. 로컬 개발에서 다른 호스트면
+    # KIS_GATEWAY_URL 명시 필수.
+    gateway_url: str = _DEFAULT_KIS_GATEWAY_URL
 
     # KIS OpenAPI 서버 (모의 vs 실계좌)
     base_url: str = "https://openapivts.koreainvestment.com:29443"  # 모의
@@ -139,3 +150,51 @@ class AppConfig(BaseSettings):
     langfuse: LangfuseConfig = LangfuseConfig()
     kis: KISConfig = KISConfig()
     telegram: TelegramConfig = TelegramConfig()
+
+
+def validate_kis_gateway_url(cfg: KISConfig, *, strict: bool = False) -> str:
+    """KIS_GATEWAY_URL 환경변수 + ``KISConfig.gateway_url`` 검증.
+
+    호출 시점:
+      - fast_loop / telegram_bot / slow_loop 등 KisClient 를 사용하는 서비스의
+        startup. compose 가 env 를 주입하지 않은 채 컨테이너가 뜨면 localhost 로
+        가서 ConnectError 가 발생, retry/circuit breaker 가 무의미하게 카운트됨.
+
+    동작:
+      - 명시 URL (env or config) 이 비어 있거나 localhost 인데 ``strict=True``
+        (예: env=production) 이면 ``RuntimeError`` 로 startup 중단.
+      - 그렇지 않으면 docker-compose 서비스 이름 (`http://kis-gateway:8080`) 로
+        fallback 하고 WARN 로그.
+
+    Returns: 검증/정규화된 gateway URL (trailing slash 제거).
+    """
+    raw = os.environ.get("KIS_GATEWAY_URL", "") or cfg.gateway_url
+    raw = raw.strip()
+    if not raw:
+        if strict:
+            raise RuntimeError(
+                "KIS_GATEWAY_URL 가 비어 있다. 컨테이너 env 또는 KISConfig.gateway_url 을 "
+                f"설정해라 (production fallback: {_DEFAULT_KIS_GATEWAY_URL})."
+            )
+        logger.warning(
+            "KIS_GATEWAY_URL 누락 — docker-compose 기본값 %s 로 fallback", _DEFAULT_KIS_GATEWAY_URL
+        )
+        return _DEFAULT_KIS_GATEWAY_URL
+
+    # localhost 는 compose 내부에서 호출 시 거의 항상 잘못된 설정 (gateway 컨테이너가
+    # 별도 호스트). production 에선 차단, dev 는 경고만.
+    normalized = raw.rstrip("/")
+    if "localhost" in normalized or "127.0.0.1" in normalized:
+        if strict:
+            raise RuntimeError(
+                f"KIS_GATEWAY_URL={normalized} 가 localhost 를 가리킨다. "
+                "compose 환경에선 서비스 이름 (예: http://kis-gateway:8080) 을 사용해라. "
+                "강제로 localhost 를 쓰고 싶다면 strict=False 로 호출."
+            )
+        logger.warning(
+            "KIS_GATEWAY_URL=%s 가 localhost — compose 내부 호출이면 ConnectError 가능, "
+            "서비스 이름 사용 권장",
+            normalized,
+        )
+
+    return normalized

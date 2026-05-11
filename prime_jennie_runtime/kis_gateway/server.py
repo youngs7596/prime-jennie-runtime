@@ -31,6 +31,7 @@ from .circuit_breaker import AsyncCircuitBreaker, CircuitBreakerError
 from .db_fallback import FallbackPriceService
 from .kis_api import KISApi, KISApiError
 from .market_hours import MarketCalendar
+from .mode_safety import enforce_mode_safety
 from .poller import KISRestPoller
 from .price_repo import PriceRepo
 from .rate_limiter import AsyncRateLimiter
@@ -110,7 +111,8 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
         pg_pool = None
         if state is None:
             cfg = config or KISConfig()
-            logger.info("KIS Gateway starting — paper=%s, base_url=%s", cfg.is_paper, cfg.base_url)
+            # paper/real 모드 안전장치 — real 모드 시 KIS_REAL_CONFIRMED 누락이면 RuntimeError.
+            enforce_mode_safety(cfg)
             api = KISApi(cfg)
             try:
                 await api.authenticate()

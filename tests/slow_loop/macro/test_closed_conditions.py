@@ -121,3 +121,68 @@ def test_multiple_triggers_all_collected():
     )
     triggers = check_closed_conditions(snap)
     assert set(triggers) == {"fx_shock", "high_volatility", "sector_contagion"}
+
+
+# =====================================================================
+# 지정학 — high_impact_geopolitical_count 임계
+# =====================================================================
+
+
+def test_geopolitical_three_events_triggers():
+    """24h high-impact geopolitical 3건 → 결정론 closed."""
+    snap = _base_snapshot(high_impact_geopolitical_count=3)
+    triggers = check_closed_conditions(snap)
+    assert "geopolitical" in triggers
+
+
+def test_geopolitical_two_events_no_trigger():
+    """2건 미만이면 LLM 판단에 위임 — 결정론 트리거 안 됨."""
+    snap = _base_snapshot(high_impact_geopolitical_count=2)
+    triggers = check_closed_conditions(snap)
+    assert "geopolitical" not in triggers
+
+
+def test_geopolitical_zero_baseline():
+    """0건은 당연히 트리거 X."""
+    snap = _base_snapshot()
+    assert "geopolitical" not in check_closed_conditions(snap)
+
+
+# =====================================================================
+# 유동성 — turnover_ratio + spread_ratio AND 결합
+# =====================================================================
+
+
+def test_liquidity_both_conditions_trigger():
+    """거래대금 0.4 (절반 이하) AND 스프레드 2.5배 → liquidity_crunch."""
+    snap = _base_snapshot(kospi_turnover_ratio=0.4, kospi_spread_ratio=2.5)
+    triggers = check_closed_conditions(snap)
+    assert "liquidity_crunch" in triggers
+
+
+def test_liquidity_only_turnover_no_trigger():
+    """거래대금 급감 단독으로는 트리거 X (오탐 방지 AND 결합)."""
+    snap = _base_snapshot(kospi_turnover_ratio=0.3, kospi_spread_ratio=1.1)
+    triggers = check_closed_conditions(snap)
+    assert "liquidity_crunch" not in triggers
+
+
+def test_liquidity_only_spread_no_trigger():
+    """스프레드 확대 단독으로도 트리거 X."""
+    snap = _base_snapshot(kospi_turnover_ratio=0.9, kospi_spread_ratio=2.5)
+    triggers = check_closed_conditions(snap)
+    assert "liquidity_crunch" not in triggers
+
+
+def test_liquidity_missing_data_fail_open():
+    """둘 중 하나라도 None 이면 평가 skip — fail-open."""
+    snap = _base_snapshot(kospi_turnover_ratio=None, kospi_spread_ratio=2.5)
+    assert "liquidity_crunch" not in check_closed_conditions(snap)
+    snap = _base_snapshot(kospi_turnover_ratio=0.3, kospi_spread_ratio=None)
+    assert "liquidity_crunch" not in check_closed_conditions(snap)
+
+
+def test_liquidity_boundary_values_trigger():
+    """경계값: turnover 정확히 0.5, spread 정확히 2.0 → 둘 다 충족."""
+    snap = _base_snapshot(kospi_turnover_ratio=0.5, kospi_spread_ratio=2.0)
+    assert "liquidity_crunch" in check_closed_conditions(snap)

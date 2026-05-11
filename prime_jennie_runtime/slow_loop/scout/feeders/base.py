@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Protocol, runtime_checkable
 
-from ..schemas import MarketSummary, NewsEventEntry
+from ..schemas import ConsensusEntry, MarketSummary, NewsEventEntry
 
 
 @runtime_checkable
@@ -37,3 +37,15 @@ class MarketSummaryFeeder(Protocol):
     """KOSPI/KOSDAQ 지수 요약."""
 
     async def fetch(self, as_of: date) -> MarketSummary: ...
+
+
+@runtime_checkable
+class ConsensusFeeder(Protocol):
+    """ticker별 Forward 컨센서스 (forward_per, eps_revision_pct, analyst_count 등).
+
+    v2 ``ConsensusInfo`` 와 동일 의미. v3 DB 에 적재 파이프라인이 아직 없어
+    초기 구현은 ``EmptyConsensusFeeder`` 가 모든 ticker 에 None 만 채운다 —
+    Scout 코드 입장에선 "데이터 미존재" 시그널.
+    """
+
+    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, ConsensusEntry]: ...

@@ -103,6 +103,17 @@ class MarketSnapshot(BaseModel):
     # 섹터 스냅샷 (check_closed_conditions에서 섹터 전염 체크)
     major_sector_drops: list[SectorDrop] = Field(default_factory=list)
 
+    # 24h 누적 high-impact geopolitical 뉴스 건수 (news_events 기반).
+    # check_closed_conditions 의 결정론 geopolitical 트리거에 사용.
+    # 0 이면 미주입 또는 데이터 없음 (fail-open).
+    high_impact_geopolitical_count: int = 0
+
+    # 유동성 지표 — 거래대금 일일 비율 (today / 5d avg). 1.0 = 평소.
+    # None 이면 데이터 없음 → liquidity 트리거 미평가 (fail-open).
+    kospi_turnover_ratio: float | None = None
+    # 호가 스프레드 일일 배수 (today / 5d avg). 평소 1.0, 2.0 이상이면 경색.
+    kospi_spread_ratio: float | None = None
+
     @property
     def usd_krw_change_abs(self) -> float:
         return abs(self.usd_krw_change_pct)
@@ -116,6 +127,19 @@ class RecentMacroRun(BaseModel):
     gate: Literal["open", "closed"]
     size_multiplier: Annotated[float, Field(ge=0.0, le=1.0)]
     top_risks_summary: str = ""
+
+
+class MacroAttemptHint(BaseModel):
+    """동일 macro 호출 내 직전 시도의 실패 정보 — 재시도 시 LLM 에 주입.
+
+    Scout 의 ``CodeAttemptHint`` 와 동일 패턴. LLM 출력 구조화 파싱 실패 / 검증
+    위반 (top_risks 6개, reasoning overflow 등) 을 다음 프롬프트에 보여줘서
+    같은 실수 반복을 막는다.
+    """
+
+    attempt_no: Annotated[int, Field(ge=1)]
+    error: str  # "parse_error" | "validation_error" 등
+    details: str  # 에러 traceback / 메시지 (truncate ok)
 
 
 # =====================================================================
@@ -138,6 +162,8 @@ class MacroContext(BaseModel):
     kor_macro_news_formatted: str = ""
 
     recent_runs: list[RecentMacroRun] = Field(default_factory=list)
+    # 같은 호출 내 재시도 hint — Scout 의 previous_attempts 와 동일 패턴.
+    previous_attempts: list[MacroAttemptHint] = Field(default_factory=list)
 
 
 # =====================================================================

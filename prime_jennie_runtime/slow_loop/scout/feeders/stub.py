@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from ..schemas import MarketSummary, NewsEventEntry
+from ..schemas import ConsensusEntry, MarketSummary, NewsEventEntry
 
 
 @dataclass(frozen=True)
@@ -70,3 +70,16 @@ class StubMarketSummaryFeeder:
             up_count=520,
             down_count=310,
         )
+
+
+@dataclass(frozen=True)
+class EmptyConsensusFeeder:
+    """Placeholder feeder — 모든 ticker 에 None 값 ConsensusEntry 반환.
+
+    v3 DB 에 forward EPS/PER consensus 적재 파이프라인이 들어오면
+    ``RealConsensusFeeder`` 로 교체. 그 전까지 Scout 코드는 ``consensus_data[t]``
+    의 모든 필드가 None 임을 인지하고 다른 팩터로만 판단한다.
+    """
+
+    async def fetch(self, as_of: date, universe: list[str]) -> dict[str, ConsensusEntry]:
+        return {t: ConsensusEntry() for t in universe}

@@ -8,6 +8,17 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
+SCOUT_PROMPT_VERSION = "v0.3"
+"""Scout 프롬프트 버전.
+
+prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
+scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt 버전 끼리 비교.
+
+- v0.1 (2026-04-16): 초안
+- v0.2 (2026-04-25): Qwen3 메타데이터 기반 news_events 재설계
+- v0.3 (2026-05-10): exit_hint 가이드 + consensus_data 안내 추가
+"""
+
 ALLOWED_IMPORTS = (
     "pandas",
     "numpy",
@@ -94,6 +105,15 @@ context dict 구조:
     - `latest_at` str | null             — 가장 최근 analyzed_at ISO, 0건이면 null
 - `sector_momentum`: dict[str, float]  — 섹터명(str) → 20일 수익률 (decimal, e.g. 0.05 = +5%)
 - `macro_size_multiplier`: float       — 참고용 (Strategy Engine 이 실제 size 계산)
+- `consensus_data`: dict[str, dict]    — ticker → Forward 컨센서스. 현재 v3 DB 적재
+   파이프라인이 없어 모든 필드가 None 일 수 있음. None 인 경우 미존재로 취급.
+   사용 가능 필드 (예시):
+   - `forward_per` float | None         — 12개월 forward PER
+   - `eps_revision_pct` float | None    — 최근 30일 forward EPS 변화율 (%, 상향 시 양수)
+   - `analyst_count` int | None         — 컨센서스 신뢰도
+   - `forward_eps`, `target_price`, `investment_opinion`
+   사용 예: `cons = context.get('consensus_data', {{}}).get(t, {{}})`
+            `if cons.get('eps_revision_pct') and cons['eps_revision_pct'] > 5: conviction += 0.05`
 
 가능한 event_type (Qwen3 가 부여):
     earnings, mna, lawsuit, product, personnel, contract, strike,
@@ -150,6 +170,25 @@ def screen(market_data, context):
              "entry_hint": {{"trigger": "market"}},
              "factors": {{...}}}} for t, score in ranked[:top_n]]
 ```
+
+exit_hint 사용 가이드 (선택 — 확신 없으면 생략):
+- **default**: exit_hint 를 생략하면 Strategy Engine 이 strategy_tag 별 표준 정책
+  (fixed_sl/trailing_stop/time_stop 등) 을 적용 — 안전망이 이미 있다.
+- exit_hint 를 추가하면 정책 default 를 **종목 단위로 override** 한다. 가설에
+  명확한 매수 사유가 있고 (예: 실적 발표 직후 5일 PED), 통상 default 보다
+  좁거나/넓은 손절·익절이 필요한 경우만 작성하라.
+- 무리하지 마라 — 가설이 평이하면 exit_hint 를 None 으로 두는 게 정답.
+- 형식: `"exit_hint": {{"rules_hint": [{{"type": <rule_type>, ...}}]}}` 또는 생략.
+- 권장 rule_type (Strategy Engine 인식):
+  - `{{"type": "fixed_sl", "pct": 0.05}}`        — 진입가 -5% 손절 (양수 percent)
+  - `{{"type": "fixed_tp", "pct": 0.10}}`        — 진입가 +10% 익절
+  - `{{"type": "trailing_stop", "pct": 0.03}}`   — 최고점 대비 -3% 트레일링
+  - `{{"type": "time_stop", "days": 5}}`         — N 거래일 보유 후 청산
+- strategy_tag 별 자연스러운 조합 예 (참고용):
+  - EARNINGS_DRIFT: time_stop 5~10일 + fixed_sl 0.05 (실적 후 드리프트 윈도우 한정)
+  - GAP_UP_REBOUND: trailing_stop 0.03 + time_stop 3일 (단기 모멘텀)
+  - SECTOR_MOMENTUM: trailing_stop 0.05 (중기 추세 보호)
+  - MEAN_REVERT_RSI: fixed_tp 0.08 + fixed_sl 0.04 (좁은 범위 mean-revert)
 
 안티패턴 (절대 금지):
 {chr(10).join(f"  - {p}" for p in FORBIDDEN_PATTERNS)}

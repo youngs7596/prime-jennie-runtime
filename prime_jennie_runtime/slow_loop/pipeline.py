@@ -39,6 +39,7 @@ from .macro.post_processor import MacroPostResult, run_post_processing
 from .macro.schemas import MacroGateOutput, RecentMacroRun
 from .macro.state_store import MacroCurrentState, MacroStateStore
 from .persistence import (
+    fetch_previous_run_candidates,
     persist_macro_run,
     persist_scout_run,
     persist_screening_candidates,
@@ -93,9 +94,9 @@ async def _run_pipeline_with_retry(
 ) -> Any:
     """파이프라인을 돌리되 실패 시 최대 3회 재시도.
 
-    단일 role의 구조화 출력 파싱이 드물게 실패할 때를 위한 방어망.
-    (에러 컨텍스트를 다음 프롬프트에 주입하는 기능은 Phase 2로 연기 — 필요 시
-    harness 측 retry policy로 승격.)
+    단일 role의 구조화 출력 파싱이 드물게 실패할 때를 위한 방어망. 시도마다
+    동일 pipeline 객체를 그대로 재호출하므로 context 갱신은 지원하지 않는다 —
+    그런 경우 ``_run_macro_with_retry`` 처럼 매 시도마다 pipeline 을 재조립한다.
     """
     last_error: str | None = None
     for attempt in range(1, max_attempts + 1):
@@ -113,6 +114,68 @@ async def _run_pipeline_with_retry(
                 role=role_name,
                 ok=False,
                 attempt=attempt,
+                error=last_error,
+            )
+        )
+
+    await observer.emit(
+        pj_event(
+            f"pj.{role_name}.failed",
+            role=role_name,
+            ok=False,
+            attempts=max_attempts,
+            error=last_error,
+        )
+    )
+    raise RuntimeError(f"{role_name} failed after {max_attempts} attempts: {last_error}")
+
+
+async def _run_macro_with_retry(
+    orchestrator: Orchestrator,
+    macro_ctx: Any,
+    observer: Observer,
+    *,
+    role_name: str = "macro_gate",
+    max_attempts: int = 3,
+    user_request: str = "daily macro gate",
+) -> Any:
+    """Macro 전용 재시도 — 매 시도마다 ``previous_attempts`` 를 ctx 에 주입.
+
+    Scout 의 ``generate_validated_code`` 와 동일 사상: 직전 시도의 실패 사유를
+    LLM 에 그대로 보여줘 같은 실수 반복을 차단한다. context 가 매 시도 변하므로
+    ``_macro_pipeline(ctx)`` 를 매번 새로 조립.
+    """
+    from .macro.schemas import MacroAttemptHint
+
+    attempts: list[MacroAttemptHint] = []
+    last_error: str | None = None
+
+    for attempt_no in range(1, max_attempts + 1):
+        attempt_ctx = macro_ctx.model_copy(update={"previous_attempts": list(attempts)})
+        try:
+            result = await orchestrator.run_pipeline(
+                _macro_pipeline(attempt_ctx), user_request=user_request
+            )
+            if result.completed:
+                return result
+            last_error = result.error or f"aborted at step {result.aborted_at}"
+        except Exception as e:  # noqa: BLE001
+            last_error = f"{type(e).__name__}: {e}"
+
+        # 다음 시도에 주입할 hint 누적
+        attempts.append(
+            MacroAttemptHint(
+                attempt_no=attempt_no,
+                error="role_invocation_failed",
+                details=(last_error or "(no details)")[:2000],
+            )
+        )
+        await observer.emit(
+            pj_event(
+                f"pj.{role_name}.retry",
+                role=role_name,
+                ok=False,
+                attempt=attempt_no,
                 error=last_error,
             )
         )
@@ -257,9 +320,9 @@ async def run_slow_loop(
     )
 
     async def _primary_macro():
-        return await _run_pipeline_with_retry(
+        return await _run_macro_with_retry(
             comp.orchestrator,
-            _macro_pipeline(macro_ctx),
+            macro_ctx,
             observer,
             role_name="macro_gate",
             user_request="daily macro gate",
@@ -272,9 +335,9 @@ async def run_slow_loop(
 
         t0 = time.monotonic()
         try:
-            res = await _run_pipeline_with_retry(
+            res = await _run_macro_with_retry(
                 comp.shadow_orchestrator,
-                _macro_pipeline(macro_ctx),
+                macro_ctx,
                 observer,
                 role_name="macro_gate_shadow",
                 user_request="daily macro gate (shadow)",
@@ -314,7 +377,7 @@ async def run_slow_loop(
     )
 
     # DB 기록 (engine=None 이면 no-op). prompt_chars 는 비용 추정용.
-    from .macro.prompts import MACRO_SYSTEM_PROMPT
+    from .macro.prompts import MACRO_PROMPT_VERSION, MACRO_SYSTEM_PROMPT
     from .macro.prompts import build_user_prompt as _build_macro_user
 
     macro_prompt_chars = len(MACRO_SYSTEM_PROMPT) + len(_build_macro_user(macro_ctx))
@@ -368,6 +431,7 @@ async def run_slow_loop(
         macro_step_result=macro_result.state["macro_gate"],
         news_digest_ref=getattr(macro_ctx, "news_digest_ref", None),
         prompt_chars=macro_prompt_chars,
+        prompt_version=MACRO_PROMPT_VERSION,
         shadow_result=shadow_payload_for_db,
         redis_client=comp.redis_client,
     )
@@ -434,6 +498,11 @@ async def run_slow_loop(
         "sector_momentum": scout_ctx.sector_momentum,
         "macro_size_multiplier": post.output.size_multiplier,
         "market_data_records": market_data_records,
+        # Forward 컨센서스 — 현재 EmptyConsensusFeeder 라 None 값만 들어옴.
+        # Scout 코드는 missing 으로 취급. 후속 작업에서 RealConsensusFeeder 가 채움.
+        "consensus_data": {
+            t: e.model_dump(mode="json") for t, e in scout_ctx.consensus_data.items()
+        },
     }
 
     async def _primary_scout_validated():
@@ -497,7 +566,7 @@ async def run_slow_loop(
     # DB 기록 (engine=None 이면 no-op). candidates_count 는 screening 코드를
     # sandbox 실행해 얻은 실제 후보 수 (raw_candidates) 로 채운다 — LLM 예측치
     # (scout_out.expected_candidates) 는 모니터링 정확도를 떨어뜨려 사용 금지.
-    from .scout.prompts import SCOUT_SYSTEM_PROMPT
+    from .scout.prompts import SCOUT_PROMPT_VERSION, SCOUT_SYSTEM_PROMPT
     from .scout.prompts import build_user_prompt as _build_scout_user
 
     scout_prompt_chars = len(SCOUT_SYSTEM_PROMPT) + len(_build_scout_user(scout_ctx))
@@ -616,6 +685,7 @@ async def run_slow_loop(
         scout_step_result=scout_step_result,
         candidates_count=len(raw_candidates),
         prompt_chars=scout_prompt_chars,
+        prompt_version=SCOUT_PROMPT_VERSION,
         context_snapshot=scout_context_snapshot,
         shadow_result=scout_shadow_for_db,
         redis_client=comp.redis_client,
@@ -681,12 +751,58 @@ async def run_slow_loop(
                 fallback=scout_out.fallback_strategy,
             )
         )
-        return SlowLoopResult(
-            macro_post=post,
-            scout_output=scout_out,
-            validation=validation,
-            skipped_reason="no_candidates",
-        )
+
+        # use_previous_run fallback — Scout 가 명시한 경우만 활성.
+        # 24h 내 직전 success run 의 candidates 를 동일 macro_state 일 때 재사용.
+        if scout_out.fallback_strategy == "use_previous_run":
+            prev = await fetch_previous_run_candidates(
+                comp.db_engine,
+                as_of=as_of_dt,
+                macro_gate=post.output.gate,
+                macro_size_multiplier=float(post.output.size_multiplier),
+            )
+            if prev is not None:
+                prev_run_id, prev_candidates = prev
+                # universe 필터 한 번 더 — 24h 전 universe 와 다를 수 있음.
+                reused_validation = validate_candidates(prev_candidates, scout_ctx.universe)
+                if reused_validation.candidates:
+                    await observer.emit(
+                        pj_event(
+                            "pj.scout.fallback_use_previous_run",
+                            role="scout",
+                            ok=True,
+                            previous_scout_run_id=prev_run_id,
+                            reused_count=len(reused_validation.candidates),
+                        )
+                    )
+                    validation = reused_validation  # 이후 sheet 발행 흐름이 그대로 동작
+                else:
+                    await observer.emit(
+                        pj_event(
+                            "pj.scout.fallback_use_previous_run_empty",
+                            role="scout",
+                            ok=False,
+                            previous_scout_run_id=prev_run_id,
+                            reason="all_outside_universe",
+                        )
+                    )
+            else:
+                await observer.emit(
+                    pj_event(
+                        "pj.scout.fallback_use_previous_run_unavailable",
+                        role="scout",
+                        ok=False,
+                        reason="no_matching_previous_run",
+                    )
+                )
+
+        if not validation.candidates:
+            return SlowLoopResult(
+                macro_post=post,
+                scout_output=scout_out,
+                validation=validation,
+                skipped_reason="no_candidates",
+            )
 
     # --- 5. Strategy + 발행 ---
     inputs = StrategyEngineInputs(

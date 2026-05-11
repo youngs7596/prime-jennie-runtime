@@ -151,6 +151,7 @@ async def persist_macro_run(
     macro_step_result: Any,
     news_digest_ref: str | None = None,
     prompt_chars: int | None = None,
+    prompt_version: str | None = None,
     shadow_result: dict[str, Any] | None = None,
     redis_client: Any = None,
 ) -> None:
@@ -167,13 +168,15 @@ async def persist_macro_run(
             redis_client, meta, prompt_chars, out_chars, cost, shadow_result, generated_at
         )
         return
+    # Prompt 버전 우선순위: caller 명시 > role metadata > default
+    resolved_prompt_version = prompt_version or meta.get("prompt_version") or "v1"
     step = CouncilStepOutput(
         name="macro_gate",
         output={},
         model_used=model_name,
         cost_usd=cost,
         latency_ms=_role_duration_ms(macro_step_result),
-        prompt_version=meta.get("prompt_version") or "v1",
+        prompt_version=resolved_prompt_version,
     )
     record = CouncilRunRecord(
         macro_run_id=macro_run_id,
@@ -273,6 +276,7 @@ async def persist_scout_run(
     scout_step_result: Any,
     candidates_count: int | None = None,
     prompt_chars: int | None = None,
+    prompt_version: str | None = None,
     context_snapshot: dict[str, Any] | None = None,
     shadow_result: dict[str, Any] | None = None,
     redis_client: Any = None,
@@ -334,6 +338,7 @@ async def persist_scout_run(
             context_snapshot_json = EXCLUDED.context_snapshot_json
         """
     )
+    resolved_prompt_version = prompt_version or meta.get("prompt_version") or "v1"
     params = {
         "id": scout_run_id,
         "at": generated_at,
@@ -342,7 +347,7 @@ async def persist_scout_run(
         "hyp": scout_out.hypothesis,
         "cnt": candidates_count,
         "model": model_name,
-        "pv": meta.get("prompt_version") or "v1",
+        "pv": resolved_prompt_version,
         "cost": cost,
         "meta": json.dumps(metadata_json, ensure_ascii=False, default=str),
         "ctx": json.dumps(context_snapshot or {}, ensure_ascii=False, default=str),
@@ -460,6 +465,144 @@ async def persist_screening_candidates(
                 )
     except Exception:
         logger.exception("persist_screening_candidates failed: id=%s", scout_run_id)
+
+
+async def fetch_previous_run_candidates(
+    engine: AsyncEngine | None,
+    *,
+    as_of: datetime,
+    macro_gate: str,
+    macro_size_multiplier: float,
+    max_age_hours: int = 24,
+    size_tolerance: float = 0.05,
+) -> tuple[str, list[ScreeningCandidate]] | None:
+    """직전 scout_run 의 raw candidates 를 재사용 가능 여부 점검 후 반환.
+
+    조건 (스펙: use_previous_run fallback):
+    1. 24h 이내 (`as_of - max_age_hours <= generated_at < as_of`)
+    2. 같은 거래일 macro_state 하 — `macro_gate` 일치 AND
+       `|macro_size_multiplier 차이| <= size_tolerance`
+    3. candidates_count > 0 (성공한 run)
+
+    가장 최신 1건만 반환. 매칭 없으면 None.
+
+    DB 미구성 또는 SQL 실패 시 None — 호출자가 `skip_today` 로 fallback.
+    """
+    if engine is None:
+        return None
+    from datetime import timedelta
+
+    since = as_of - timedelta(hours=max_age_hours)
+    try:
+        async with engine.begin() as conn:
+            res = await conn.execute(
+                text(
+                    """
+                    SELECT scout_run_id,
+                           metadata_json->'fallback_macro_gate'        AS prev_gate,
+                           metadata_json->'fallback_macro_size'        AS prev_size,
+                           context_snapshot_json->>'macro_gate'        AS ctx_gate,
+                           context_snapshot_json->>'macro_size_multiplier' AS ctx_size,
+                           generated_at
+                    FROM scout_runs
+                    WHERE generated_at >= :since
+                      AND generated_at < :now
+                      AND candidates_count > 0
+                    ORDER BY generated_at DESC
+                    LIMIT 10
+                    """
+                ),
+                {"since": since, "now": as_of},
+            )
+            rows = res.mappings().all()
+    except Exception:
+        logger.exception("fetch_previous_run_candidates: query failed")
+        return None
+
+    chosen_id: str | None = None
+    for r in rows:
+        # ctx_gate / ctx_size 는 context_snapshot_json 에서 추출 (Phase 2.10 신설).
+        ctx_gate = r["ctx_gate"]
+        ctx_size_raw = r["ctx_size"]
+        if ctx_gate is None or ctx_size_raw is None:
+            continue
+        try:
+            ctx_size = float(ctx_size_raw)
+        except (TypeError, ValueError):
+            continue
+        if ctx_gate != macro_gate:
+            continue
+        if abs(ctx_size - macro_size_multiplier) > size_tolerance:
+            continue
+        chosen_id = r["scout_run_id"]
+        break
+
+    if chosen_id is None:
+        return None
+
+    # candidates 재구성
+    try:
+        async with engine.begin() as conn:
+            res = await conn.execute(
+                text(
+                    """
+                    SELECT ticker, strategy_tag, conviction,
+                           entry_hint_json, exit_hint_json, factors_json, notes
+                    FROM screening_candidates
+                    WHERE scout_run_id = :sid
+                    ORDER BY rank
+                    """
+                ),
+                {"sid": chosen_id},
+            )
+            cand_rows = res.mappings().all()
+    except Exception:
+        logger.exception("fetch_previous_run_candidates: candidates query failed")
+        return None
+
+    candidates: list[ScreeningCandidate] = []
+    from .scout.schemas import EntryHint, ExitHint  # local import to avoid cycles
+
+    for r in cand_rows:
+        try:
+            entry_raw = r["entry_hint_json"]
+            entry = EntryHint.model_validate(
+                entry_raw if isinstance(entry_raw, dict) else json.loads(entry_raw or "{}")
+            )
+            exit_raw = r["exit_hint_json"]
+            exit_hint: ExitHint | None = None
+            if exit_raw is not None:
+                exit_dict = exit_raw if isinstance(exit_raw, dict) else json.loads(exit_raw)
+                if exit_dict:
+                    exit_hint = ExitHint.model_validate(exit_dict)
+            factors_raw = r["factors_json"]
+            factors = (
+                factors_raw
+                if isinstance(factors_raw, dict)
+                else json.loads(factors_raw or "{}")
+            )
+            candidates.append(
+                ScreeningCandidate(
+                    ticker=r["ticker"],
+                    strategy_tag=r["strategy_tag"],
+                    conviction=float(r["conviction"] or 0.0),
+                    entry_hint=entry,
+                    exit_hint=exit_hint,
+                    factors=factors,
+                    notes=r["notes"] or "",
+                )
+            )
+        except Exception:
+            logger.warning(
+                "fetch_previous_run_candidates: skip malformed candidate sid=%s ticker=%s",
+                chosen_id,
+                r.get("ticker"),
+            )
+            continue
+
+    if not candidates:
+        return None
+    return chosen_id, candidates
 
 
 async def update_candidate_promotion(

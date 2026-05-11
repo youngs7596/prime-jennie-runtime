@@ -61,6 +61,9 @@ services:
       KIS_ACCOUNT_PRODUCT_CODE: ${KIS_ACCOUNT_PRODUCT_CODE:-01}
       KIS_BASE_URL: ${KIS_BASE_URL:-https://openapivts.koreainvestment.com:29443}
       KIS_IS_PAPER: ${KIS_IS_PAPER:-true}
+      # real 모드 (KIS_IS_PAPER=false) 진입 시 명시적 confirm 필수 — mode_safety.py 가 검증.
+      # paper 모드면 무시. 누락 시 부팅 거부 (안전 게이트).
+      KIS_REAL_CONFIRMED: ${KIS_REAL_CONFIRMED:-}
       KIS_TOKEN_FILE_PATH: /app/data/kis_token/v3_kis_token.json
       KIS_STREAMER_MODE: ${KIS_STREAMER_MODE:-websocket}
     volumes:

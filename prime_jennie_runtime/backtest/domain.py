@@ -63,8 +63,22 @@ class SheetBacktestResult:
 
 @dataclass
 class BacktestConfig:
-    """시뮬레이션 파라미터. 시트별로 공유."""
+    """시뮬레이션 파라미터. 시트별로 공유.
+
+    Volume-based slippage:
+    - ``volume_based_slippage_enabled=False`` (기본) — 모든 체결에 일정한
+      ``slippage_pct`` 적용. 기존 백테스트 결과와 호환.
+    - True 면 체결 notional (price × qty) 을 일봉 volume × price 와 비교한
+      참여율 ``participation`` 에 비례하여 추가 슬리피지를 더한다:
+        extra_pct = slippage_pct × participation_slippage_multiplier × participation
+      예) participation 5% × multiplier 4 = base slippage 의 +20% (=0.02% 가산).
+      participation 은 ``max_participation_clip`` 로 상한 클립 (기본 50%).
+    """
 
     buy_fee_pct: float = 0.015  # 매수 수수료 % (0.015 = 0.015%)
     sell_fee_pct: float = 0.195  # 매도 수수료+세금 %
     slippage_pct: float = 0.1  # 체결 가격 슬리피지 % (매수: +, 매도: −)
+    # ---- volume-based slippage (Phase 2.10 정밀화) ----
+    volume_based_slippage_enabled: bool = False
+    participation_slippage_multiplier: float = 4.0
+    max_participation_clip: float = 0.5  # participation > 50% 는 50% 로 클립

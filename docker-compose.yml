@@ -84,6 +84,9 @@ services:
     environment:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
+      # Slack 통합 (선택) — 설정 시 entry/exit/risk_level_change 알림 미러.
+      # 미설정 시 notifier 는 Redis stream 만 발행 (기존 동작).
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -299,6 +302,25 @@ services:
     restart: unless-stopped
     profiles: ["observe", "full"]
 
+  # Prometheus — monitor `/metrics` scrape + alert rules 평가.
+  # alertmanager 는 아직 미운영 (Phase 2.10 단순화). 알림은 monitor heartbeat
+  # 경로 (poller.py → notifier) 가 Telegram 직접 전송.
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
   promtail:
     image: grafana/promtail:3.3.2
     command: -config.file=/etc/promtail/promtail-config.yaml
@@ -400,6 +422,8 @@ services:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
       MONITOR_POLL_INTERVAL_SEC: ${MONITOR_POLL_INTERVAL_SEC:-30}
+      # heartbeat 알림 — 임계 도달 시 v3:notifications 발행 + (선택) Slack 미러.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8091:8091"
@@ -474,6 +498,7 @@ services:
 volumes:
   grafana_data:
   loki_data:
+  prometheus_data:
 
 networks:
   default:

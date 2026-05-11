@@ -1,0 +1,97 @@
+# Prime Jennie alert rules — Prometheus expr 기반.
+#
+# 메트릭 노출 위치:
+# - monitor /metrics: monitor_poll_success_timestamp_seconds, monitor_live_positions
+# - prometheus self: `up{job="..."}` (target down)
+#
+# 회복은 자동 — Prometheus 가 expr 가 거짓이 되면 ALERT 상태 해제.
+
+groups:
+  - name: prime_jennie.runtime
+    interval: 30s
+    rules:
+      # ----------------------------------------------------------------
+      # Monitor poller — KIS Gateway /balance 조회 실패가 연속 발생하면
+      # 라이브 포지션 스냅샷이 stale. 5 분 임계 (poll 30s × 10회).
+      # ----------------------------------------------------------------
+      - alert: MonitorPollStale
+        expr: (time() - monitor_poll_success_timestamp_seconds) > 300
+        for: 1m
+        labels:
+          severity: warning
+          component: monitor
+        annotations:
+          summary: "Monitor poll has not succeeded for >5m"
+          description: |
+            monitor_poll_success_timestamp_seconds 가 5 분 이상 갱신되지 않음.
+            KIS gateway /api/balance 연결 또는 redis 쓰기 실패 가능성.
+            대시보드 'PJ Overview' 에서 monitor 컨테이너 로그 확인.
+
+      # ----------------------------------------------------------------
+      # Position state stale — monitor 가 살아있어도 KIS 가 balance 를 못
+      # 가져오면 last_positions_count 가 0 으로 떨어진다. 보유 종목이 있을
+      # 때 0 이 되면 critical.
+      # ----------------------------------------------------------------
+      - alert: PositionStateStale
+        expr: (time() - monitor_poll_success_timestamp_seconds) > 600
+        for: 2m
+        labels:
+          severity: critical
+          component: monitor
+        annotations:
+          summary: "Position snapshot stale >10m"
+          description: |
+            10 분 이상 monitor poll 갱신 없음. 매매 결정/PnL 계산에
+            영향. monitor + KIS gateway 즉시 점검 필요.
+
+      # ----------------------------------------------------------------
+      # KIS gateway 5xx — Prometheus 가 직접 KIS Gateway 를 scrape 하진
+      # 않지만 monitor 의 consecutive_failures 가 3 이상이면 게이트웨이
+      # 측 5xx 또는 연결 거부가 누적된 상태. monitor heartbeat (#3) 가
+      # Telegram 알림을 보내지만 Prometheus 측에서도 별도 알람.
+      # ----------------------------------------------------------------
+      - alert: MonitorConsecutiveFailures
+        expr: monitor_consecutive_failures >= 3
+        for: 1m
+        labels:
+          severity: critical
+          component: monitor
+        annotations:
+          summary: "Monitor poll 연속 실패 >=3"
+          description: |
+            monitor_consecutive_failures={{ $value }}. KIS Gateway 5xx 또는
+            연결 거부가 누적된 상태. Telegram 알림은 monitor heartbeat
+            경로에서도 발송.
+
+      # ----------------------------------------------------------------
+      # Service scrape down — fast-loop / kis-gateway / monitor 등 주요
+      # 서비스에서 prometheus 가 메트릭을 못 긁어옴 = 컨테이너 down 또는
+      # /metrics 미응답.
+      # ----------------------------------------------------------------
+      - alert: ServiceTargetDown
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: target
+        annotations:
+          summary: "Prometheus target {{ $labels.job }} is down"
+          description: |
+            {{ $labels.job }} (instance {{ $labels.instance }}) 가 2 분 이상
+            scrape 실패. 컨테이너 또는 /metrics 엔드포인트 점검.
+
+      # ----------------------------------------------------------------
+      # cloudflared metrics 끊김 → 외부 노출 경로 점검. severity warning —
+      # 트레이딩 자체에는 영향 없음.
+      # ----------------------------------------------------------------
+      - alert: CloudflaredDown
+        expr: up{job="cloudflared"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: cloudflared
+        annotations:
+          summary: "Cloudflare tunnel metrics endpoint down"
+          description: |
+            cloudflared --metrics 2000 이 5 분 이상 응답 없음.
+            터널 자체는 살아있을 수 있으므로 tunnel run 프로세스 직접 확인.

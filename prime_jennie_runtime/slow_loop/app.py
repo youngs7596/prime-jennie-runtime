@@ -69,6 +69,11 @@ from .macro.feeders.stub import (
 )
 from .macro.role import MacroGateRole
 from .macro.state_store import MacroStateStore
+from .macro.trigger_watcher import (
+    DEFAULT_POLL_INTERVAL_SEC,
+    TriggerWatcher,
+    make_invoker,
+)
 from .pipeline import SlowLoopComponents, run_slow_loop
 from .scout.context_builder import ScoutContextBuilder
 from .scout.feeders.stub import (
@@ -373,6 +378,39 @@ async def run() -> None:
         )
         await scheduler.start()
         stack.push_async_callback(scheduler.stop)
+
+        # Macro 자동 ad-hoc 트리거 watcher (MACRO_GATE_SPEC §1.3).
+        # MACRO_TRIGGER_WATCHER_ENABLED=0 으로 비활성. components 미구성 시 skip.
+        watcher_task: asyncio.Task[int] | None = None
+        if components is not None and os.environ.get("MACRO_TRIGGER_WATCHER_ENABLED", "1") == "1":
+            interval = int(
+                os.environ.get("MACRO_TRIGGER_WATCHER_INTERVAL_SEC", str(DEFAULT_POLL_INTERVAL_SEC))
+            )
+            watcher = TriggerWatcher(
+                redis_client=redis_client,
+                invoker=make_invoker(components, run_slow_loop_fn=run_slow_loop),
+                observer=components.observer,
+                interval_sec=interval,
+            )
+            watcher_task = asyncio.create_task(watcher.run(), name="macro_trigger_watcher")
+            logger.info("macro trigger_watcher spawned (interval=%ds)", interval)
+
+            async def _stop_watcher() -> None:
+                if watcher_task is None or watcher_task.done():
+                    return
+                watcher_task.cancel()
+                try:
+                    await watcher_task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+
+            stack.push_async_callback(_stop_watcher)
+        else:
+            logger.info(
+                "macro trigger_watcher disabled (components=%s, env=%s)",
+                components is not None,
+                os.environ.get("MACRO_TRIGGER_WATCHER_ENABLED", "1"),
+            )
 
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()

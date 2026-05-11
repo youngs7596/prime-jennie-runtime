@@ -1,4 +1,4 @@
-# Strategy Policy v3.0.3 — strategy_tag별 base_pct, exit rules, entry conditions.
+# Strategy Policy v3.0.4 — strategy_tag별 base_pct, exit rules, entry conditions.
 # Strategy Engine이 ScreeningCandidate를 PositionSheet로 조립할 때 참고.
 # base_pct, max_notional_krw, max_notional_pct, exit rule, entry condition 파라미터
 # 모두 영석이 수동 관리.
@@ -7,18 +7,28 @@
 # fast_loop BalanceAwareSizer 가 min(total_asset × pct, max_notional_krw, cash) 적용.
 # max_notional_krw 는 절대 안전 한도 (자산 폭증 시 cap, 평소 발동 X).
 #
+# 2026-05-11 (v3.0.4): v2 scanner 진입 시그널 일부 포팅.
+# fast_loop BarEngine + IndicatorProvider 가 1분봉 누적/ma20/RSI/recent_high 를
+# 제공한다. 신규 condition 3종 추가 (volume_over_ma20 / rsi_under /
+# price_above_recent_high). 보수 도입:
+#  - rsi_under threshold = 75: v2 risk_gates.check_rsi_guard bull max 와 동일,
+#    너무 strict 하지 않게 1분봉 RSI 75+ 진입만 차단 (warm-up 동안 보류).
+#  - volume_over_ma20 는 yaml 미부착 — 분봉 단위 ratio 의미가 v2 일봉 단위와
+#    달라 임계값을 운영 데이터로 정한 뒤 단계적 도입 (다음 단계).
+#  - GAP_UP_REBOUND 만 price_above_recent_high (lookback=5) 부착: 시초 갭상승
+#    후 직전 5분봉 high 돌파 확정 시 진입 (breakout confirmation).
+# Warm-up (분봉 history 부족) 동안 신규 condition 은 자동 보류 → 시초 진입
+# 0건 위험 있음. 가동 직후 첫 시트는 spread_under_bps + (warm-up) 으로 9:00~
+# 9:05 진입 보수 측 fall. 운영 데이터 누적 후 dynamic threshold 조정.
+#
 # 참고:
 # - v2 실증: Breakeven +3%→+0.3%, Profit Floor +15%→+10%, Death Cross MA5/MA20 min_loss 1%
 #   v2 position sizing: MAX_POSITION_PCT_DEFAULT 12%, A+ 18%
 # - POSITION_SHEET_SPEC §4.2 / §5.3 권장 순서대로 rule 배열
 # - fixed_sl, time_stop은 모든 정책에 반드시 포함
 # - default_entry_conditions: scout entry_hint 의 conditions_hint 가 비어있을 때 보강.
-#   현재는 호가 안전장치 (spread_under_bps) 만 부착 — KIS H0STCNT0 호가1 기반.
-#   volume_over_ma20 는 ma20 lookup 미구현이라 보류 (별도 단계).
-#   strict 한 시그널 기반 (price_above breakout 등) 도입은 v2 scanner reference + 운영
-#   데이터 누적 후 점진 추가.
 
-policy_version: "v3.0.3"
+policy_version: "v3.0.4"
 
 strategies:
   GAP_UP_REBOUND:
@@ -28,6 +38,15 @@ strategies:
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 20
+      # v2 scanner detect_gap_up_rebound 의 마지막 조건 (현재가 ≥ 시가)
+      # 의 v3 표현 — 직전 5분봉 고점 돌파 = breakout confirmation.
+      # 9:00~9:05 warm-up 동안은 no_data 사유로 보류 (시초 noise 회피 동작).
+      - type: price_above_recent_high
+        lookback: 5
+      # v2 risk_gates.check_rsi_guard 의 bull regime threshold 75 와 동일.
+      # 75+ 즉시 진입 차단 (overextension filter). warm-up = 보류.
+      - type: rsi_under
+        threshold: 75
     default_exit_rules:
       - type: trailing_tp
         activate_pct: 0.05
@@ -47,6 +66,10 @@ strategies:
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 20
+      # 모멘텀 추격 매수 방지 — RSI 과열 종목 진입 차단.
+      # v2 detect_momentum max_gain_pct 7% 와 같은 취지 (RSI 로 근사).
+      - type: rsi_under
+        threshold: 75
     default_exit_rules:
       - type: profit_floor
         activate_pct: 0.15
@@ -77,6 +100,10 @@ strategies:
     default_entry_conditions:
       - type: spread_under_bps
         max_bps: 15
+      # earnings drift 는 며칠~수주 hold 인 swing — 단기 RSI 과열만 회피.
+      # threshold 80 으로 GAP_UP/SECTOR 보다 관대 (장기 momentum 허용).
+      - type: rsi_under
+        threshold: 80
     default_exit_rules:
       - type: trailing_tp
         activate_pct: 0.07

@@ -10,11 +10,16 @@ Redis 백업:
     - ``pending_entry:by_ticker:{ticker}`` → set of sheet_ids
     - 부팅 시 ``load_from_redis()`` 로 in-memory 인덱스 복구
 
-EntryConditionEvaluator 는 4종 conditions 중 ``price_below`` / ``price_above``
-/ ``spread_under_bps`` 를 평가한다 (bid/ask 는 KIS H0STCNT0 호가1 로 streamer
-가 발행). ``volume_over_ma20`` 는 ma20 lookup 미구현이라 unsupported 처리.
-시트의 conditions 가 비어있으면 즉시 True 를 반환하므로 정책 부착 전까진
-인프라만 안전히 도는 모드.
+EntryConditionEvaluator 는 6종 conditions 를 평가:
+    - ``price_below`` / ``price_above`` — tick.price 단독 비교
+    - ``spread_under_bps`` — bid/ask 호가 (KIS H0STCNT0 호가1)
+    - ``volume_over_ma20`` — ``BarEngine`` 의 1분봉 누적 / 분봉 ma20
+    - ``rsi_under`` — ``BarEngine`` 의 1분봉 RSI (overextension filter)
+    - ``price_above_recent_high`` — 최근 lookback 분봉 high 돌파 (breakout)
+
+후자 셋은 indicator warm-up 기간 (분봉 history 부족) 동안 None → "보류"
+(False) 가 자연스러운 fail-open 동작. 시트의 conditions 가 비어있으면 즉시
+True 를 반환하므로 정책 부착 전까진 인프라만 안전히 도는 모드.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
+from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
 from prime_jennie_runtime.fast_loop.domain import TickData
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
@@ -195,11 +201,19 @@ class EvaluationResult:
 class EntryConditionEvaluator:
     """시트 + tick → conditions AND 평가.
 
-    POSITION_SHEET_SPEC §4.2:
-        price_below / price_above / volume_over_ma20 / spread_under_bps
-    중 price 기반 두 종만 실제 평가. 나머지는 데이터 부재로 unsupported.
-    conditions 가 비어있으면 즉시 통과 (현 정책 = inframa 만 도입).
+    POSITION_SHEET_SPEC §4.2 + design Phase 0 §4.5 확장:
+        price_below / price_above / spread_under_bps / volume_over_ma20 /
+        rsi_under / price_above_recent_high
+
+    indicator provider 미주입 시 ``volume_over_ma20`` / ``rsi_under`` /
+    ``price_above_recent_high`` 는 warm-up 상태와 동일하게 "보류" 처리 (False).
+    conditions 가 비어있으면 즉시 통과 (현 정책 = 인프라만 도입한 minimum mode).
     """
+
+    def __init__(self, indicators: IndicatorProvider | None = None) -> None:
+        # None 주입 시 모든 indicator lookup 이 None → warm-up 과 동일하게
+        # 거동. 백테스트 / 기존 테스트는 indicators=None 으로 호출 호환.
+        self._indicators: IndicatorProvider = indicators or IndicatorProvider()
 
     def evaluate(
         self,
@@ -221,13 +235,13 @@ class EntryConditionEvaluator:
             return EvaluationResult(True, "no_conditions")
 
         for cond in conditions:
-            ok, reason = _evaluate_one(cond, tick)
+            ok, reason = _evaluate_one(cond, tick, self._indicators)
             if not ok:
                 return EvaluationResult(False, reason)
         return EvaluationResult(True, "all_passed")
 
 
-def _evaluate_one(cond: Any, tick: TickData) -> tuple[bool, str]:
+def _evaluate_one(cond: Any, tick: TickData, indicators: IndicatorProvider) -> tuple[bool, str]:
     """단일 condition 평가. (passed, reason) 반환."""
     cond_type = getattr(cond, "type", None)
     if cond_type == "price_below":
@@ -239,9 +253,43 @@ def _evaluate_one(cond: Any, tick: TickData) -> tuple[bool, str]:
             return True, "price_above_ok"
         return False, f"price_above_fail price={tick.price} threshold={cond.value}"
     if cond_type == "volume_over_ma20":
-        # tick.volume 은 누적 일거래량. ma20 별도 lookup 필요 — 미구현.
-        logger.warning("volume_over_ma20 unsupported (no ma20 lookup yet); blocking sheet entry")
-        return False, "volume_over_ma20_unsupported"
+        # 분봉 누적 / 분봉 거래량 ma20 ≥ min_ratio.
+        # warm-up (history < 20) 이거나 provider 미주입이면 None → 보류.
+        ma20 = indicators.volume_ma20(tick.ticker)
+        cum_vol = indicators.intraday_cum_volume(tick.ticker)
+        if ma20 is None or cum_vol is None:
+            return False, "volume_over_ma20_no_data"
+        if ma20 <= 0:
+            # 거래량이 0 인 분봉만 누적된 경우 — 데이터 의심, 보류
+            return False, "volume_over_ma20_zero_ma"
+        ratio = cum_vol / ma20
+        min_ratio = float(cond.min_ratio)
+        if ratio >= min_ratio:
+            return True, f"volume_over_ma20_ok ratio={ratio:.2f}"
+        return False, f"volume_over_ma20_fail ratio={ratio:.2f} min={min_ratio}"
+    if cond_type == "rsi_under":
+        # 1분봉 RSI ≥ threshold 면 차단 (overextension filter). RSI 가 None
+        # (warm-up) 이면 보류 — 안전 측면. period 충족 전 신규 진입은 보수적.
+        rsi = indicators.rsi_1m(tick.ticker)
+        if rsi is None:
+            return False, "rsi_under_no_data"
+        threshold = float(cond.threshold)
+        if rsi < threshold:
+            return True, f"rsi_under_ok rsi={rsi:.1f}"
+        return False, f"rsi_under_fail rsi={rsi:.1f} threshold={threshold}"
+    if cond_type == "price_above_recent_high":
+        # 최근 lookback 개 분봉 high 돌파 시 진입 (GAP_UP_REBOUND breakout
+        # confirmation). recent_high None → warm-up → 보류.
+        lookback = int(getattr(cond, "lookback", 5))
+        recent_high = indicators.recent_high(tick.ticker, lookback=lookback)
+        if recent_high is None:
+            return False, "price_above_recent_high_no_data"
+        if tick.price > recent_high:
+            return True, f"price_above_recent_high_ok price={tick.price} high={recent_high}"
+        return False, (
+            f"price_above_recent_high_fail price={tick.price} high={recent_high} "
+            f"lookback={lookback}"
+        )
     if cond_type == "spread_under_bps":
         # KIS H0STCNT0 호가1 — bid / ask 모두 양수일 때만 평가 가능
         if tick.ask is None or tick.bid is None or tick.ask <= 0 or tick.bid <= 0:

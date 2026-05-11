@@ -39,6 +39,7 @@ from .macro.post_processor import MacroPostResult, run_post_processing
 from .macro.schemas import MacroGateOutput, RecentMacroRun
 from .macro.state_store import MacroCurrentState, MacroStateStore
 from .persistence import (
+    fetch_previous_run_candidates,
     persist_macro_run,
     persist_scout_run,
     persist_screening_candidates,
@@ -686,12 +687,58 @@ async def run_slow_loop(
                 fallback=scout_out.fallback_strategy,
             )
         )
-        return SlowLoopResult(
-            macro_post=post,
-            scout_output=scout_out,
-            validation=validation,
-            skipped_reason="no_candidates",
-        )
+
+        # use_previous_run fallback — Scout 가 명시한 경우만 활성.
+        # 24h 내 직전 success run 의 candidates 를 동일 macro_state 일 때 재사용.
+        if scout_out.fallback_strategy == "use_previous_run":
+            prev = await fetch_previous_run_candidates(
+                comp.db_engine,
+                as_of=as_of_dt,
+                macro_gate=post.output.gate,
+                macro_size_multiplier=float(post.output.size_multiplier),
+            )
+            if prev is not None:
+                prev_run_id, prev_candidates = prev
+                # universe 필터 한 번 더 — 24h 전 universe 와 다를 수 있음.
+                reused_validation = validate_candidates(prev_candidates, scout_ctx.universe)
+                if reused_validation.candidates:
+                    await observer.emit(
+                        pj_event(
+                            "pj.scout.fallback_use_previous_run",
+                            role="scout",
+                            ok=True,
+                            previous_scout_run_id=prev_run_id,
+                            reused_count=len(reused_validation.candidates),
+                        )
+                    )
+                    validation = reused_validation  # 이후 sheet 발행 흐름이 그대로 동작
+                else:
+                    await observer.emit(
+                        pj_event(
+                            "pj.scout.fallback_use_previous_run_empty",
+                            role="scout",
+                            ok=False,
+                            previous_scout_run_id=prev_run_id,
+                            reason="all_outside_universe",
+                        )
+                    )
+            else:
+                await observer.emit(
+                    pj_event(
+                        "pj.scout.fallback_use_previous_run_unavailable",
+                        role="scout",
+                        ok=False,
+                        reason="no_matching_previous_run",
+                    )
+                )
+
+        if not validation.candidates:
+            return SlowLoopResult(
+                macro_post=post,
+                scout_output=scout_out,
+                validation=validation,
+                skipped_reason="no_candidates",
+            )
 
     # --- 5. Strategy + 발행 ---
     inputs = StrategyEngineInputs(

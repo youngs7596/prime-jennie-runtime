@@ -326,6 +326,44 @@ def test_evaluator_rsi_under_fail():
     assert result.reason.startswith("rsi_under_fail")
 
 
+def test_evaluator_price_above_recent_high_no_provider_blocks():
+    """provider 미주입 시 recent_high None → 보류 (warm-up 등가)."""
+    sheet = _make_sheet(conditions=[{"type": "price_above_recent_high", "lookback": 5}])
+    evaluator = EntryConditionEvaluator()
+    result = evaluator.evaluate(sheet, _tick(price=70000.0), now=_market_open_now())
+    assert result.passed is False
+    assert result.reason == "price_above_recent_high_no_data"
+
+
+def test_evaluator_price_above_recent_high_pass():
+    """price 70200 > recent_high 70100 → 통과 (breakout 확인)."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class Stub(IndicatorProvider):
+        def recent_high(self, ticker: str, *, lookback: int = 5) -> float | None:
+            return 70100.0
+
+    sheet = _make_sheet(conditions=[{"type": "price_above_recent_high", "lookback": 5}])
+    evaluator = EntryConditionEvaluator(indicators=Stub())
+    result = evaluator.evaluate(sheet, _tick(price=70200.0), now=_market_open_now())
+    assert result.passed is True
+
+
+def test_evaluator_price_above_recent_high_fail():
+    """price 70000 ≤ recent_high 70100 → 차단 (breakout 미확정)."""
+    from prime_jennie_runtime.fast_loop.bar_engine import IndicatorProvider
+
+    class Stub(IndicatorProvider):
+        def recent_high(self, ticker: str, *, lookback: int = 5) -> float | None:
+            return 70100.0
+
+    sheet = _make_sheet(conditions=[{"type": "price_above_recent_high", "lookback": 5}])
+    evaluator = EntryConditionEvaluator(indicators=Stub())
+    result = evaluator.evaluate(sheet, _tick(price=70000.0), now=_market_open_now())
+    assert result.passed is False
+    assert result.reason.startswith("price_above_recent_high_fail")
+
+
 def test_evaluator_spread_under_bps_pass():
     """bid=69990 ask=70010 → spread = 20/70000 ≈ 2.86 bps, max_bps=15 → pass."""
     sheet = _make_sheet(conditions=[{"type": "spread_under_bps", "max_bps": 15}])

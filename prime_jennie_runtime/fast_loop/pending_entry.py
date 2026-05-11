@@ -10,15 +10,16 @@ Redis 백업:
     - ``pending_entry:by_ticker:{ticker}`` → set of sheet_ids
     - 부팅 시 ``load_from_redis()`` 로 in-memory 인덱스 복구
 
-EntryConditionEvaluator 는 5종 conditions 를 평가:
+EntryConditionEvaluator 는 6종 conditions 를 평가:
     - ``price_below`` / ``price_above`` — tick.price 단독 비교
     - ``spread_under_bps`` — bid/ask 호가 (KIS H0STCNT0 호가1)
-    - ``volume_over_ma20`` — fast_loop ``BarEngine`` 의 1분봉 누적 / ma20
-    - ``rsi_under`` — fast_loop ``BarEngine`` 의 1분봉 RSI (overextension filter)
+    - ``volume_over_ma20`` — ``BarEngine`` 의 1분봉 누적 / 분봉 ma20
+    - ``rsi_under`` — ``BarEngine`` 의 1분봉 RSI (overextension filter)
+    - ``price_above_recent_high`` — 최근 lookback 분봉 high 돌파 (breakout)
 
-후자 두 종은 indicator warm-up 기간 (분봉 history < period+1) 동안 None →
-"보류" (False) 가 자연스러운 fail-open 동작. 시트의 conditions 가 비어있으면
-즉시 True 를 반환하므로 정책 부착 전까진 인프라만 안전히 도는 모드.
+후자 셋은 indicator warm-up 기간 (분봉 history 부족) 동안 None → "보류"
+(False) 가 자연스러운 fail-open 동작. 시트의 conditions 가 비어있으면 즉시
+True 를 반환하므로 정책 부착 전까진 인프라만 안전히 도는 모드.
 """
 
 from __future__ import annotations
@@ -201,11 +202,12 @@ class EntryConditionEvaluator:
     """시트 + tick → conditions AND 평가.
 
     POSITION_SHEET_SPEC §4.2 + design Phase 0 §4.5 확장:
-        price_below / price_above / spread_under_bps / volume_over_ma20 / rsi_under
+        price_below / price_above / spread_under_bps / volume_over_ma20 /
+        rsi_under / price_above_recent_high
 
-    indicator provider 미주입 시 ``volume_over_ma20`` / ``rsi_under`` 는 warm-up
-    상태와 동일하게 "보류" 처리 (False). conditions 가 비어있으면 즉시 통과
-    (현 정책 = 인프라만 도입한 minimum mode).
+    indicator provider 미주입 시 ``volume_over_ma20`` / ``rsi_under`` /
+    ``price_above_recent_high`` 는 warm-up 상태와 동일하게 "보류" 처리 (False).
+    conditions 가 비어있으면 즉시 통과 (현 정책 = 인프라만 도입한 minimum mode).
     """
 
     def __init__(self, indicators: IndicatorProvider | None = None) -> None:
@@ -275,6 +277,19 @@ def _evaluate_one(cond: Any, tick: TickData, indicators: IndicatorProvider) -> t
         if rsi < threshold:
             return True, f"rsi_under_ok rsi={rsi:.1f}"
         return False, f"rsi_under_fail rsi={rsi:.1f} threshold={threshold}"
+    if cond_type == "price_above_recent_high":
+        # 최근 lookback 개 분봉 high 돌파 시 진입 (GAP_UP_REBOUND breakout
+        # confirmation). recent_high None → warm-up → 보류.
+        lookback = int(getattr(cond, "lookback", 5))
+        recent_high = indicators.recent_high(tick.ticker, lookback=lookback)
+        if recent_high is None:
+            return False, "price_above_recent_high_no_data"
+        if tick.price > recent_high:
+            return True, f"price_above_recent_high_ok price={tick.price} high={recent_high}"
+        return False, (
+            f"price_above_recent_high_fail price={tick.price} high={recent_high} "
+            f"lookback={lookback}"
+        )
     if cond_type == "spread_under_bps":
         # KIS H0STCNT0 호가1 — bid / ask 모두 양수일 때만 평가 가능
         if tick.ask is None or tick.bid is None or tick.ask <= 0 or tick.bid <= 0:

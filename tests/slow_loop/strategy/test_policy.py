@@ -9,7 +9,7 @@ from prime_jennie_runtime.slow_loop.strategy.policy import load_policy
 
 def test_load_default_policy():
     policy = load_policy()
-    assert policy.version == "v3.0.3"
+    assert policy.version == "v3.0.4"
 
 
 def test_all_four_tags_present():
@@ -58,3 +58,27 @@ def test_all_strategies_have_default_entry_conditions():
         entry = policy.get(tag)
         types = {c["type"] for c in entry.default_entry_conditions}
         assert "spread_under_bps" in types, f"{tag} missing spread_under_bps default"
+
+
+def test_gap_up_rebound_has_breakout_confirmation():
+    """v3.0.4 — GAP_UP_REBOUND 만 price_above_recent_high (lookback 5) 부착."""
+    policy = load_policy()
+    entry = policy.get("GAP_UP_REBOUND")
+    breakout = next(
+        (c for c in entry.default_entry_conditions if c["type"] == "price_above_recent_high"),
+        None,
+    )
+    assert breakout is not None
+    assert breakout["lookback"] == 5
+
+
+def test_momentum_strategies_have_overextension_filter():
+    """v3.0.4 — GAP_UP_REBOUND / SECTOR_MOMENTUM / EARNINGS_DRIFT 모두 rsi_under 부착."""
+    policy = load_policy()
+    for tag in ("GAP_UP_REBOUND", "SECTOR_MOMENTUM", "EARNINGS_DRIFT"):
+        entry = policy.get(tag)
+        rsi_cond = next(
+            (c for c in entry.default_entry_conditions if c["type"] == "rsi_under"), None
+        )
+        assert rsi_cond is not None, f"{tag} missing rsi_under filter"
+        assert 0 < rsi_cond["threshold"] <= 100

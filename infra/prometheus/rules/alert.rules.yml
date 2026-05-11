@@ -45,6 +45,25 @@ groups:
             영향. monitor + KIS gateway 즉시 점검 필요.
 
       # ----------------------------------------------------------------
+      # KIS gateway 5xx — Prometheus 가 직접 KIS Gateway 를 scrape 하진
+      # 않지만 monitor 의 consecutive_failures 가 3 이상이면 게이트웨이
+      # 측 5xx 또는 연결 거부가 누적된 상태. monitor heartbeat (#3) 가
+      # Telegram 알림을 보내지만 Prometheus 측에서도 별도 알람.
+      # ----------------------------------------------------------------
+      - alert: MonitorConsecutiveFailures
+        expr: monitor_consecutive_failures >= 3
+        for: 1m
+        labels:
+          severity: critical
+          component: monitor
+        annotations:
+          summary: "Monitor poll 연속 실패 >=3"
+          description: |
+            monitor_consecutive_failures={{ $value }}. KIS Gateway 5xx 또는
+            연결 거부가 누적된 상태. Telegram 알림은 monitor heartbeat
+            경로에서도 발송.
+
+      # ----------------------------------------------------------------
       # Service scrape down — fast-loop / kis-gateway / monitor 등 주요
       # 서비스에서 prometheus 가 메트릭을 못 긁어옴 = 컨테이너 down 또는
       # /metrics 미응답.

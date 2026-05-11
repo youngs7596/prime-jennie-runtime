@@ -422,6 +422,8 @@ services:
       <<: *common-env
       KIS_GATEWAY_URL: http://kis-gateway:8080
       MONITOR_POLL_INTERVAL_SEC: ${MONITOR_POLL_INTERVAL_SEC:-30}
+      # heartbeat 알림 — 임계 도달 시 v3:notifications 발행 + (선택) Slack 미러.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8091:8091"

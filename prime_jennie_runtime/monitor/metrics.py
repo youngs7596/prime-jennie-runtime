@@ -28,6 +28,7 @@ def render_metrics(poller: LivePositionsPoller | None) -> str:
     success = poller.last_success_ts if poller and poller.last_success_ts else 0.0
     failure = poller.last_failure_ts if poller and poller.last_failure_ts else 0.0
     positions = poller.last_positions_count if poller else 0
+    failures = poller.consecutive_failures if poller else 0
 
     lines.append(
         "# HELP monitor_poll_success_timestamp_seconds Last successful /balance poll (unix ts)"
@@ -44,5 +45,11 @@ def render_metrics(poller: LivePositionsPoller | None) -> str:
     lines.append("# HELP monitor_live_positions Current watched position count")
     lines.append("# TYPE monitor_live_positions gauge")
     lines.append(f"monitor_live_positions {positions}")
+
+    lines.append(
+        "# HELP monitor_consecutive_failures Consecutive poll failures since last success"
+    )
+    lines.append("# TYPE monitor_consecutive_failures gauge")
+    lines.append(f"monitor_consecutive_failures {failures}")
 
     return "\n".join(lines) + "\n"

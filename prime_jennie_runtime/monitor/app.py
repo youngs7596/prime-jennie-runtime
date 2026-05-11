@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Response
 
+from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.infra.config import AppConfig
 
 from .metrics import render_metrics
@@ -40,21 +41,27 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=True)
+        # Notifier 는 fast_loop 와 동일한 Redis stream (v3:notifications) 에 알림
+        # 발행 → telegram_bot 가 동일 경로로 소비. Slack 미러는 env 가 있을 때만.
+        notifier = Notifier(redis_client)
         poller = LivePositionsPoller(
             redis_client=redis_client,
             gateway_url=_gateway_url(cfg),
             interval_sec=_poll_interval(),
+            notifier=notifier,
         )
         await poller.__aenter__()
         poller.start()
         app.state.config = cfg
         app.state.redis = redis_client
         app.state.poller = poller
+        app.state.notifier = notifier
         try:
             yield
         finally:
             await poller.stop()
             await poller.close()
+            await notifier.close()
             await redis_client.aclose()
 
     app = FastAPI(title="prime-jennie-runtime monitor", version="0.1.0", lifespan=lifespan)

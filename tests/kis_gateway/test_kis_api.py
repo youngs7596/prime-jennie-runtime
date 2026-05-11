@@ -152,6 +152,109 @@ async def test_auth_error_triggers_token_refresh(kis_config):
     assert token_route.call_count >= 2
 
 
+async def test_503_retries_with_backoff_then_succeeds(kis_config, monkeypatch):
+    """503 응답 → 지수 백오프 재시도 → 성공 회복."""
+    calls = {"n": 0}
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(503, json={"rt_cd": "1", "msg1": "Service Unavailable"})
+        return httpx.Response(
+            200,
+            json={"rt_cd": "0", "msg1": "", "output": {"stck_prpr": "71000"}},
+        )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config)
+        try:
+            snap = await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    assert snap.price == 71000
+    # 3회 호출 (1차 503, 2차 503, 3차 200)
+    assert calls["n"] == 3
+    # backoff sleep 2회: 1.0s, 2.0s (성공 시 break)
+    backoffs = [s for s in sleeps if s >= 1.0]
+    assert backoffs == [1.0, 2.0]
+
+
+async def test_503_gives_up_after_max_retries(kis_config, monkeypatch):
+    """5xx 가 계속되면 마지막 응답으로 raise_for_status 가 HTTPStatusError 발생."""
+    calls = {"n": 0}
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503, json={"rt_cd": "1", "msg1": "down"})
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config)
+        try:
+            with pytest.raises(httpx.HTTPStatusError):
+                await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    # 최초 1회 + 재시도 3회 = 4회
+    assert calls["n"] == 4
+
+
+async def test_egw00201_not_re_retried_by_5xx_loop(kis_config, monkeypatch):
+    """EGW00201 은 전용 분기에서 1회 backoff 후 처리 — 일반 5xx 루프가 또 retry 하지 않음."""
+    calls = {"n": 0}
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                500, json={"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "throttle"}
+            )
+        return httpx.Response(
+            200, json={"rt_cd": "0", "msg1": "", "output": {"stck_prpr": "70000"}}
+        )
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config)
+        try:
+            snap = await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    assert snap.price == 70000
+    # 정확히 2회 호출 — EGW00201 backoff 후 재시도 1회만
+    assert calls["n"] == 2
+
+
 async def test_place_order_success(kis_config):
     with respx.mock(base_url=kis_config.base_url, assert_all_called=True) as mock:
         _token_route(mock, kis_config.base_url)

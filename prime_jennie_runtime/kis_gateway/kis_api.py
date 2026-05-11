@@ -29,6 +29,25 @@ from .token_manager import TokenRecord, load_token, save_token
 
 logger = logging.getLogger(__name__)
 
+# 5xx 재시도 정책 (EGW00201 throttle 은 별도 1회 backoff 로 처리)
+_RETRY_5XX_MAX = 3
+_RETRY_5XX_BASE_SEC = 1.0
+
+
+def _is_egw_throttle(resp: httpx.Response) -> bool:
+    """500 + msg_cd=EGW00201 (초당 거래건수 초과) 응답인지 확인.
+
+    이 케이스는 위 ``_request`` 에서 별도 backoff 분기로 이미 처리되므로,
+    일반 5xx 재시도 루프가 같은 응답을 다시 재시도하지 않도록 분리.
+    """
+    if resp.status_code != 500:
+        return False
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return body.get("msg_cd") == "EGW00201"
+
 
 class KISApiError(Exception):
     """KIS API 오류 (rt_cd != '0' 등)."""
@@ -129,7 +148,20 @@ class KISApi:
         params: dict[str, Any] | None = None,
         json_data: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """KIS API 공통 요청. 연결 오류 1회 재시도, 인증 오류 시 토큰 재발급 후 재시도."""
+        """KIS API 공통 요청.
+
+        재시도 정책:
+          - 연결 오류 (RemoteProtocol/Connect/Read): 1회 짧게 재시도
+          - 500 EGW00201 (rate throttle): 1초 backoff 후 1회 재시도
+          - 503 및 일반 5xx (서버 일시 장애): 지수 백오프 3회 (1s/2s/4s)
+          - 401/403 (인증 오류): 토큰 재발급 후 1회 재시도
+
+        Circuit breaker 와의 관계: ``_request`` 는 ``AsyncCircuitBreaker.call`` 안에서
+        실행되므로 breaker 가 OPEN 이면 ``_request`` 가 호출되기 전 ``CircuitBreakerError``
+        가 발생한다. 즉 여기서의 재시도는 breaker 가 CLOSED/HALF_OPEN 일 때만 일어나며,
+        실패 누적이 ``fail_max`` 를 넘으면 breaker 가 OPEN 으로 전이해 후속 호출이
+        즉시 차단된다 — retry 와 breaker 가 충돌하지 않음.
+        """
         headers = await self._headers(tr_id)
 
         try:
@@ -157,6 +189,28 @@ class KISApi:
                 resp = await self._client.request(
                     method, path, headers=headers, params=params, json=json_data
                 )
+
+        # 5xx (502/503/504 + EGW00201 이 아닌 500): 일시 장애로 간주하고 지수 백오프 재시도.
+        # 2026-05-11 운영 중 503 (Service Unavailable) 다발 — KIS 점검 또는 자체 게이트웨이
+        # 일시 과부하 — 단발 재시도로 회복되는 경우 대부분.
+        if 500 <= resp.status_code < 600 and not _is_egw_throttle(resp):
+            for attempt in range(_RETRY_5XX_MAX):
+                delay = _RETRY_5XX_BASE_SEC * (2**attempt)
+                logger.warning(
+                    "KIS %s %s -> %d, backoff %.1fs (attempt %d/%d)",
+                    method,
+                    path,
+                    resp.status_code,
+                    delay,
+                    attempt + 1,
+                    _RETRY_5XX_MAX,
+                )
+                await asyncio.sleep(delay)
+                resp = await self._client.request(
+                    method, path, headers=headers, params=params, json=json_data
+                )
+                if resp.status_code < 500 or _is_egw_throttle(resp):
+                    break
 
         # 인증 오류 의심 → 토큰 재발급 후 재시도 (1회).
         # 401/403 만 대상. 500 은 throttle/서버 오류라 재인증이 도움 안 됨 (오히려

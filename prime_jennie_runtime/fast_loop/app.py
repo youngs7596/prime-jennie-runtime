@@ -5,7 +5,12 @@
 - `SystemState` — `control.state:*` 을 읽어 stop/pause 동안 신규 진입을 차단
 
 기동 시 `PositionTracker.load_from_redis()` 로 활성 포지션 복원. 주문 경로는
-`trading_flags:stop` 또는 control.state:stop/pause 가 True 면 자동으로 막힌다.
+`control.state:stop` / `control.state:pause` 가 True 면 자동으로 막힌다.
+
+v2 호환 키 (`trading_flags:stop` 등) 는 fast_loop 본체에서 더 이상 읽지
+않는다. 운영자가 REAL_MODE_MIGRATION_CHECKLIST 따라 수동 SET 하는 잔존
+관행만 남아 있으며 `/resume` 명령이 ControlCommandConsumer 경유로 함께
+정리한다. 자세한 매핑은 docs/CONTROL_STATE_KEYS.md.
 
 실행:
     python -m prime_jennie_runtime.fast_loop.app

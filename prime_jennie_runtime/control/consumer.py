@@ -34,6 +34,8 @@ from prime_jennie_runtime.telegram_bot.control import (
     STATE_KEY_LIQUIDATE_ARMED,
     STATE_KEY_PAUSE,
     STATE_KEY_STOP,
+    V2_KEY_PAUSE,
+    V2_KEY_STOP,
     ControlCommand,
 )
 
@@ -212,7 +214,12 @@ async def _pause(redis: aioredis.Redis, cmd: ControlCommand) -> None:
 
 
 async def _resume(redis: aioredis.Redis, cmd: ControlCommand) -> None:
-    await redis.delete(STATE_KEY_STOP, STATE_KEY_PAUSE)
+    # v3 키 + v2 호환 키 모두 정리. v2 키는 운영자가 REAL_MODE_MIGRATION_CHECKLIST
+    # 따라 수동 SET 하는 관행 — `_resume` 가 v3 키만 지우면 v2 호환 키가 남아
+    # 그쪽 환경에 영향 (`SystemState.snapshot` 은 v3 키만 보지만, v2 운영 코드와
+    # 공존 기간에 `trading_flags:stop=1` 잔존이 confusing). docs/CONTROL_STATE_KEYS.md
+    # 참조. v2 deprecate 시 두 키는 import + 본 delete 호출 모두 제거.
+    await redis.delete(STATE_KEY_STOP, STATE_KEY_PAUSE, V2_KEY_STOP, V2_KEY_PAUSE)
 
 
 async def _set_dryrun(redis: aioredis.Redis, cmd: ControlCommand) -> None:

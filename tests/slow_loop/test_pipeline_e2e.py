@@ -441,3 +441,178 @@ async def test_redis_risk_throttle_applies_to_final_pct(fake_redis):
         assert final_pct == pytest.approx(0.03, abs=1e-9), (
             f"expected 0.03 with WARNING risk, got {final_pct}"
         )
+
+
+# =====================================================================
+# 7. DLQ 송부 — hallucination_fail / engine_error / publisher_error
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_dlq_on_scout_hallucination_fail(fake_redis):
+    """Scout hallucination_fail (universe 밖 >=50%) 시 raw candidates 가 DLQ 로 가야 함."""
+    import json as _json
+
+    from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS_DLQ
+
+    observer = CollectingObserver()
+    hallucinated = [
+        ScreeningCandidate(
+            ticker="999998",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.8,
+            entry_hint=EntryHint(trigger="market"),
+        ),
+        ScreeningCandidate(
+            ticker="999997",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.7,
+            entry_hint=EntryHint(trigger="market"),
+        ),
+        ScreeningCandidate(
+            ticker="999996",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.65,
+            entry_hint=EntryHint(trigger="market"),
+        ),
+        ScreeningCandidate(
+            ticker="005930",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.9,
+            entry_hint=EntryHint(trigger="limit", price_hint=71200.0),
+        ),
+    ]
+
+    comp = _make_components(
+        fake_redis,
+        observer,
+        _default_scout_output(),
+        _default_macro_output(gate="open", size=1.0),
+        screening_candidates=hallucinated,
+    )
+    result = await run_slow_loop(
+        comp,
+        as_of_date=date(2026, 4, 16),
+        as_of_dt=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        macro_run_id="macro_20260416_0800",
+        scout_run_id="scout_20260416_0830",
+    )
+    assert result.skipped_reason == "scout_hallucination"
+
+    # DLQ stream 에 1건 적재
+    dlq_len = await fake_redis.xlen(STREAM_POSITION_SHEETS_DLQ)
+    assert dlq_len == 1
+    # dlq_reason == scout_hallucination_fail
+    entries = await fake_redis.xrange(STREAM_POSITION_SHEETS_DLQ, count=1)
+    _id, fields = entries[0]
+    raw_payload = fields[b"payload"].decode()
+    envelope = _json.loads(raw_payload)
+    inner = _json.loads(envelope["payload"])
+    assert inner["dlq_reason"] == "scout_hallucination_fail"
+    assert inner["payload"]["scout_run_id"] == "scout_20260416_0830"
+
+    names = {e.name for e in observer.events}
+    assert "pj.slow_loop.dlq_sent" in names
+
+
+@pytest.mark.asyncio
+async def test_dlq_on_engine_build_sheet_error(fake_redis, monkeypatch):
+    """engine.build_sheet 예외 시 raw candidate 가 DLQ 로 가야 함."""
+    import json as _json
+
+    from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS_DLQ
+
+    observer = CollectingObserver()
+    valid_cands = [
+        ScreeningCandidate(
+            ticker="005930",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.9,
+            entry_hint=EntryHint(trigger="limit", price_hint=71200.0),
+        ),
+    ]
+    comp = _make_components(
+        fake_redis,
+        observer,
+        _default_scout_output(),
+        _default_macro_output(gate="open", size=1.0),
+        screening_candidates=valid_cands,
+    )
+
+    # engine.build_sheet_with_reason 을 일부러 예외내도록 monkeypatch
+    async def _boom(cand, inputs):
+        raise RuntimeError("schema fail")
+
+    monkeypatch.setattr(comp.engine, "build_sheet_with_reason", _boom)
+
+    result = await run_slow_loop(
+        comp,
+        as_of_date=date(2026, 4, 16),
+        as_of_dt=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        macro_run_id="macro_20260416_0800",
+        scout_run_id="scout_20260416_0830",
+    )
+    assert result.sheets_published == []
+    assert "005930" in result.sheets_rejected
+
+    dlq_len = await fake_redis.xlen(STREAM_POSITION_SHEETS_DLQ)
+    assert dlq_len == 1
+    entries = await fake_redis.xrange(STREAM_POSITION_SHEETS_DLQ, count=1)
+    _id, fields = entries[0]
+    envelope = _json.loads(fields[b"payload"].decode())
+    assert "schema fail" in envelope["error"]
+    inner = _json.loads(envelope["payload"])
+    assert inner["dlq_reason"] == "engine_build_sheet_error"
+    assert inner["payload"]["candidate"]["ticker"] == "005930"
+
+
+@pytest.mark.asyncio
+async def test_dlq_on_publisher_publish_failure(fake_redis, monkeypatch):
+    """publisher.publish 예외 시 pipeline 도 sheet 컨텍스트를 DLQ 로 보냄."""
+    import json as _json
+
+    from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS_DLQ
+
+    observer = CollectingObserver()
+    valid_cands = [
+        ScreeningCandidate(
+            ticker="005930",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.9,
+            entry_hint=EntryHint(trigger="limit", price_hint=71200.0),
+        ),
+    ]
+    comp = _make_components(
+        fake_redis,
+        observer,
+        _default_scout_output(),
+        _default_macro_output(gate="open", size=1.0),
+        screening_candidates=valid_cands,
+    )
+
+    # publish 가 DB upsert 단계에서 예외내도록 — DB upsert 후 stream 발행 전.
+    # _persist_sheet 가 RuntimeError 던지면 publisher 가 raw sheet DLQ 호출 없이 raise.
+    async def _persist_fail(sheet):
+        raise RuntimeError("db upsert exploded")
+
+    monkeypatch.setattr(comp.publisher, "_persist_sheet", _persist_fail)
+
+    result = await run_slow_loop(
+        comp,
+        as_of_date=date(2026, 4, 16),
+        as_of_dt=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        macro_run_id="macro_20260416_0800",
+        scout_run_id="scout_20260416_0830",
+    )
+    assert result.sheets_published == []
+    assert "005930" in result.sheets_rejected
+
+    # pipeline 의 DLQ 송부 1건 — publisher_error
+    dlq_len = await fake_redis.xlen(STREAM_POSITION_SHEETS_DLQ)
+    assert dlq_len == 1
+    entries = await fake_redis.xrange(STREAM_POSITION_SHEETS_DLQ, count=1)
+    _id, fields = entries[0]
+    envelope = _json.loads(fields[b"payload"].decode())
+    inner = _json.loads(envelope["payload"])
+    assert inner["dlq_reason"] == "publisher_error"
+    assert "db upsert exploded" in envelope["error"]

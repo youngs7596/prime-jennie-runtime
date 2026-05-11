@@ -52,6 +52,17 @@ STATE_KEY_DRYRUN = "control.state:dryrun"
 # 강제 청산 armed flag
 STATE_KEY_LIQUIDATE_ARMED = "control.state:liquidate_armed"
 
+# ---------------------------------------------------------------------
+# v2 호환 trading flag 키 (legacy)
+# ---------------------------------------------------------------------
+# v3 가 control.state:* 로 마이그레이션됐지만 v2 운영 중 수동 SET (REAL_MODE_
+# MIGRATION_CHECKLIST 참조) 으로 남는 키가 있어, /resume 시 함께 정리한다.
+# v3 fast_loop 본체는 control.state:* 만 읽으므로 미정리 상태로는 영향 없음 —
+# v2 가 영구 종료되면 이 두 상수는 제거 예정 (Phase 2-6 공존 종료).
+# 자세한 매핑은 docs/CONTROL_STATE_KEYS.md 참조.
+V2_KEY_STOP = "trading_flags:stop"
+V2_KEY_PAUSE = "trading_flags:pause"
+
 # v2 호환 키 — 알림 음소거 / 가격 알림 / 최대 매수 횟수 / 워치리스트
 KEY_MUTE_UNTIL = "notification:mute_until"
 KEY_PRICE_ALERTS = "price_alerts"
@@ -145,6 +156,8 @@ __all__ = [
     "STATE_KEY_LIQUIDATE_ARMED",
     "STATE_KEY_PAUSE",
     "STATE_KEY_STOP",
+    "V2_KEY_PAUSE",
+    "V2_KEY_STOP",
     "ControlCommand",
     "ControlKind",
     "rate_limit_key",

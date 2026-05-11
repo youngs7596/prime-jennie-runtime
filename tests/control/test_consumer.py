@@ -14,6 +14,8 @@ from prime_jennie_runtime.telegram_bot.control import (
     STATE_KEY_LIQUIDATE_ARMED,
     STATE_KEY_PAUSE,
     STATE_KEY_STOP,
+    V2_KEY_PAUSE,
+    V2_KEY_STOP,
     ControlCommand,
 )
 
@@ -79,6 +81,25 @@ async def test_resume_on_clean_state_is_idempotent(fake_redis):
     await c.apply(_cmd("resume"))  # nothing to clear
     snap = await SystemState(fake_redis).snapshot()
     assert snap.entry_allowed is True
+
+
+@pytest.mark.asyncio
+async def test_resume_also_clears_v2_trading_flags(fake_redis):
+    """v2 호환 키 (trading_flags:stop / pause) 도 함께 DEL — Phase 2-6 공존 정리."""
+    await fake_redis.set(STATE_KEY_STOP, "1")
+    await fake_redis.set(STATE_KEY_PAUSE, "telegram_emergency")
+    await fake_redis.set(V2_KEY_STOP, "1")
+    await fake_redis.set(V2_KEY_PAUSE, "emergency_stop")
+
+    c = ControlCommandConsumer(fake_redis, consumer_name="test")
+    await c.apply(_cmd("resume"))
+
+    # v3 키
+    assert await fake_redis.get(STATE_KEY_STOP) is None
+    assert await fake_redis.get(STATE_KEY_PAUSE) is None
+    # v2 호환 키 — 함께 정리되어야 함
+    assert await fake_redis.get(V2_KEY_STOP) is None
+    assert await fake_redis.get(V2_KEY_PAUSE) is None
 
 
 # ---------- set_dryrun ----------

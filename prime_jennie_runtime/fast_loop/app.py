@@ -45,7 +45,7 @@ from prime_jennie_runtime.fast_loop.risk_throttle import IntradayRiskThrottle
 from prime_jennie_runtime.fast_loop.risk_updater import run_risk_updater
 from prime_jennie_runtime.fast_loop.schemas import RiskLevelChangeNotification
 from prime_jennie_runtime.fast_loop.tick_loop import TickLoop
-from prime_jennie_runtime.infra.config import AppConfig
+from prime_jennie_runtime.infra.config import AppConfig, validate_kis_gateway_url
 from prime_jennie_runtime.infra.redis_streams import STREAM_NOTIFICATIONS, TypedStreamPublisher
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
@@ -158,6 +158,11 @@ async def run() -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     cfg = AppConfig()
+
+    # KIS_GATEWAY_URL 누락/localhost 시 production 에선 startup 차단, 그 외 dev 는
+    # docker-compose 기본값으로 fallback (2026-04 자산 스냅샷 사고 학습).
+    resolved_gw_url = validate_kis_gateway_url(cfg.kis, strict=cfg.env == "production")
+    cfg.kis.gateway_url = resolved_gw_url
 
     async with AsyncExitStack() as stack:
         redis_client = aioredis.from_url(cfg.redis.url, decode_responses=False)

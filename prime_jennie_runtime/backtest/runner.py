@@ -80,19 +80,52 @@ def _entry_conditions_ok(sheet: PositionSheet, bar: DailyBar, prior_bars: list[D
     return True
 
 
+def _effective_slippage_pct(
+    config: BacktestConfig,
+    *,
+    raw_price: float,
+    qty: int,
+    bar_volume: int,
+) -> float:
+    """체결 1건의 effective slippage % (base + volume 가산).
+
+    volume_based_slippage_enabled 가 False 거나 bar_volume 이 0 이면 base 만 반환.
+    그 외에는 participation = (qty / bar_volume) 을 max_participation_clip 로 클립,
+    extra = base × multiplier × participation 을 더한다.
+    """
+    base = config.slippage_pct
+    if not config.volume_based_slippage_enabled or bar_volume <= 0 or qty <= 0:
+        return base
+    _ = raw_price  # price 변수는 향후 sqrt-impact 모델 전환 시 사용 — 현재 미사용.
+    participation = qty / float(bar_volume)
+    if participation > config.max_participation_clip:
+        participation = config.max_participation_clip
+    extra = base * config.participation_slippage_multiplier * participation
+    return base + extra
+
+
 def _try_entry(
     sheet: PositionSheet,
     entry_bar: DailyBar,
     prior_bars: list[DailyBar],
     config: BacktestConfig,
+    *,
+    qty_hint: int = 0,
 ) -> tuple[float | None, datetime | None, str]:
-    """진입 체결 시뮬. (fill_price, fill_ts, reason) 반환. fill_price=None 이면 미체결."""
+    """진입 체결 시뮬. (fill_price, fill_ts, reason) 반환. fill_price=None 이면 미체결.
+
+    qty_hint 가 0 이면 volume-based slippage 는 skip (base 만). caller 가
+    `_estimate_entry_qty` 로 1차 추정 후 다시 호출하는 2-step 흐름을 사용한다.
+    """
     if not _entry_conditions_ok(sheet, entry_bar, prior_bars):
         return None, None, "condition_failed"
 
     entry_dt = datetime.combine(entry_bar.price_date, _OPEN_TIME)
     if sheet.entry.trigger == "market":
-        fill = entry_bar.open * (1.0 + config.slippage_pct / 100.0)
+        slip_pct = _effective_slippage_pct(
+            config, raw_price=entry_bar.open, qty=qty_hint, bar_volume=entry_bar.volume
+        )
+        fill = entry_bar.open * (1.0 + slip_pct / 100.0)
         return fill, entry_dt, "market"
 
     # limit: long-side 체결 조건 = bar.low <= limit_price
@@ -103,13 +136,25 @@ def _try_entry(
         return None, None, "limit_unfilled"
     # open 이 이미 limit 이하면 open 에서 체결, 아니면 limit 에서 체결
     raw_fill = min(limit, entry_bar.open)
-    fill = raw_fill * (1.0 + config.slippage_pct / 100.0)
+    slip_pct = _effective_slippage_pct(
+        config, raw_price=raw_fill, qty=qty_hint, bar_volume=entry_bar.volume
+    )
+    fill = raw_fill * (1.0 + slip_pct / 100.0)
     return fill, entry_dt, "limit"
 
 
-def _exit_fill_price(tick_price: float, config: BacktestConfig) -> float:
+def _exit_fill_price(
+    tick_price: float,
+    config: BacktestConfig,
+    *,
+    qty: int = 0,
+    bar_volume: int = 0,
+) -> float:
     """매도 시 슬리피지는 불리하게 (가격을 낮춰)."""
-    return tick_price * (1.0 - config.slippage_pct / 100.0)
+    slip_pct = _effective_slippage_pct(
+        config, raw_price=tick_price, qty=qty, bar_volume=bar_volume
+    )
+    return tick_price * (1.0 - slip_pct / 100.0)
 
 
 def simulate_sheet(
@@ -146,7 +191,33 @@ def simulate_sheet(
     prior_bars = bars[:entry_index]
     entry_bar = bars[entry_index]
 
-    entry_price, entry_ts, entry_reason = _try_entry(sheet, entry_bar, prior_bars, cfg)
+    # 1차 — base slippage 로 진입가 시도하여 수량을 추정.
+    raw_entry_price, _, raw_reason = _try_entry(sheet, entry_bar, prior_bars, cfg, qty_hint=0)
+    if raw_entry_price is None:
+        return SheetBacktestResult(
+            sheet_id=sheet.sheet_id,
+            ticker=sheet.ticker,
+            strategy_tag=sheet.strategy_tag,
+            filled=False,
+            trades=[],
+            exit_reason=raw_reason,
+        )
+    qty_hint = int(capital_krw // raw_entry_price)
+    if qty_hint <= 0:
+        return SheetBacktestResult(
+            sheet_id=sheet.sheet_id,
+            ticker=sheet.ticker,
+            strategy_tag=sheet.strategy_tag,
+            filled=False,
+            trades=[],
+            exit_reason="capital_too_small",
+        )
+
+    # 2차 — qty_hint 로 volume-aware 진입가 재계산. volume_based_slippage 비활성 시
+    # 1차/2차 결과 동일.
+    entry_price, entry_ts, entry_reason = _try_entry(
+        sheet, entry_bar, prior_bars, cfg, qty_hint=qty_hint
+    )
     if entry_price is None or entry_ts is None:
         return SheetBacktestResult(
             sheet_id=sheet.sheet_id,
@@ -228,7 +299,9 @@ def simulate_sheet(
                 sell_qty = max(1, int(qty * decision.portion))
                 sell_qty = min(sell_qty, remaining_qty)
 
-            fill_price = _exit_fill_price(t.price, cfg)
+            fill_price = _exit_fill_price(
+                t.price, cfg, qty=sell_qty, bar_volume=bar.volume
+            )
             fee = fill_price * sell_qty * cfg.sell_fee_pct / 100.0
             trades.append(
                 Trade(
@@ -257,7 +330,9 @@ def simulate_sheet(
     if remaining_qty > 0:
         last_bar = bars[-1]
         ts = datetime.combine(last_bar.price_date, _CLOSE_TIME)
-        fill_price = _exit_fill_price(last_bar.close, cfg)
+        fill_price = _exit_fill_price(
+            last_bar.close, cfg, qty=remaining_qty, bar_volume=last_bar.volume
+        )
         fee = fill_price * remaining_qty * cfg.sell_fee_pct / 100.0
         trades.append(
             Trade(

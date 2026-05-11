@@ -56,6 +56,18 @@ reasoning은 500자 이내. 결론→근거 순서. 감정어 배제, 사실과 
 """
 
 
+MACRO_PROMPT_VERSION = "v0.3"
+"""Macro Gate 프롬프트 버전.
+
+prompt 텍스트 또는 위 SYSTEM_PROMPT 의 의미론적 변경 시 bump. macro_runs.prompt_version
+로 저장되어 모델 회귀 분석 시 동일 prompt 버전 끼리 비교 가능.
+
+- v0.1 (2026-04-16): 초안
+- v0.2 (2026-04-16): open+0.0 모순 명시, 이산화 가이드 보강
+- v0.3 (2026-05-10): open 2단계 (0.75/1.0) 로 축소
+"""
+
+
 def build_user_prompt(ctx: MacroContext) -> str:
     """User prompt 조립."""
     snap = ctx.market_snapshot
@@ -72,6 +84,33 @@ def build_user_prompt(ctx: MacroContext) -> str:
         "\n".join(f"    - {s.sector}: {s.change_pct:+.2%}" for s in snap.major_sector_drops)
         or "    (섹터 스냅샷 없음)"
     )
+
+    # 같은 호출 내 재시도 컨텍스트 — Scout 와 동일 패턴.
+    retry_section = ""
+    if ctx.previous_attempts:
+        attempts_str = "\n\n".join(
+            (
+                f"### 시도 #{a.attempt_no} — 실패 사유: {a.error}\n"
+                f"세부:\n```\n{a.details}\n```"
+            )
+            for a in ctx.previous_attempts
+        )
+        retry_section = f"""
+## ⚠️ 직전 시도 실패 — 같은 실수 반복 금지
+이전 시도에서 출력 구조화 / 검증이 실패했습니다. 아래 정보를 반드시 확인하고
+같은 패턴을 피하십시오 (예: top_risks 6개 → 5개로, reasoning > 500자 → 짧게,
+필수 필드 누락).
+
+{attempts_str}
+
+체크리스트:
+- top_risks 는 최대 5개. 6개 이상이면 가장 약한 것 제거.
+- reasoning 은 500자 이내. 결론→근거 순서.
+- gate 는 "open" 또는 "closed" 만. 다른 값 금지.
+- size_multiplier 는 0.0 ~ 1.0 사이.
+- gate="open" 과 size_multiplier=0.0 동시 불가 (모순).
+
+"""
 
     return f"""## 분석 기준 시각
 {ctx.as_of.isoformat()}
@@ -117,7 +156,7 @@ Digest ID: {ctx.wsj_digest_id}
 
 ## 최근 Macro Gate 이력
 {recent_str}
-
+{retry_section}
 ---
 
 다음 JSON 형식으로만 응답하십시오. news_digest_ref는 "{ctx.wsj_digest_id}" 사용:

@@ -151,6 +151,7 @@ async def persist_macro_run(
     macro_step_result: Any,
     news_digest_ref: str | None = None,
     prompt_chars: int | None = None,
+    prompt_version: str | None = None,
     shadow_result: dict[str, Any] | None = None,
     redis_client: Any = None,
 ) -> None:
@@ -167,13 +168,15 @@ async def persist_macro_run(
             redis_client, meta, prompt_chars, out_chars, cost, shadow_result, generated_at
         )
         return
+    # Prompt 버전 우선순위: caller 명시 > role metadata > default
+    resolved_prompt_version = prompt_version or meta.get("prompt_version") or "v1"
     step = CouncilStepOutput(
         name="macro_gate",
         output={},
         model_used=model_name,
         cost_usd=cost,
         latency_ms=_role_duration_ms(macro_step_result),
-        prompt_version=meta.get("prompt_version") or "v1",
+        prompt_version=resolved_prompt_version,
     )
     record = CouncilRunRecord(
         macro_run_id=macro_run_id,
@@ -273,6 +276,7 @@ async def persist_scout_run(
     scout_step_result: Any,
     candidates_count: int | None = None,
     prompt_chars: int | None = None,
+    prompt_version: str | None = None,
     context_snapshot: dict[str, Any] | None = None,
     shadow_result: dict[str, Any] | None = None,
     redis_client: Any = None,
@@ -334,6 +338,7 @@ async def persist_scout_run(
             context_snapshot_json = EXCLUDED.context_snapshot_json
         """
     )
+    resolved_prompt_version = prompt_version or meta.get("prompt_version") or "v1"
     params = {
         "id": scout_run_id,
         "at": generated_at,
@@ -342,7 +347,7 @@ async def persist_scout_run(
         "hyp": scout_out.hypothesis,
         "cnt": candidates_count,
         "model": model_name,
-        "pv": meta.get("prompt_version") or "v1",
+        "pv": resolved_prompt_version,
         "cost": cost,
         "meta": json.dumps(metadata_json, ensure_ascii=False, default=str),
         "ctx": json.dumps(context_snapshot or {}, ensure_ascii=False, default=str),

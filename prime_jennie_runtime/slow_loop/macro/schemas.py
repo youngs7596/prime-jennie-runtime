@@ -118,6 +118,19 @@ class RecentMacroRun(BaseModel):
     top_risks_summary: str = ""
 
 
+class MacroAttemptHint(BaseModel):
+    """동일 macro 호출 내 직전 시도의 실패 정보 — 재시도 시 LLM 에 주입.
+
+    Scout 의 ``CodeAttemptHint`` 와 동일 패턴. LLM 출력 구조화 파싱 실패 / 검증
+    위반 (top_risks 6개, reasoning overflow 등) 을 다음 프롬프트에 보여줘서
+    같은 실수 반복을 막는다.
+    """
+
+    attempt_no: Annotated[int, Field(ge=1)]
+    error: str  # "parse_error" | "validation_error" 등
+    details: str  # 에러 traceback / 메시지 (truncate ok)
+
+
 # =====================================================================
 # Macro Context (LLM 호출 전 조립)
 # =====================================================================
@@ -138,6 +151,8 @@ class MacroContext(BaseModel):
     kor_macro_news_formatted: str = ""
 
     recent_runs: list[RecentMacroRun] = Field(default_factory=list)
+    # 같은 호출 내 재시도 hint — Scout 의 previous_attempts 와 동일 패턴.
+    previous_attempts: list[MacroAttemptHint] = Field(default_factory=list)
 
 
 # =====================================================================

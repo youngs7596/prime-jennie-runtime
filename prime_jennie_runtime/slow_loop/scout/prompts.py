@@ -8,6 +8,17 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
+SCOUT_PROMPT_VERSION = "v0.3"
+"""Scout 프롬프트 버전.
+
+prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
+scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt 버전 끼리 비교.
+
+- v0.1 (2026-04-16): 초안
+- v0.2 (2026-04-25): Qwen3 메타데이터 기반 news_events 재설계
+- v0.3 (2026-05-10): exit_hint 가이드 + consensus_data 안내 추가
+"""
+
 ALLOWED_IMPORTS = (
     "pandas",
     "numpy",

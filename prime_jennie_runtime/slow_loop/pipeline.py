@@ -12,10 +12,22 @@ Phase 0 design §4. 구조:
 
 StaticPipeline이 LLM 두 번만 호출한다 (Scout, Macro). 나머지는 파이프라인 밖
 결정론 후처리. minyoung-mah에 없는 조건부 분기/retry를 local workaround로.
+
+DLQ 정책 (2026-05-11):
+- `publisher.publish` 의 stream 발행 실패는 publisher 내부에서 raw sheet JSON 을
+  DLQ 로 송부 후 재던짐 — pipeline 은 `publisher_error` 거부 사유만 남긴다.
+- pipeline 레벨에서 추가로 DLQ 송부하는 경우:
+    1. Scout hallucination_fail — universe 밖 ticker 비율 ≥ 50% 이면 raw candidate
+       payload 전수를 DLQ 로 (이후 모델 회귀 분석용).
+    2. engine.build_sheet 예외 — sheet 가 만들어지지 못한 경우 raw candidate
+       payload + error 메시지를 DLQ 로 (시트 schema 변경 등에서 잡힘).
+  publisher 의 publish 실패는 이미 raw sheet JSON 이 DLQ 로 가므로 중복 송부하지
+  않는다 (위 두 경로와 사유 분리: dlq_reason 메타데이터를 raw payload 안에 포함).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -80,6 +92,42 @@ class SlowLoopResult:
 # =====================================================================
 # Role retry 헬퍼 (minyoung-mah 밖의 local workaround)
 # =====================================================================
+
+
+async def _dlq_send(
+    publisher: PositionSheetPublisher,
+    *,
+    reason: str,
+    payload: Any,
+    error: str,
+    observer: Observer | None = None,
+) -> None:
+    """Pipeline 단계 실패 시 DLQ 송부 헬퍼.
+
+    publisher 내부 DLQ 채널을 그대로 재사용. `dlq_reason` 메타데이터를 payload
+    JSON 에 포함시켜 publisher 자체 stream 실패와 구분 가능. DLQ 송부 자체가
+    실패하면 swallow (로깅) — pipeline 의 후속 정상 처리를 막지 않는다.
+    """
+    try:
+        raw = {
+            "dlq_reason": reason,
+            "payload": payload,
+        }
+        await publisher.send_raw_to_dlq(
+            raw_payload=json.dumps(raw, ensure_ascii=False, default=str),
+            error=error,
+        )
+        if observer is not None:
+            await observer.emit(
+                pj_event(
+                    "pj.slow_loop.dlq_sent",
+                    role="slow_loop",
+                    ok=True,
+                    reason=reason,
+                )
+            )
+    except Exception:
+        logger.exception("dlq_send failed reason=%s", reason)
 
 
 async def _run_pipeline_with_retry(
@@ -655,6 +703,22 @@ async def run_slow_loop(
                 hallucinated=validation.hallucinated_tickers,
             )
         )
+        # DLQ — universe 밖 ticker 비율 ≥ 50% 이면 raw candidates 전수를
+        # DLQ 로 송부해 모델 회귀 분석용으로 보존 (시트는 발행되지 못함).
+        await _dlq_send(
+            comp.publisher,
+            reason="scout_hallucination_fail",
+            payload={
+                "scout_run_id": scout_run_id,
+                "hallucinated_tickers": list(validation.hallucinated_tickers),
+                "raw_candidates": [c.model_dump(mode="json") for c in raw_candidates],
+            },
+            error=(
+                f"hallucinated ratio >= 50%: "
+                f"{len(validation.hallucinated_tickers)}/{len(raw_candidates)}"
+            ),
+            observer=observer,
+        )
         return SlowLoopResult(
             macro_post=post,
             scout_output=scout_out,
@@ -707,7 +771,7 @@ async def run_slow_loop(
     for cand in validation.candidates:
         try:
             sheet, reject_reason = await comp.engine.build_sheet_with_reason(cand, inputs)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — engine 거부는 모든 예외 흡수 후 DLQ.
             logger.exception("engine.build_sheet raised for %s", cand.ticker)
             rejected.append(cand.ticker)
             await update_candidate_promotion(
@@ -715,6 +779,18 @@ async def run_slow_loop(
                 scout_run_id=scout_run_id,
                 ticker=cand.ticker,
                 rejection_reason="engine_error",
+            )
+            # DLQ — sheet 가 만들어지지 못했으니 publisher 가 못 잡는다.
+            # raw candidate payload + error 컨텍스트 송부.
+            await _dlq_send(
+                comp.publisher,
+                reason="engine_build_sheet_error",
+                payload={
+                    "scout_run_id": scout_run_id,
+                    "candidate": cand.model_dump(mode="json"),
+                },
+                error=f"{type(exc).__name__}: {exc}",
+                observer=observer,
             )
             await observer.emit(
                 pj_event(
@@ -746,7 +822,7 @@ async def run_slow_loop(
 
         try:
             await comp.publisher.publish(sheet)
-        except Exception:
+        except Exception as pub_exc:  # noqa: BLE001
             logger.exception("publisher.publish failed for %s", sheet.sheet_id)
             rejected.append(cand.ticker)
             await update_candidate_promotion(
@@ -754,6 +830,19 @@ async def run_slow_loop(
                 scout_run_id=scout_run_id,
                 ticker=cand.ticker,
                 rejection_reason="publisher_error",
+            )
+            # publisher 가 stream 발행 단계에서 실패했을 때만 raw sheet 를 DLQ 로
+            # 보낸다 (publisher._send_to_dlq 내부 호출). 그러나 _persist_sheet (DB
+            # upsert) 단계의 실패는 DLQ 미송부 — pipeline 에서 보강.
+            await _dlq_send(
+                comp.publisher,
+                reason="publisher_error",
+                payload={
+                    "scout_run_id": scout_run_id,
+                    "sheet": sheet.model_dump(mode="json"),
+                },
+                error=f"{type(pub_exc).__name__}: {pub_exc}",
+                observer=observer,
             )
             continue
 

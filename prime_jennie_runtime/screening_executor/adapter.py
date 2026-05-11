@@ -1,16 +1,19 @@
 """ScreeningToolAdapter — 호스트 측 어댑터 (SCOUT §6.5).
 
-Scout가 생성한 Python 코드를 격리 컨테이너 (또는 단순 subprocess)에서 실행하고
-list[ScreeningCandidate]를 반환. ScreeningToolAdapterStub과 시그니처 호환:
+Scout가 생성한 Python 코드를 격리된 subprocess(같은 파이썬 인터프리터)에서
+실행하고 list[ScreeningCandidate]를 반환. ScreeningToolAdapterStub과 시그니처 호환:
 
     async def invoke(code: str, context: dict) -> list[ScreeningCandidate]
 
-두 가지 backend:
-- "docker": `docker run --rm -i --network=none ...` 격리 컨테이너 spawn (운영)
-- "subprocess": 같은 파이썬 인터프리터를 별도 프로세스로 실행 (dev/CI, 컨테이너 미가용)
+backend (2026-05-11 정리):
+- 과거 ``docker`` backend 가 선언만 있었고 실제로는 subprocess 만 호출했다
+  (compose service `screening-executor` 도 `build-only` 프로파일).
+- Phase 2.10 #11 정리에서 docker 분기 제거 → ``subprocess`` 단일 백엔드.
+  운영 격리는 slow-loop 컨테이너의 host network 격리 + executor.py AST
+  화이트리스트로 확보. 향후 진짜 컨테이너 격리가 필요해지면 다시 도입.
 
-ToolAdapter 프로토콜(call/arg_schema)은 Phase 1에서 미사용. slow_loop.pipeline이
-직접 invoke()를 호출하므로 그 시그니처에 맞춘다.
+ToolAdapter (call/arg_schema) 프로토콜 conformance는 Phase 1 에서 미사용.
+slow_loop.pipeline 이 직접 invoke()를 호출하므로 그 시그니처에 맞춘다.
 """
 
 from __future__ import annotations
@@ -18,10 +21,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import sys
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any
 
 from prime_jennie_runtime.slow_loop.scout.schemas import ScreeningCandidate
 
@@ -30,27 +32,18 @@ from .schemas import ScreeningResult
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 300.0  # SCOUT §4.2 #6
-DEFAULT_IMAGE = "ghcr.io/youngs7596/prime-jennie-runtime/screening-executor:latest"
 EXECUTOR_MODULE = "prime_jennie_runtime.screening_executor.executor"
-
-# 호스트 절대경로로 seccomp profile 을 주입하면 docker run 시 --security-opt=seccomp 추가.
-# slow-loop 컨테이너가 docker-in-docker 구조로 호스트 데몬에 명령하므로 파일 경로는
-# **호스트 기준**이어야 한다 (slow-loop 컨테이너 내부 경로 ❌).
-SECCOMP_ENV_KEY = "SCREENING_SECCOMP_PROFILE"
 
 
 @dataclass
 class ScreeningToolAdapter:
-    """Scout 코드를 격리 프로세스에서 실행하는 어댑터.
+    """Scout 코드를 같은 인터프리터의 별도 프로세스에서 실행하는 어댑터.
 
-    Phase 1: docker / subprocess 두 backend. 둘 다 stdin으로 JSON payload를 주고
-    stdout 마지막 줄에서 ScreeningResult JSON을 파싱한다.
+    stdin 으로 JSON payload 를 주고 stdout 마지막 줄에서 ``ScreeningResult``
+    JSON 을 파싱한다.
     """
 
-    backend: Literal["docker", "subprocess"] = "subprocess"
     timeout_s: float = DEFAULT_TIMEOUT_S
-    image: str = DEFAULT_IMAGE
-    docker_extra_args: list[str] = field(default_factory=list)
 
     async def invoke(
         self,
@@ -111,28 +104,6 @@ class ScreeningToolAdapter:
     # ----- internals -----
 
     def _build_argv(self) -> list[str]:
-        if self.backend == "docker":
-            argv: list[str] = [
-                "docker",
-                "run",
-                "--rm",
-                "-i",
-                "--network=none",
-                "--read-only",
-                "--memory=4g",
-                "--cpus=2",
-                "--security-opt=no-new-privileges:true",
-                "--cap-drop=ALL",
-                "--user=1000:1000",
-                "--tmpfs=/tmp:size=256m",
-            ]
-            seccomp_profile = os.environ.get(SECCOMP_ENV_KEY, "").strip()
-            if seccomp_profile:
-                argv.append(f"--security-opt=seccomp={seccomp_profile}")
-            argv.extend(self.docker_extra_args)
-            argv.append(self.image)
-            return argv
-        # subprocess: same interpreter, executor module
         return [sys.executable, "-m", EXECUTOR_MODULE]
 
     def _parse_stdout(self, stdout: bytes) -> ScreeningResult:

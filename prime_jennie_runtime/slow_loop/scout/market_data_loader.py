@@ -1,6 +1,6 @@
 """Scout market_data loader — daily_prices × universe × lookback → list[dict].
 
-Screening Executor (subprocess/docker backend) 은 stdin JSON payload 로 데이터를
+Screening Executor (subprocess backend) 은 stdin JSON payload 로 데이터를
 받기 때문에 DataFrame 자체를 넘길 수 없다. Host 에서 dict records 로 직렬화 → executor
 `_stdio_main` 에서 pandas.DataFrame 으로 복원한다.
 

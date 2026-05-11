@@ -25,12 +25,13 @@ math, statistics, datetime
 
 ToolAdapter (call/arg_schema) 프로토콜 conformance는 Phase 1 미충족 — slow_loop pipeline이 Orchestrator 경유 호출이 아니라 직접 invoke하므로 불필요. Phase 2에서 Orchestrator-driven scout 흐름이 생기면 그때 conformance 부여.
 
-## 백엔드
+## 백엔드 (2026-05-11 정리)
 
-- `backend="subprocess"` (기본): 같은 Python 인터프리터로 executor 모듈을 별도 프로세스로 실행. dev/CI 격리 + 실제 timeout 동작 검증용.
-- `backend="docker"`: `docker run --rm -i --network=none --read-only --memory=4g --cpus=2 --cap-drop=ALL --security-opt=no-new-privileges:true ...`로 ephemeral 컨테이너 spawn. 운영용.
+`subprocess` 단일 백엔드. 같은 Python 인터프리터로 `prime_jennie_runtime.screening_executor.executor` 모듈을 별도 프로세스로 실행 → stdin JSON payload, stdout 마지막 줄에서 `ScreeningResult` 파싱.
 
-이미지는 `infra/docker/Dockerfile.screening`이 정의. `docker compose --profile build-only build screening-executor`로 빌드.
+과거에는 `backend="docker"` 분기가 있었지만 실제로는 docker spawn 가능 환경이 없어서 호출되지 않았고, slow-loop 컨테이너 + executor AST 화이트리스트로 격리가 충분하다고 판단해 제거. `SCREENING_BACKEND` env 도 unused — 컴포즈에서 빼도 무방.
+
+이미지 `infra/docker/Dockerfile.screening` / `screening-executor` compose 서비스는 미래 격리 강화를 위해 `build-only` 프로파일로 유지 (현재 미사용).
 
 ## 필수 테스트
 

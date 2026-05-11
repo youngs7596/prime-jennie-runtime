@@ -3,7 +3,7 @@
 stub → real 드롭인 교체를 실제 파이프라인 전 구간에서 검증.
 
 - News: ``InMemoryEventRepo`` + ``NewsPipelineScoutFeeder`` 로 ticker별 평균 score 산출
-- Screening: ``ScreeningToolAdapter(backend="subprocess")`` 로 Scout 코드가 자식 프로세스에서
+- Screening: ``ScreeningToolAdapter()`` 로 Scout 코드가 자식 프로세스에서
   실제로 ``exec`` 되고 list[ScreeningCandidate] 를 돌려주는지 확인
 
 LLM 응답(Scout/Macro structured output)만 StubChatModel 로 고정. 그 외는 모두 실 구현.
@@ -228,7 +228,7 @@ async def test_real_feeder_and_subprocess_adapter_publish_sheets(fake_redis):
     # 207940, 005380 → 기사 0건 (feeder가 빈 entry 로 채움, 통과 X)
 
     observer = CollectingObserver()
-    adapter = ScreeningToolAdapter(backend="subprocess", timeout_s=30.0)
+    adapter = ScreeningToolAdapter(timeout_s=30.0)
     assert isinstance(adapter, ScreeningInvoker)  # Protocol 준수
 
     comp = _make_real_components(
@@ -274,7 +274,7 @@ async def test_real_feeder_empty_repo_subprocess_still_runs(fake_redis):
     핵심은 real adapter가 JSON 직렬화 실패 없이 정상 spawn/return 한다는 점."""
     observer = CollectingObserver()
     repo = InMemoryEventRepo()  # 비어있음
-    adapter = ScreeningToolAdapter(backend="subprocess", timeout_s=30.0)
+    adapter = ScreeningToolAdapter(timeout_s=30.0)
 
     comp = _make_real_components(
         fake_redis,
@@ -319,7 +319,7 @@ async def test_real_adapter_handles_json_unsafe_context_via_pipeline(fake_redis)
     )
 
     observer = CollectingObserver()
-    adapter = ScreeningToolAdapter(backend="subprocess", timeout_s=30.0)
+    adapter = ScreeningToolAdapter(timeout_s=30.0)
 
     comp = _make_real_components(
         fake_redis,

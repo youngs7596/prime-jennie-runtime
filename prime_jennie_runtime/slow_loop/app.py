@@ -291,7 +291,6 @@ def _build_slow_loop_components(
         scout_builder=scout_builder,
         macro_builder=macro_builder,
         screening=ScreeningToolAdapter(
-            backend=os.environ.get("SCREENING_BACKEND", "subprocess"),
             timeout_s=float(os.environ.get("SCREENING_TIMEOUT_S", "300")),
         ),
         engine=engine,

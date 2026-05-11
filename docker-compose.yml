@@ -299,6 +299,25 @@ services:
     restart: unless-stopped
     profiles: ["observe", "full"]
 
+  # Prometheus — monitor `/metrics` scrape + alert rules 평가.
+  # alertmanager 는 아직 미운영 (Phase 2.10 단순화). 알림은 monitor heartbeat
+  # 경로 (poller.py → notifier) 가 Telegram 직접 전송.
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    profiles: ["observe", "full"]
+
   promtail:
     image: grafana/promtail:3.3.2
     command: -config.file=/etc/promtail/promtail-config.yaml
@@ -474,6 +493,7 @@ services:
 volumes:
   grafana_data:
   loki_data:
+  prometheus_data:
 
 networks:
   default:

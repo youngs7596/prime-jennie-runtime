@@ -13,3 +13,11 @@ datasources:
     # uid 명시 — dashboards/*.json 의 datasource.uid 와 매칭. 미지정 시 grafana 가
     # 무작위 uid 를 만들어 provisioned dashboard 의 패널이 datasource 를 못 찾는다.
     uid: loki
+
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+    uid: prometheus

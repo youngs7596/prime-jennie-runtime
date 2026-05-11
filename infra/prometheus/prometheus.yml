@@ -1,0 +1,31 @@
+# Prometheus 설정 — `observe`/`full` 프로파일에서 띄운다.
+#
+# 핵심 scrape target: monitor 서비스의 `/metrics` (LivePositionsPoller 의 마지막
+# poll ts / 포지션 개수). cloudflared --metrics 2000 도 함께 잡는다.
+#
+# alert rules 는 `rules/alert.rules.yml` 에 있고, alertmanager 는 아직 미운영
+# (Phase 2.10 단순화) — rule firing 시 Grafana Loki 패널의 `ALERTS{...}` 쿼리로
+# 시각화하거나 Telegram 알림은 monitor heartbeat 경로(#3)에서 처리한다.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: monitor
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["monitor:8091"]
+        labels: { service: monitor }
+
+  - job_name: cloudflared
+    static_configs:
+      - targets: ["cloudflared:2000"]
+        labels: { service: cloudflared }

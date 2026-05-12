@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
-SCOUT_PROMPT_VERSION = "v0.3"
+SCOUT_PROMPT_VERSION = "v0.4"
 """Scout 프롬프트 버전.
 
 prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
@@ -17,6 +17,9 @@ scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt �
 - v0.1 (2026-04-16): 초안
 - v0.2 (2026-04-25): Qwen3 메타데이터 기반 news_events 재설계
 - v0.3 (2026-05-10): exit_hint 가이드 + consensus_data 안내 추가
+- v0.4 (2026-05-12): exit_hint 형식을 position_sheet schema 와 정렬
+                     (trailing_stop→trailing_tp, time_stop 필드 정정,
+                     fixed_sl+time_stop 필수 명시)
 """
 
 ALLOWED_IMPORTS = (
@@ -173,22 +176,27 @@ def screen(market_data, context):
 
 exit_hint 사용 가이드 (선택 — 확신 없으면 생략):
 - **default**: exit_hint 를 생략하면 Strategy Engine 이 strategy_tag 별 표준 정책
-  (fixed_sl/trailing_stop/time_stop 등) 을 적용 — 안전망이 이미 있다.
+  (fixed_sl/trailing_tp/time_stop 등) 을 적용 — 안전망이 이미 있다.
 - exit_hint 를 추가하면 정책 default 를 **종목 단위로 override** 한다. 가설에
   명확한 매수 사유가 있고 (예: 실적 발표 직후 5일 PED), 통상 default 보다
   좁거나/넓은 손절·익절이 필요한 경우만 작성하라.
 - 무리하지 마라 — 가설이 평이하면 exit_hint 를 None 으로 두는 게 정답.
 - 형식: `"exit_hint": {{"rules_hint": [{{"type": <rule_type>, ...}}]}}` 또는 생략.
-- 권장 rule_type (Strategy Engine 인식):
-  - `{{"type": "fixed_sl", "pct": 0.05}}`        — 진입가 -5% 손절 (양수 percent)
-  - `{{"type": "fixed_tp", "pct": 0.10}}`        — 진입가 +10% 익절
-  - `{{"type": "trailing_stop", "pct": 0.03}}`   — 최고점 대비 -3% 트레일링
-  - `{{"type": "time_stop", "days": 5}}`         — N 거래일 보유 후 청산
-- strategy_tag 별 자연스러운 조합 예 (참고용):
-  - EARNINGS_DRIFT: time_stop 5~10일 + fixed_sl 0.05 (실적 후 드리프트 윈도우 한정)
-  - GAP_UP_REBOUND: trailing_stop 0.03 + time_stop 3일 (단기 모멘텀)
-  - SECTOR_MOMENTUM: trailing_stop 0.05 (중기 추세 보호)
-  - MEAN_REVERT_RSI: fixed_tp 0.08 + fixed_sl 0.04 (좁은 범위 mean-revert)
+- **필수**: exit_hint 를 작성한다면 rules_hint 에 `fixed_sl` 과 `time_stop`
+  **둘 다** 반드시 포함해야 한다 (PositionSheet schema 강제 — 누락 시 시트 거절).
+- 권장 rule_type (Strategy Engine 인식 — position_sheet/schema.py 와 정확히 일치):
+  - `{{"type": "fixed_sl", "pct": 0.05}}`                          — 진입가 -5% 손절 (양수)
+  - `{{"type": "fixed_tp", "pct": 0.10}}`                          — 진입가 +10% 익절
+  - `{{"type": "trailing_tp", "activate_pct": 0.05, "drop_pct": 0.03}}`  — 최고점 대비 트레일링 (activate +5% 후 drop -3%)
+  - `{{"type": "time_stop", "mode": "hold_days", "value": 5}}`     — N 거래일 보유 후 청산 ("eod" 모드는 value 생략)
+  - `{{"type": "overextension_exit", "rsi_threshold": 80}}`        — 1분봉 RSI 과열 청산
+  - `{{"type": "profit_floor", "activate_pct": 0.15, "floor_pct": 0.10}}` — 고점 도달 후 바닥 깨지면 청산
+- strategy_tag 별 자연스러운 조합 예 (참고용 — 모두 fixed_sl+time_stop 필수):
+  - EARNINGS_DRIFT: time_stop hold_days 5~10 + fixed_sl 0.05 (실적 후 드리프트 윈도우)
+  - GAP_UP_REBOUND: trailing_tp activate 0.05 drop 0.03 + fixed_sl 0.05 + time_stop hold_days 3 (단기 모멘텀)
+  - SECTOR_MOMENTUM: trailing_tp activate 0.06 drop 0.03 + fixed_sl 0.04 + time_stop hold_days 10 (중기 추세)
+  - MEAN_REVERT_RSI: fixed_tp 0.04 + fixed_sl 0.03 + time_stop hold_days 3 (좁은 범위 mean-revert)
+- **금지**: schema 에 없는 rule type (예: `trailing_stop`, `stop_loss`) — 즉시 거절됨.
 
 안티패턴 (절대 금지):
 {chr(10).join(f"  - {p}" for p in FORBIDDEN_PATTERNS)}

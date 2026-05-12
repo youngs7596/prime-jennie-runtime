@@ -76,6 +76,75 @@ def _sort_exit_rules(rules: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rules, key=lambda r: _EXIT_RULE_ORDER.get(r["type"], 99))
 
 
+def _normalize_scout_exit_hint(
+    raw_rules: list[dict[str, Any]],
+    default_rules: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Scout LLM exit_hint 정규화 + 필수 룰 보충.
+
+    LLM 이 schema 와 다른 별칭/형식으로 룰을 만들어내도 흡수하기 위한 방어 레이어:
+    - ``trailing_stop`` → ``trailing_tp`` 별칭 변환 (pct=drop_pct 가정, activate_pct
+      기본 0.05). v0.3 prompt 결함으로 LLM 이 학습한 옛 형식.
+    - ``time_stop`` 의 ``days`` → ``mode=hold_days, value=N`` 정정.
+    - ``stop_loss`` → ``fixed_sl`` 별칭.
+    - ``take_profit`` → ``fixed_tp`` 별칭.
+    - 결과에 ``fixed_sl`` / ``time_stop`` 중 하나라도 없으면 default_rules 에서
+      해당 type 을 가져와 보충 (PositionSheet model_validator 강제 요구).
+    - 알 수 없는 type 은 제외 (silently drop — schema 가 어차피 거절하므로 사전 차단).
+
+    근본 fix 는 prompts.py 의 v0.4 가이드. 본 함수는 LLM 변동성 흡수용.
+    """
+    known_types = set(_EXIT_RULE_ORDER.keys())
+    alias_map: dict[str, str] = {
+        "trailing_stop": "trailing_tp",
+        "stop_loss": "fixed_sl",
+        "take_profit": "fixed_tp",
+    }
+
+    normalized: list[dict[str, Any]] = []
+    for rule in raw_rules:
+        if not isinstance(rule, dict) or "type" not in rule:
+            continue
+        rule = dict(rule)  # 입력 dict 비파괴
+        rtype = rule["type"]
+
+        if rtype in alias_map:
+            new_type = alias_map[rtype]
+            if new_type == "trailing_tp":
+                # 옛 형식 {pct: X} → {activate_pct: 0.05 default, drop_pct: X}
+                pct = rule.pop("pct", None)
+                rule.setdefault("activate_pct", 0.05)
+                if pct is not None:
+                    rule["drop_pct"] = pct
+                rule.setdefault("drop_pct", 0.03)
+            rule["type"] = new_type
+            rtype = new_type
+
+        if rtype == "time_stop":
+            # 옛 형식 {days: N} → {mode: hold_days, value: N}
+            days = rule.pop("days", None)
+            if "mode" not in rule:
+                rule["mode"] = "hold_days" if days is not None else "eod"
+            if days is not None and "value" not in rule:
+                rule["value"] = days
+
+        if rtype not in known_types:
+            continue  # schema 가 거절할 type 사전 제외
+        normalized.append(rule)
+
+    # 필수 룰 보충: fixed_sl, time_stop 중 빠진 게 있으면 default 에서 가져옴
+    have_types = {r["type"] for r in normalized}
+    for required in ("fixed_sl", "time_stop"):
+        if required in have_types:
+            continue
+        for d in default_rules:
+            if d.get("type") == required:
+                normalized.append(dict(d))
+                break
+
+    return normalized
+
+
 # =====================================================================
 # 중복 체크 Protocol (Track A migrations의 position_sheets 테이블 조회)
 # =====================================================================
@@ -234,9 +303,12 @@ class StrategyEngine:
             conditions=scout_conditions,  # type: ignore[arg-type]
         )
 
-        # 6. exit 조립 — Scout exit_hint 있으면 그것, 없으면 policy 기본값
+        # 6. exit 조립 — Scout exit_hint 있으면 정규화 후 사용, 없으면 policy 기본값
         if candidate.exit_hint is not None:
-            raw_rules = list(candidate.exit_hint.rules_hint)
+            raw_rules = _normalize_scout_exit_hint(
+                list(candidate.exit_hint.rules_hint),
+                [dict(r) for r in entry.default_exit_rules],
+            )
         else:
             raw_rules = [dict(r) for r in entry.default_exit_rules]
         rules = _sort_exit_rules(raw_rules)

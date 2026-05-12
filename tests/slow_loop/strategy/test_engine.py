@@ -206,6 +206,71 @@ async def test_all_sheets_have_fixed_sl_and_time_stop():
         assert "time_stop" in rule_types
 
 
+@pytest.mark.asyncio
+async def test_scout_hint_legacy_trailing_stop_alias_absorbed():
+    """LLM 이 옛 형식 trailing_stop 으로 hint 줘도 trailing_tp 로 흡수.
+
+    5-12 사고 회귀 방지: prompts.py v0.3 가 trailing_stop 형식을 가르치며
+    수십~수백 candidate 의 sheet 생성을 ValidationError 로 막아 매수 0건 발생.
+    """
+    from prime_jennie_runtime.slow_loop.scout.schemas import ExitHint
+
+    legacy_rules = [
+        {"type": "trailing_stop", "pct": 0.03},
+        {"type": "time_stop", "days": 5},  # 옛 형식 days
+    ]
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = _candidate(tag="GAP_UP_REBOUND", exit_hint=ExitHint(rules_hint=legacy_rules))
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    rule_types = {r.type for r in sheet.exit.rules}
+    # 옛 형식이 정상 변환되어야
+    assert "trailing_tp" in rule_types
+    assert "trailing_stop" not in rule_types
+    # time_stop hold_days 5 로 변환
+    time_stop = next(r for r in sheet.exit.rules if r.type == "time_stop")
+    assert time_stop.mode == "hold_days"
+    assert time_stop.value == 5
+    # fixed_sl 누락이었으나 default 에서 보충
+    assert "fixed_sl" in rule_types
+
+
+@pytest.mark.asyncio
+async def test_scout_hint_missing_required_rules_filled_from_default():
+    """exit_hint 가 fixed_sl/time_stop 둘 다 빠뜨려도 default 에서 채워짐."""
+    from prime_jennie_runtime.slow_loop.scout.schemas import ExitHint
+
+    rules = [{"type": "fixed_tp", "pct": 0.08}]  # 익절만
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = _candidate(tag="MEAN_REVERT_RSI", exit_hint=ExitHint(rules_hint=rules))
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    rule_types = {r.type for r in sheet.exit.rules}
+    assert "fixed_tp" in rule_types
+    assert "fixed_sl" in rule_types
+    assert "time_stop" in rule_types
+
+
+@pytest.mark.asyncio
+async def test_scout_hint_unknown_rule_type_dropped():
+    """schema 에 없는 type 은 silently 제외 (default 의 안전망은 유지)."""
+    from prime_jennie_runtime.slow_loop.scout.schemas import ExitHint
+
+    rules = [
+        {"type": "moonshot_exit", "pct": 0.99},  # 가짜 type
+        {"type": "fixed_sl", "pct": 0.04},
+        {"type": "time_stop", "mode": "hold_days", "value": 3},
+    ]
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = _candidate(exit_hint=ExitHint(rules_hint=rules))
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    rule_types = {r.type for r in sheet.exit.rules}
+    assert "moonshot_exit" not in rule_types
+    assert "fixed_sl" in rule_types
+    assert "time_stop" in rule_types
+
+
 # =====================================================================
 # overextension_exit policy (v3.0.4)
 # =====================================================================

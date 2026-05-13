@@ -145,6 +145,28 @@ def _normalize_scout_exit_hint(
     return normalized
 
 
+def _normalize_scout_entry_hint(
+    trigger: str, price_hint: float | None, *, ticker: str = ""
+) -> tuple[str, float | None]:
+    """Scout LLM entry_hint 정규화 — limit + null/0 price 패턴을 market 으로 변환.
+
+    PositionSheet schema 는 ``trigger=="limit"`` 일 때 ``price > 0`` 강제 (schema.py:283).
+    그러나 LLM 이 limit 으로 가이드 후 price_hint 를 비워두는 케이스가 발생
+    (2026-05-13 MEAN_REVERT_RSI 2건 사고). 이때 sheet 거절되어 매수 손실.
+
+    정규화 정책: limit + (price_hint is None or <= 0) → market 으로 변환 + WARN 로깅.
+    가장 보수적 fallback (market 은 schema 도 항상 통과, fast_loop 가 안전하게 처리).
+
+    근본 fix 는 prompts.py 의 entry_hint 가이드 보강. 본 함수는 LLM 변동성 흡수용.
+    """
+    if trigger == "limit" and (price_hint is None or price_hint <= 0):
+        logger.warning(
+            "scout entry_hint limit+null price → market fallback (ticker=%s)", ticker or "?"
+        )
+        return "market", None
+    return trigger, price_hint
+
+
 # =====================================================================
 # 중복 체크 Protocol (Track A migrations의 position_sheets 테이블 조회)
 # =====================================================================
@@ -276,6 +298,12 @@ class StrategyEngine:
 
         # 5. entry 조립 — Scout entry_hint 반영. conditions_hint 가 비어있으면
         # 정책의 default_entry_conditions 로 보강 (호가 안전장치 등).
+        # entry trigger/price 정규화 — limit + null price 같은 LLM 결함 흡수.
+        entry_trigger, entry_price = _normalize_scout_entry_hint(
+            candidate.entry_hint.trigger,
+            candidate.entry_hint.price_hint,
+            ticker=candidate.ticker,
+        )
         entry_valid_until = _entry_valid_until(inputs.generated_at)
         scout_conditions = list(candidate.entry_hint.conditions_hint or [])
         if not scout_conditions and entry.default_entry_conditions:
@@ -285,20 +313,19 @@ class StrategyEngine:
         # breakout 확인. PRICE_ABOVE_BREAKOUT_MULT 는 정적 fallback (1.001 = +10bps).
         if (
             tag == "GAP_UP_REBOUND"
-            and candidate.entry_hint.price_hint is not None
-            and candidate.entry_hint.price_hint > 0
+            and entry_price is not None
+            and entry_price > 0
             and not any(c.get("type") == "price_above" for c in scout_conditions)
         ):
             scout_conditions.append(
                 {
                     "type": "price_above",
-                    "value": float(candidate.entry_hint.price_hint)
-                    * PRICE_ABOVE_BREAKOUT_MULT,
+                    "value": float(entry_price) * PRICE_ABOVE_BREAKOUT_MULT,
                 }
             )
         entry_section = EntrySection(
-            trigger=candidate.entry_hint.trigger,
-            price=candidate.entry_hint.price_hint,
+            trigger=entry_trigger,
+            price=entry_price,
             valid_until=entry_valid_until,
             conditions=scout_conditions,  # type: ignore[arg-type]
         )

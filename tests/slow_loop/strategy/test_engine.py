@@ -459,3 +459,100 @@ async def test_build_sheet_with_reason_duplicate_today():
     sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
     assert sheet is None
     assert reason == "duplicate_today"
+
+
+# =====================================================================
+# entry_hint 정규화 (5-13 MEAN_REVERT_RSI engine_error 회귀 차단)
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_scout_hint_limit_with_null_price_normalized_to_market():
+    """limit trigger + price_hint=None → market 으로 정규화 후 sheet 발행 성공.
+
+    5-13 MEAN_REVERT_RSI 의 2건 (000250, 352820) engine_error 시나리오 회귀 차단.
+    PositionSheet schema 가 limit+null 을 거절하던 케이스.
+    """
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="000250",
+        strategy_tag="MEAN_REVERT_RSI",
+        conviction=0.5,
+        entry_hint=EntryHint(trigger="limit", price_hint=None),
+        exit_hint=None,
+        factors={"mean_revert_score": 0.5},
+        notes="",
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    assert sheet.entry.trigger == "market"
+    assert sheet.entry.price is None
+
+
+@pytest.mark.asyncio
+async def test_scout_hint_limit_with_zero_price_normalized_to_market():
+    """limit + price_hint=0 (또는 음수) 도 동일하게 market 으로 fallback."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="352820",
+        strategy_tag="MEAN_REVERT_RSI",
+        conviction=0.5,
+        entry_hint=EntryHint(trigger="limit", price_hint=0.0),
+        exit_hint=None,
+        factors={"mean_revert_score": 0.3},
+        notes="",
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    assert sheet.entry.trigger == "market"
+
+
+@pytest.mark.asyncio
+async def test_scout_hint_limit_with_positive_price_unchanged():
+    """limit + 양수 price_hint 는 정규화 영향 없음 (정상 케이스 회귀 보호)."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet = await engine.build_sheet(_candidate(), _inputs())
+    assert sheet is not None
+    assert sheet.entry.trigger == "limit"
+    assert sheet.entry.price == 71200.0
+
+
+@pytest.mark.asyncio
+async def test_scout_hint_market_with_null_price_unchanged():
+    """market + price_hint=None — 정상, 정규화 영향 없음."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="005930",
+        strategy_tag="SECTOR_MOMENTUM",
+        conviction=0.7,
+        entry_hint=EntryHint(trigger="market", price_hint=None),
+        exit_hint=None,
+        factors={"momentum_5d": 0.034},
+        notes="",
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    assert sheet.entry.trigger == "market"
+
+
+@pytest.mark.asyncio
+async def test_gap_up_rebound_limit_with_null_price_no_auto_price_above():
+    """GAP_UP_REBOUND + limit + null price → market 으로 정규화되어 price_above
+    자동 부착이 적용되지 않음 (price 기준이 사라졌으므로). 의도 손실은 prompt
+    가이드 (v0.5) 로 미연에 차단.
+    """
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="000250",
+        strategy_tag="GAP_UP_REBOUND",
+        conviction=0.5,
+        entry_hint=EntryHint(trigger="limit", price_hint=None),
+        exit_hint=None,
+        factors={"momentum_5d": 0.034},
+        notes="",
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    assert sheet.entry.trigger == "market"
+    # price 기준 없으니 price_above 자동 부착 안 됨
+    assert not any(c.type == "price_above" for c in sheet.entry.conditions)

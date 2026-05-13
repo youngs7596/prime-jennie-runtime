@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
-SCOUT_PROMPT_VERSION = "v0.4"
+SCOUT_PROMPT_VERSION = "v0.5"
 """Scout 프롬프트 버전.
 
 prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
@@ -20,6 +20,8 @@ scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt �
 - v0.4 (2026-05-12): exit_hint 형식을 position_sheet schema 와 정렬
                      (trailing_stop→trailing_tp, time_stop 필드 정정,
                      fixed_sl+time_stop 필수 명시)
+- v0.5 (2026-05-13): entry_hint 가이드 추가 (limit 사용 시 price_hint 필수,
+                     모르면 market 사용). MEAN_REVERT_RSI 2건 engine_error 원인 차단
 """
 
 ALLOWED_IMPORTS = (
@@ -173,6 +175,13 @@ def screen(market_data, context):
              "entry_hint": {{"trigger": "market"}},
              "factors": {{...}}}} for t, score in ranked[:top_n]]
 ```
+
+entry_hint 사용 가이드 (필수 필드):
+- **default**: `"entry_hint": {{"trigger": "market"}}` — 즉시 시장가. 가장 안전.
+- `"limit"` 사용 시 **반드시** `price_hint` 를 양수로 채워라 — `{{"trigger": "limit", "price_hint": 71200}}`.
+  price_hint 모르거나 자신 없으면 `"market"` 사용. limit + null/0 price 는 schema 가 거절 (시트 발행 실패).
+- conditions_hint 는 선택. 비워두면 정책 default 와 strategy_tag 별 보강 (예: GAP_UP_REBOUND 는 price_above 자동 부착).
+- **금지**: `{{"trigger": "limit", "price_hint": null}}` 또는 `{{"trigger": "limit"}}` (price_hint 누락) — engine 이 시장가로 강제 변환하지만 의도 손실.
 
 exit_hint 사용 가이드 (선택 — 확신 없으면 생략):
 - **default**: exit_hint 를 생략하면 Strategy Engine 이 strategy_tag 별 표준 정책

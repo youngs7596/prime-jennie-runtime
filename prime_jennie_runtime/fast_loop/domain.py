@@ -45,6 +45,11 @@ class PositionState:
     # overextension — 1분봉 RSI 과열 청산 (1회만)
     overextension_triggered: bool = False
 
+    # 연속 exit 실패 카운터 — sell_rejected / sell_not_filled 가 누적되면
+    # exit_executor 가 sheet 자체를 abandon 한다. 외부 청산 등으로 KIS 잔고에
+    # 없는 stale state 가 매 tick 마다 무한 매도를 시도하는 사고를 차단.
+    exit_fail_count: int = 0
+
     def update_high(self, price: float) -> None:
         """새 고가 반영."""
         if price > self.high_watermark:

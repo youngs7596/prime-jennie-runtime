@@ -550,3 +550,73 @@ async def test_tick_loop_forced_liquidation_blocked_by_stop(fake_redis):
     assert kis.sell_calls == []
     # tracker 유지
     assert tracker.get(state.sheet_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_isolates_exit_executor_exception(fake_redis):
+    """exit_executor 가 503/CircuitBreakerError 같은 exception 을 raise 해도
+    tick_loop process_one 이 raise 없이 끝나야 한다 (5-13 KIS throttle 사고
+    학습 — task die → fast_loop 전체 shutdown 차단).
+    """
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=66000.0)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+    entry_exec = EntryExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(sl_pct=0.05)
+
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=70000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        high_watermark=70000.0,
+    )
+    await tracker.register(state)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    # exit_executor.execute 를 항상 예외 raise 하도록 교체
+    async def boom(*args, **kwargs):
+        raise RuntimeError("503 Service Unavailable")
+
+    exit_exec.execute = boom  # type: ignore[assignment]
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        entry_executor=entry_exec,
+        group="tg_exc",
+        consumer="tc_exc",
+    )
+    await loop.ensure_group()
+
+    await fake_redis.xadd(
+        "kis:prices",
+        {
+            "payload": json.dumps(
+                {
+                    "ticker": "005930",
+                    "price": 66000.0,
+                    "ts": "2026-04-16T09:30:00+09:00",
+                }
+            )
+        },
+    )
+    messages = await fake_redis.xreadgroup(
+        "tg_exc", "tc_exc", {"kis:prices": ">"}, count=1, block=100
+    )
+    # 핵심: 이 호출이 raise 없이 끝나야 함 (fast_loop 가 task die 안 함)
+    for _stream, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+    # tracker 유지 — exception 으로 close 못 함
+    assert tracker.get(state.sheet_id) is not None

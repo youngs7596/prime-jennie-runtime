@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from prime_jennie_runtime.kis_gateway.rate_limiter import AsyncRateLimiter
 
 
@@ -68,3 +70,47 @@ async def test_context_manager_usage():
     limiter = AsyncRateLimiter(rate=1, window_sec=1.0, clock=clock)
     async with limiter:
         pass
+
+
+async def test_token_bucket_blocks_burst_at_window_boundary(monkeypatch):
+    """Token bucket 으로 sliding-window 윈도우 경계 burst 사고 방지.
+
+    rate=5/sec 일 때 5건 burst 후 6번째는 200ms 대기. sliding-window 였다면
+    윈도우 경계에서 추가 5건 통과 가능했음 (5-13 KIS throttle 사고 원인 중 하나).
+    """
+    clock = FakeClock()
+    limiter = AsyncRateLimiter(rate=5, window_sec=1.0, clock=clock)
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+        clock.tick(delay)
+
+    import prime_jennie_runtime.kis_gateway.rate_limiter as rl
+
+    monkeypatch.setattr(rl.asyncio, "sleep", fake_sleep)
+
+    # 첫 5건 burst — 즉시 통과
+    for _ in range(5):
+        await limiter.acquire()
+    assert sleep_calls == []
+
+    # 6번째 — 토큰 충전 대기 (≈ 1/5 = 0.2초)
+    await limiter.acquire()
+    assert len(sleep_calls) >= 1
+    assert sleep_calls[0] == pytest.approx(0.2, abs=0.01)
+
+
+async def test_steady_state_average_rate():
+    """충분히 시간이 지나면 평균 rate/sec 유지 (token bucket capacity 한도 안에서)."""
+    clock = FakeClock()
+    limiter = AsyncRateLimiter(rate=5, window_sec=1.0, clock=clock)
+
+    # 처음 5건 burst
+    for _ in range(5):
+        await limiter.acquire()
+    # 1초 후 — capacity 만큼 다시 충전
+    clock.tick(1.0)
+    for _ in range(5):
+        await limiter.acquire()

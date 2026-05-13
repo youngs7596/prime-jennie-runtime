@@ -46,6 +46,7 @@ from prime_jennie_runtime.fast_loop.persistence import (
     PostgresStockNameResolver,
     PostgresTradeRecorder,
 )
+from prime_jennie_runtime.fast_loop.position_sync_check import check_state_kis_mismatch
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.risk_throttle import IntradayRiskThrottle
 from prime_jennie_runtime.fast_loop.risk_updater import run_risk_updater
@@ -214,6 +215,10 @@ async def run() -> None:
         system_state = SystemState(redis_client)
         recorder = PostgresTradeRecorder(pool)
         stock_resolver = PostgresStockNameResolver(pool)
+
+        # 부팅 시 KIS 실잔고 vs in-memory state mismatch 검사 — 외부 청산으로
+        # 인한 stale state 즉시 인지 (자동 정리는 하지 않음, 사용자 결정 보존).
+        await check_state_kis_mismatch(tracker, kis, notifier)
 
         control_consumer = ControlCommandConsumer(
             redis_client, consumer_name=f"control-fast-{cfg.env}", kis_client=kis

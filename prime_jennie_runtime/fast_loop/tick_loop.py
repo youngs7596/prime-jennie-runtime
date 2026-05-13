@@ -173,7 +173,12 @@ class TickLoop:
             if state is None:
                 continue
             decision = ExitDecision(should_close=True, reason="forced_liquidation", portion=1.0)
-            await self._exit_executor.execute(state, decision)
+            try:
+                await self._exit_executor.execute(state, decision)
+            except Exception:
+                logger.exception(
+                    "forced_liquidation exit raised: sheet=%s ticker=%s", sheet_id, tick.ticker
+                )
 
     async def _evaluate_exits(self, tick: TickData) -> None:
         sheet_ids = self._tracker.sheet_ids_for(tick.ticker)
@@ -190,9 +195,23 @@ class TickLoop:
             decision = evaluate_exit(sheet, state, tick)
             if decision is None:
                 # state 변경 가능 (high_watermark 등) 만 persist
-                await self._tracker.persist(sheet_id)
+                try:
+                    await self._tracker.persist(sheet_id)
+                except Exception:
+                    logger.exception("tracker.persist failed sheet=%s", sheet_id)
                 continue
-            await self._exit_executor.execute(state, decision)
+            # exit_executor 호출 — KIS gateway 503 / CircuitBreakerError 가
+            # tick_loop task 를 죽이지 않도록 격리 (5-13 사고 학습:
+            # 한 sheet 의 실패로 fast_loop 전체가 shutdown → restart 무한 루프).
+            try:
+                await self._exit_executor.execute(state, decision)
+            except Exception:
+                logger.exception(
+                    "exit_executor raised: sheet=%s ticker=%s reason=%s",
+                    sheet_id,
+                    tick.ticker,
+                    decision.reason,
+                )
 
     async def _evaluate_pending_entries(self, tick: TickData) -> None:
         pending_sheets = self._queue.snapshot_for_ticker(tick.ticker)
@@ -237,7 +256,15 @@ class TickLoop:
                 )
                 continue
 
-            outcome = await self._entry_executor.execute(sheet, quantity=qty)
+            try:
+                outcome = await self._entry_executor.execute(sheet, quantity=qty)
+            except Exception:
+                logger.exception(
+                    "entry_executor raised: sheet=%s ticker=%s",
+                    sheet.sheet_id,
+                    sheet.ticker,
+                )
+                continue
             if outcome.success:
                 logger.info(
                     "pending entry filled: sheet=%s ticker=%s qty=%d price=%.2f",

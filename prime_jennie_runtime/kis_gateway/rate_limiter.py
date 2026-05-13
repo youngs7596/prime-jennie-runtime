@@ -1,7 +1,13 @@
-"""Asyncio 기반 슬라이딩 윈도우 레이트 리미터.
+"""Asyncio token bucket 레이트 리미터.
 
-KIS 계정 기준 글로벌 레이트 리밋 (시세 19/sec, 매매 5/sec). slowapi 는
-FastAPI 종속성 있어 유닛 단위 사용이 까다로워 자체 구현.
+KIS 계정 글로벌 레이트 리밋 (시세 19/sec, 매매 5/sec) 강제. v2 sliding-window
+구현은 윈도우 경계에서 burst (예: 1초 끝에 5건 + 다음 1초 시작에 5건 = 200ms
+안에 10건) 가 가능해 KIS 측 초당 한도 (`EGW00201`) 를 트립하는 사고가
+2026-05-13 발생. Token bucket 으로 변경하여 capacity 만큼의 burst 만 허용
+(평균 rate/sec 유지).
+
+생성자 시그니처는 기존 sliding-window 와 호환 (rate, window_sec, clock).
+``capacity`` = ``rate`` (별도 인자 없음) — KIS 한도 그대로 burst 한도로 사용.
 """
 
 from __future__ import annotations
@@ -9,14 +15,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import deque
 from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
 
 class AsyncRateLimiter:
-    """고정 1초 윈도우에서 최대 ``rate`` 건만 통과시키는 async 리미터."""
+    """Token bucket 기반 async 리미터.
+
+    - ``capacity`` = ``rate`` (생성자 인자로 별도 노출 안 함)
+    - refill: ``rate / window_sec`` tokens/sec — 평균 rate 유지
+    - acquire: 토큰 1개 소비. 부족하면 1개가 채워질 때까지 sleep
+    """
 
     def __init__(
         self,
@@ -27,30 +37,39 @@ class AsyncRateLimiter:
     ):
         if rate <= 0:
             raise ValueError("rate must be positive")
+        if window_sec <= 0:
+            raise ValueError("window_sec must be positive")
         self._rate = rate
         self._window = window_sec
+        self._capacity = float(rate)
+        self._refill_per_sec = rate / window_sec
+        self._tokens = float(rate)
         self._clock = clock or time.monotonic
-        self._timestamps: deque[float] = deque()
+        self._last_refill = self._clock()
         self._lock = asyncio.Lock()
 
     @property
     def rate(self) -> int:
         return self._rate
 
+    def _refill(self) -> None:
+        now = self._clock()
+        elapsed = now - self._last_refill
+        if elapsed > 0:
+            self._tokens = min(self._capacity, self._tokens + elapsed * self._refill_per_sec)
+            self._last_refill = now
+
     async def acquire(self) -> None:
-        """윈도우가 가득 차 있으면 가장 오래된 호출이 만료될 때까지 대기."""
+        """토큰 1개 소비. 부족하면 충전될 때까지 sleep."""
         while True:
             async with self._lock:
-                now = self._clock()
-                # 만료된 timestamp 제거
-                while self._timestamps and now - self._timestamps[0] >= self._window:
-                    self._timestamps.popleft()
-
-                if len(self._timestamps) < self._rate:
-                    self._timestamps.append(now)
+                self._refill()
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
                     return
-
-                wait = self._window - (now - self._timestamps[0])
+                # 토큰 1개가 채워지는 데 필요한 시간
+                needed = 1.0 - self._tokens
+                wait = needed / self._refill_per_sec
 
             wait = max(wait, 0.001)
             await asyncio.sleep(wait)

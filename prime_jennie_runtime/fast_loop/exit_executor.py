@@ -24,7 +24,7 @@ from prime_jennie_runtime.fast_loop.persistence import (
     TradeRecorder,
 )
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
-from prime_jennie_runtime.fast_loop.schemas import TradeNotification
+from prime_jennie_runtime.fast_loop.schemas import GenericAlertNotification, TradeNotification
 from prime_jennie_runtime.kis_gateway.schemas import OrderRequest
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
@@ -57,6 +57,7 @@ class ExitExecutor:
         *,
         max_confirm_retries: int = 5,
         confirm_interval: float = 2.0,
+        max_exit_failures: int = 3,
     ):
         self._kis = kis
         self._tracker = tracker
@@ -67,6 +68,8 @@ class ExitExecutor:
         self._stock_resolver = stock_resolver
         self._max_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
+        # 연속 매도 실패 N회 도달 시 sheet auto-close (5-13 stale state 사고 차단)
+        self._max_exit_failures = max_exit_failures
 
     async def _resolve_name(self, ticker: str) -> str:
         if self._stock_resolver is None:
@@ -76,6 +79,56 @@ class ExitExecutor:
         except Exception:
             logger.debug("stock_resolver raised for %s", ticker)
             return ""
+
+    async def _record_exit_failure(
+        self, state: PositionState, reason: str, failure_kind: str
+    ) -> None:
+        """매도 실패 누적 — threshold 도달 시 sheet auto-close + alert.
+
+        외부 청산 (사용자 수동, HTS) 으로 KIS 잔고가 0 이 된 sheet 가 매 tick
+        마다 무한 매도 시도 → KIS rate limit 폭주 사고 차단 (2026-05-13).
+        """
+        state.exit_fail_count += 1
+        logger.warning(
+            "exit failure recorded: sheet=%s ticker=%s kind=%s reason=%s fail_count=%d/%d",
+            state.sheet_id,
+            state.ticker,
+            failure_kind,
+            reason,
+            state.exit_fail_count,
+            self._max_exit_failures,
+        )
+
+        if state.exit_fail_count < self._max_exit_failures:
+            await self._tracker.persist(state.sheet_id)
+            return
+
+        logger.error(
+            "exit abandoned after %d failures: sheet=%s ticker=%s — closing sheet",
+            state.exit_fail_count,
+            state.sheet_id,
+            state.ticker,
+        )
+        await self._tracker.close(state.sheet_id)
+        await self._notifier.emit(
+            GenericAlertNotification(
+                severity="critical",
+                title="exit abandoned",
+                body=(
+                    f"{state.ticker} {state.sheet_id} 매도 {state.exit_fail_count}회 "
+                    f"연속 실패 ({failure_kind}) — sheet auto-close. "
+                    f"KIS 잔고 확인 후 수동 정정 필요."
+                ),
+                ts=datetime.now(UTC),
+                metadata={
+                    "sheet_id": state.sheet_id,
+                    "ticker": state.ticker,
+                    "fail_count": state.exit_fail_count,
+                    "last_failure_kind": failure_kind,
+                    "last_reason": reason,
+                },
+            )
+        )
 
     @staticmethod
     def _compute_pnl(
@@ -180,6 +233,9 @@ class ExitExecutor:
         )
         result = await self._kis.sell(order)
         if not result.success or not result.order_no:
+            await self._record_exit_failure(
+                state, decision.reason, result.message or "sell_rejected"
+            )
             return ExitOutcome(
                 success=False,
                 sheet_id=state.sheet_id,
@@ -194,6 +250,7 @@ class ExitExecutor:
         )
 
         if status is None or status.filled_qty <= 0:
+            await self._record_exit_failure(state, decision.reason, "sell_not_filled")
             return ExitOutcome(
                 success=False,
                 sheet_id=state.sheet_id,
@@ -209,6 +266,9 @@ class ExitExecutor:
         state.quantity -= filled_qty
         fully_closed = state.quantity <= 0 or decision.portion >= 1.0
         is_partial = not fully_closed
+
+        # 성공 매도 — fail count 리셋
+        state.exit_fail_count = 0
 
         if fully_closed:
             await self._tracker.close(state.sheet_id)

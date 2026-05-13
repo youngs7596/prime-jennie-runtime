@@ -118,7 +118,84 @@ async def test_exit_sell_not_filled(fake_redis):
 
     assert outcome.success is False
     # tracker 유지 (아직 미청산)
-    assert tracker.get(state.sheet_id) is not None
+    restored = tracker.get(state.sheet_id)
+    assert restored is not None
+    # fail_count 증가 — 한 번 실패 후 threshold (3) 미달
+    assert restored.exit_fail_count == 1
+
+
+@pytest.mark.asyncio
+async def test_exit_auto_close_after_consecutive_failures(fake_redis):
+    """sell_not_filled 가 max_exit_failures 연속 발생하면 sheet auto-close + alert.
+
+    5-13 stale state 사고 (외부 청산된 sheet 의 무한 매도 시도) 회귀 방지.
+    """
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(should_fill=False)
+    executor = ExitExecutor(kis, tracker, notifier, max_exit_failures=3)
+
+    state = _state()
+    await tracker.register(state)
+    decision = ExitDecision(should_close=True, reason="profit_floor", portion=1.0)
+
+    # 1, 2회 실패 — sheet 유지
+    for expected_count in (1, 2):
+        outcome = await executor.execute(state, decision)
+        assert outcome.success is False
+        restored = tracker.get(state.sheet_id)
+        assert restored is not None
+        assert restored.exit_fail_count == expected_count
+
+    # 3회째 실패 — auto-close + alert
+    outcome = await executor.execute(state, decision)
+    assert outcome.success is False
+    assert tracker.get(state.sheet_id) is None
+
+    # alert notification 발행 확인
+    entries = await fake_redis.xrange(STREAM_NOTIFICATIONS)
+    assert len(entries) == 1
+    _msg_id, fields = entries[0]
+    payload = json.loads(fields[b"payload"].decode())
+    assert payload["kind"] == "alert"
+    assert payload["severity"] == "critical"
+    assert "abandoned" in payload["title"]
+    assert payload["metadata"]["sheet_id"] == state.sheet_id
+    assert payload["metadata"]["fail_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_exit_fail_count_reset_on_success(fake_redis):
+    """매도 성공 시 fail_count 리셋되어 후속 실패가 재계산.
+
+    장 마감 임박 미체결 등 일시 실패가 누적되어 정상 sheet 가 잘못 close
+    되는 일을 막는다.
+    """
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(should_fill=False, fill_price=66500.0)
+    executor = ExitExecutor(kis, tracker, notifier, max_exit_failures=3)
+
+    state = _state()
+    await tracker.register(state)
+    decision = ExitDecision(should_close=True, reason="fixed_sl", portion=1.0)
+
+    # 2회 실패 누적
+    await executor.execute(state, decision)
+    await executor.execute(state, decision)
+    restored = tracker.get(state.sheet_id)
+    assert restored is not None
+    assert restored.exit_fail_count == 2
+
+    # 부분 체결 성공 (scale_out) — fail_count 리셋
+    kis.should_fill = True
+    kis.fill_qty_override = {"SELL000003": 5}
+    partial_decision = ExitDecision(should_close=True, reason="scale_out", portion=0.5)
+    outcome = await executor.execute(state, partial_decision)
+    assert outcome.success is True
+    restored = tracker.get(state.sheet_id)
+    assert restored is not None
+    assert restored.exit_fail_count == 0
 
 
 @pytest.mark.asyncio

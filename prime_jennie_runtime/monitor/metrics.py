@@ -46,9 +46,7 @@ def render_metrics(poller: LivePositionsPoller | None) -> str:
     lines.append("# TYPE monitor_live_positions gauge")
     lines.append(f"monitor_live_positions {positions}")
 
-    lines.append(
-        "# HELP monitor_consecutive_failures Consecutive poll failures since last success"
-    )
+    lines.append("# HELP monitor_consecutive_failures Consecutive poll failures since last success")
     lines.append("# TYPE monitor_consecutive_failures gauge")
     lines.append(f"monitor_consecutive_failures {failures}")
 

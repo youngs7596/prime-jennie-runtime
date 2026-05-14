@@ -201,10 +201,7 @@ class LivePositionsPoller:
     async def _record_failure(self, reason: str) -> None:
         self.last_failure_ts = time.time()
         self.consecutive_failures += 1
-        if (
-            self.consecutive_failures >= self._alert_threshold
-            and not self._alert_firing
-        ):
+        if self.consecutive_failures >= self._alert_threshold and not self._alert_firing:
             await self._emit_alert(
                 severity="critical",
                 title="Monitor poll failing",

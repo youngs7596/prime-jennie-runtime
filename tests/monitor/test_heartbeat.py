@@ -215,9 +215,7 @@ async def test_heartbeat_payload_shape():
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     try:
         with respx.mock(assert_all_called=False) as mock:
-            mock.get("http://kis-gateway:8080/api/balance").mock(
-                return_value=_balance_response()
-            )
+            mock.get("http://kis-gateway:8080/api/balance").mock(return_value=_balance_response())
             async with httpx.AsyncClient(timeout=5.0) as client:
                 poller = LivePositionsPoller(
                     redis_client=redis,

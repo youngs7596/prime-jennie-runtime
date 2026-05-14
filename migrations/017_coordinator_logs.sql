@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS event_log (
     decision_id           BIGINT,
         -- 이 이벤트가 어떤 결정 결과인지 (있을 때만). FK 강제 X — Coordinator 가
         -- 결정 없이 직접 발행하는 이벤트도 있음 (entry_filled 등 사후 기록)
+    stream_msg_id         TEXT,
+        -- 발행 stream 의 XADD message id. listener 가 ON CONFLICT DO NOTHING 으로
+        -- ACK 실패 후 재배달 시 중복 INSERT 방지 (Stage 1 idempotency key).
     occurred_at           TIMESTAMPTZ NOT NULL,
         -- 실제 이벤트 발생 시각 (agent 가 채움)
     recorded_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -70,6 +73,8 @@ CREATE INDEX IF NOT EXISTS ix_event_log_kind ON event_log (event_kind);
 CREATE INDEX IF NOT EXISTS ix_event_log_subject ON event_log (subject_id) WHERE subject_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_event_log_ticker ON event_log (ticker) WHERE ticker IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_event_log_correlation ON event_log (correlation_id) WHERE correlation_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_event_log_stream_msg_id
+    ON event_log (stream_msg_id) WHERE stream_msg_id IS NOT NULL;
 
 COMMENT ON TABLE event_log IS 'Agent Coordinator Event Bus archive — sheet/entry/exit/policy/external events. correlation_id 로 시트 lifecycle 추적';
 COMMENT ON COLUMN event_log.event_kind IS 'sheet_published | entry_queued | entry_decided | entry_filled | entry_rejected | exit_decided | exit_filled | policy_changed | external_event';

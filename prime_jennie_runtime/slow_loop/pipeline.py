@@ -31,7 +31,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from minyoung_mah import (
@@ -979,6 +979,37 @@ async def run_slow_loop(
                 final_pct=sheet.size.final_pct,
             )
         )
+
+        # Coordinator Event Bus hook (Stage 1, best-effort).
+        # publish 가 이미 성공한 후 발행 — 실패해도 매매 path 영향 X.
+        try:
+            from prime_jennie_runtime.coordinator import (
+                SheetPublishedEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                comp.publisher.client,
+                SheetPublishedEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=sheet.sheet_id,
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    strategy_tag=sheet.strategy_tag,
+                    conviction=sheet.provenance.conviction,
+                    final_pct=sheet.size.final_pct,
+                    macro_run_id=macro_run_id,
+                    scout_run_id=scout_run_id,
+                    macro_gate=post.output.gate,
+                    macro_size_mult=float(post.output.size_multiplier),
+                    risk_level=None,
+                    sheet_generated_at=sheet.generated_at,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(SheetPublished) failed sheet=%s", sheet.sheet_id
+            )
 
     return SlowLoopResult(
         macro_post=post,

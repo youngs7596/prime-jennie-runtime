@@ -93,6 +93,12 @@ class EntryExecutor:
         """
         order = _build_order_request(sheet, quantity)
         if order is None:
+            await self._emit_entry_rejected(
+                sheet,
+                reason="error",
+                details="invalid_order_request",
+                intended_quantity=quantity,
+            )
             return EntryOutcome(
                 sheet_id=sheet.sheet_id,
                 ticker=sheet.ticker,
@@ -123,6 +129,13 @@ class EntryExecutor:
                         reason="dryrun",
                     )
                 )
+                # DRY_RUN 은 reject 로 분류 (실제 체결 X). reason=dryrun.
+                await self._emit_entry_rejected(
+                    sheet,
+                    reason="dryrun",
+                    details=None,
+                    intended_quantity=quantity,
+                )
                 return EntryOutcome(
                     sheet_id=sheet.sheet_id,
                     ticker=sheet.ticker,
@@ -142,6 +155,12 @@ class EntryExecutor:
         )
         result = await self._kis.buy(order)
         if not result.success or not result.order_no:
+            await self._emit_entry_rejected(
+                sheet,
+                reason="kis_reject",
+                details=result.message or "buy_rejected",
+                intended_quantity=quantity,
+            )
             return EntryOutcome(
                 sheet_id=sheet.sheet_id,
                 ticker=sheet.ticker,
@@ -161,6 +180,12 @@ class EntryExecutor:
                 await self._kis.cancel_order(result.order_no)
             except Exception:
                 logger.exception("cancel_order failed for %s", result.order_no)
+            await self._emit_entry_rejected(
+                sheet,
+                reason="not_filled",
+                details=None,
+                intended_quantity=quantity,
+            )
             return EntryOutcome(
                 sheet_id=sheet.sheet_id,
                 ticker=sheet.ticker,
@@ -207,6 +232,16 @@ class EntryExecutor:
             )
         )
 
+        # Coordinator Event Bus hook (Stage 1, best-effort).
+        # 체결 + tracker 등록 + DB persist + notifier 알림 모두 끝난 후 발행.
+        await self._emit_entry_filled(
+            sheet,
+            filled_qty=filled_qty,
+            filled_price=filled_price,
+            intended_quantity=quantity,
+            order_no=result.order_no,
+        )
+
         return EntryOutcome(
             sheet_id=sheet.sheet_id,
             ticker=sheet.ticker,
@@ -215,6 +250,80 @@ class EntryExecutor:
             filled_qty=filled_qty,
             filled_price=filled_price,
         )
+
+    async def _emit_entry_filled(
+        self,
+        sheet: PositionSheet,
+        *,
+        filled_qty: int,
+        filled_price: float,
+        intended_quantity: int,
+        order_no: str | None,
+    ) -> None:
+        """Coordinator Event Bus hook — entry 체결 직후 발행 (best-effort).
+
+        체결은 이미 끝난 시점. 발행 실패해도 매매 path 영향 X.
+        """
+        try:
+            from prime_jennie_runtime.coordinator import (
+                EntryFilledEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                self._notifier.client,
+                EntryFilledEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=sheet.sheet_id,
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    filled_qty=filled_qty,
+                    filled_price=filled_price,
+                    intended_quantity=intended_quantity,
+                    is_partial=filled_qty < intended_quantity,
+                    order_no=order_no,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(EntryFilled) failed sheet=%s", sheet.sheet_id
+            )
+
+    async def _emit_entry_rejected(
+        self,
+        sheet: PositionSheet,
+        *,
+        reason: str,
+        details: str | None,
+        intended_quantity: int,  # noqa: ARG002 — 호출부 일관성/로깅 확장 여지
+    ) -> None:
+        """Coordinator Event Bus hook — entry 거부/skip 분기 발행 (best-effort).
+
+        분기 결정은 이미 끝났고 outcome 반환만 남은 시점. 발행 실패해도 매매 X.
+        """
+        try:
+            from prime_jennie_runtime.coordinator import (
+                EntryRejectedEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                self._notifier.client,
+                EntryRejectedEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=sheet.sheet_id,
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    reason=reason,
+                    details=details,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(EntryRejected) failed sheet=%s reason=%s",
+                sheet.sheet_id,
+                reason,
+            )
 
 
 # ─── helpers ─────────────────────────────────────────────

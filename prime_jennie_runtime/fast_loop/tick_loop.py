@@ -200,6 +200,31 @@ class TickLoop:
                 except Exception:
                     logger.exception("tracker.persist failed sheet=%s", sheet_id)
                 continue
+
+            # Coordinator Event Bus hook (Stage 1, best-effort).
+            # exit_executor 호출 직전 — rule_type / reason 기록.
+            # 실패해도 매매 path 영향 X.
+            try:
+                from prime_jennie_runtime.coordinator import (
+                    ExitDecidedEvent,
+                    publish_event,
+                )
+
+                await publish_event(
+                    self._redis,
+                    ExitDecidedEvent(
+                        occurred_at=datetime.now(UTC),
+                        correlation_id=sheet_id,
+                        sheet_id=sheet_id,
+                        ticker=tick.ticker,
+                        rule_type=decision.reason,
+                        reason=decision.reason,
+                        portion=float(decision.portion),
+                    ),
+                )
+            except Exception:
+                logger.exception("coordinator publish_event(ExitDecided) failed sheet=%s", sheet_id)
+
             # exit_executor 호출 — KIS gateway 503 / CircuitBreakerError 가
             # tick_loop task 를 죽이지 않도록 격리 (5-13 사고 학습:
             # 한 sheet 의 실패로 fast_loop 전체가 shutdown → restart 무한 루프).
@@ -237,9 +262,17 @@ class TickLoop:
                     sheet.sheet_id,
                     result.reason,
                 )
-                # entry.valid_until 만료면 큐에서 제거
+                # entry.valid_until 만료면 큐에서 제거 + terminal 거부 이벤트.
+                # 그 외 non-terminal (단지 not-yet-met) 은 매 tick 발생하므로
+                # 이벤트 폭주 회피 위해 발행 X.
                 if result.reason == "entry_valid_until_expired":
                     await self._queue.remove(sheet.sheet_id)
+                    await self._emit_entry_decided(
+                        sheet,
+                        conditions_passed=False,
+                        passed_reason=result.reason or "entry_valid_until_expired",
+                        intended_quantity=0,
+                    )
                 continue
 
             # 통과 → 매수 실행
@@ -254,7 +287,22 @@ class TickLoop:
                     sheet.sheet_id,
                     sheet.ticker,
                 )
+                await self._emit_entry_decided(
+                    sheet,
+                    conditions_passed=True,
+                    passed_reason="sizer_zero",
+                    intended_quantity=0,
+                )
                 continue
+
+            # Coordinator Event Bus hook (Stage 1, best-effort).
+            # entry_executor 호출 직전 — passed_reason="all_passed".
+            await self._emit_entry_decided(
+                sheet,
+                conditions_passed=True,
+                passed_reason="all_passed",
+                intended_quantity=qty,
+            )
 
             try:
                 outcome = await self._entry_executor.execute(sheet, quantity=qty)
@@ -280,6 +328,43 @@ class TickLoop:
                     sheet.sheet_id,
                     outcome.reason,
                 )
+
+    async def _emit_entry_decided(
+        self,
+        sheet: PositionSheet,
+        *,
+        conditions_passed: bool,
+        passed_reason: str,
+        intended_quantity: int,
+    ) -> None:
+        """Coordinator Event Bus hook — entry decision 직후 발행 (best-effort).
+
+        Stage 1 관찰 전용. 결정은 이미 끝났고 발행 실패해도 매매 path 영향 X.
+        """
+        try:
+            from prime_jennie_runtime.coordinator import (
+                EntryDecidedEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                self._redis,
+                EntryDecidedEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=sheet.sheet_id,
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    conditions_passed=conditions_passed,
+                    passed_reason=passed_reason,
+                    intended_quantity=intended_quantity,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(EntryDecided) failed sheet=%s reason=%s",
+                sheet.sheet_id,
+                passed_reason,
+            )
 
 
 def _parse_tick(data: dict) -> TickData | None:

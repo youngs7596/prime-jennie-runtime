@@ -306,6 +306,18 @@ class ExitExecutor:
             )
         )
 
+        # Coordinator Event Bus hook (Stage 1, best-effort).
+        # 체결 + tracker close/persist + DB record + notifier emit 모두 끝난 후 발행.
+        await self._emit_exit_filled(
+            state=state,
+            filled_qty=filled_qty,
+            filled_price=filled_price,
+            reason=decision.reason,
+            fully_closed=fully_closed,
+            pnl_amount=pnl_amount,
+            pnl_pct=pnl_pct,
+        )
+
         return ExitOutcome(
             success=True,
             sheet_id=state.sheet_id,
@@ -315,3 +327,45 @@ class ExitExecutor:
             reason=decision.reason,
             fully_closed=fully_closed,
         )
+
+    async def _emit_exit_filled(
+        self,
+        *,
+        state: PositionState,
+        filled_qty: int,
+        filled_price: float,
+        reason: str,
+        fully_closed: bool,
+        pnl_amount: float | None,
+        pnl_pct: float | None,
+    ) -> None:
+        """Coordinator Event Bus hook — exit 체결 직후 발행 (best-effort).
+
+        체결은 이미 끝난 시점. 발행 실패해도 매매 path 영향 X.
+        """
+        try:
+            from prime_jennie_runtime.coordinator import (
+                ExitFilledEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                self._notifier.client,
+                ExitFilledEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=state.sheet_id,
+                    sheet_id=state.sheet_id,
+                    ticker=state.ticker,
+                    filled_qty=filled_qty,
+                    filled_price=filled_price,
+                    entry_price=state.entry_price,
+                    reason=reason,
+                    fully_closed=fully_closed,
+                    pnl_amount=pnl_amount,
+                    pnl_pct=pnl_pct,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(ExitFilled) failed sheet=%s", state.sheet_id
+            )

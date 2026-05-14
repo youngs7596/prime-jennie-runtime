@@ -13,6 +13,7 @@ Dedup 가드:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
@@ -75,6 +76,7 @@ class PositionSheetConsumer:
                 sheet.ticker,
                 sheet.sheet_id,
             )
+            await self._emit_entry_rejected(sheet, reason="already_holding")
             return
 
         # 2) ticker dedup — 이미 큐에 같은 ticker 시트 있으면 reject
@@ -84,6 +86,7 @@ class PositionSheetConsumer:
                 sheet.ticker,
                 sheet.sheet_id,
             )
+            await self._emit_entry_rejected(sheet, reason="ticker_pending")
             return
 
         # 3) 큐 적재 — 같은 sheet_id 가 이미 있으면 noop
@@ -93,6 +96,7 @@ class PositionSheetConsumer:
                 "sheet rejected (sheet_id already in queue): sheet=%s",
                 sheet.sheet_id,
             )
+            await self._emit_entry_rejected(sheet, reason="sheet_id_in_queue")
             return
 
         logger.info(
@@ -105,9 +109,60 @@ class PositionSheetConsumer:
             sheet.entry.valid_until.isoformat(),
         )
 
+        # Coordinator Event Bus hook (Stage 1, best-effort).
+        # 큐 적재 성공 직후 발행 — 실패해도 매매 path 영향 X.
+        try:
+            from prime_jennie_runtime.coordinator import (
+                EntryQueuedEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                self._redis,
+                EntryQueuedEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=sheet.sheet_id,
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    queue_size_after=self._queue.size(),
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(EntryQueued) failed sheet=%s", sheet.sheet_id
+            )
+
         # 4) tick 수신을 위해 KIS streamer 에 ticker subscribe
         if self._subscribe_on_enqueue:
             try:
                 await self._kis.subscribe([sheet.ticker])
             except Exception:
                 logger.exception("subscribe failed ticker=%s", sheet.ticker)
+
+    async def _emit_entry_rejected(self, sheet: PositionSheet, *, reason: str) -> None:
+        """Coordinator Event Bus hook — consumer dedup reject 시 (best-effort).
+
+        Stage 1 관찰 전용. 매매 path 는 이미 return 으로 끝났으므로 영향 X.
+        """
+        try:
+            from prime_jennie_runtime.coordinator import (
+                EntryRejectedEvent,
+                publish_event,
+            )
+
+            await publish_event(
+                self._redis,
+                EntryRejectedEvent(
+                    occurred_at=datetime.now(UTC),
+                    correlation_id=sheet.sheet_id,
+                    sheet_id=sheet.sheet_id,
+                    ticker=sheet.ticker,
+                    reason=reason,
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "coordinator publish_event(EntryRejected) failed sheet=%s reason=%s",
+                sheet.sheet_id,
+                reason,
+            )

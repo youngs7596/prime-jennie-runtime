@@ -31,10 +31,9 @@ policy/external 은 별도 correlation_id (예: policy_change_id, external_event
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
-
 
 # ─────────────────────────────────────────────────────────────────────
 # Base
@@ -96,10 +95,19 @@ class EntryQueuedEvent(_BaseEvent):
 
 
 class EntryDecidedEvent(_BaseEvent):
-    """tick_loop 가 entry conditions 평가 결과 통과한 시점.
+    """tick_loop 가 entry conditions 평가 결과 terminal 분기에 도달한 시점.
 
     실제 매수 호출 직전이며 Stage 2 (advisory) 부터 Coordinator 가 query
     응답을 보낼 시점. Stage 1 에선 평가 결과만 기록.
+
+    **발행 정책 (Stage 1)** — terminal 분기만 발행하여 매 tick 폭주 회피:
+      - ``passed_reason="all_passed"`` — 조건 통과 + 사이저 >0 → 매수 호출
+      - ``passed_reason="entry_valid_until_expired"`` — 큐에서 제거되는 시한 만료
+      - ``passed_reason="sizer_zero"`` — 통과했지만 수량 0 (skip)
+
+    Non-terminal "conditions_not_yet_met" (이번 tick 미통과, 다음 tick 재평가)
+    은 같은 sheet 가 수천 tick × 수십 큐 시트 만큼 발행되어 폭주하므로 미발행.
+    Stage 2 에서 sheet_id+reason 기반 dedup cache 도입 후 관찰력 확장 검토.
     """
 
     event_kind: Literal["entry_decided"] = "entry_decided"
@@ -109,7 +117,9 @@ class EntryDecidedEvent(_BaseEvent):
     conditions_passed: bool
     passed_reason: str = Field(description="all_passed / no_conditions / ...")
     intended_quantity: int = Field(description="sizer 가 산출한 수량 (0 이면 skip)")
-    decision_id: int | None = Field(default=None, description="Coordinator decision_log 의 id (Stage 2+)")
+    decision_id: int | None = Field(
+        default=None, description="Coordinator decision_log 의 id (Stage 2+)"
+    )
 
 
 class EntryFilledEvent(_BaseEvent):
@@ -203,7 +213,9 @@ class PolicyChangedEvent(_BaseEvent):
 
     event_kind: Literal["policy_changed"] = "policy_changed"
 
-    policy_name: str = Field(description="macro_gate | risk_level | control_stop | control_pause | ...")
+    policy_name: str = Field(
+        description="macro_gate | risk_level | control_stop | control_pause | ..."
+    )
     prev_value: str | None = None
     new_value: str
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -231,17 +243,15 @@ class ExternalEvent(_BaseEvent):
 
 
 CoordinatorEvent = Annotated[
-    Union[
-        SheetPublishedEvent,
-        EntryQueuedEvent,
-        EntryDecidedEvent,
-        EntryFilledEvent,
-        EntryRejectedEvent,
-        ExitDecidedEvent,
-        ExitFilledEvent,
-        PolicyChangedEvent,
-        ExternalEvent,
-    ],
+    SheetPublishedEvent
+    | EntryQueuedEvent
+    | EntryDecidedEvent
+    | EntryFilledEvent
+    | EntryRejectedEvent
+    | ExitDecidedEvent
+    | ExitFilledEvent
+    | PolicyChangedEvent
+    | ExternalEvent,
     Field(discriminator="event_kind"),
 ]
 

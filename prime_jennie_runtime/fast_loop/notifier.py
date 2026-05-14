@@ -59,6 +59,11 @@ class Notifier:
         self._slack_client = slack_client
         self._owns_slack_client = slack_client is None
 
+    @property
+    def client(self) -> aioredis.Redis:
+        """Coordinator hook 등 redis client 재사용 (별도 wiring 회피)."""
+        return self._client
+
     async def emit(self, notification: BaseModel) -> str:
         payload = notification.model_dump_json()
         msg_id = await self._client.xadd(
@@ -99,13 +104,9 @@ class Notifier:
             self._owns_slack_client = True
 
         try:
-            resp = await self._slack_client.post(
-                self._slack_webhook_url, json={"text": text}
-            )
+            resp = await self._slack_client.post(self._slack_webhook_url, json={"text": text})
             if resp.status_code >= 400:
-                logger.warning(
-                    "slack webhook returned %s: %s", resp.status_code, resp.text[:200]
-                )
+                logger.warning("slack webhook returned %s: %s", resp.status_code, resp.text[:200])
         except Exception:
             logger.warning("slack webhook delivery failed", exc_info=True)
 
@@ -132,10 +133,7 @@ def _format_slack_text(notification: BaseModel, kind: str) -> str:
         prev = data.get("prev_level", "?")
         new = data.get("new_level", "?")
         mult = data.get("new_multiplier", 0.0)
-        return (
-            f":warning: *Risk level* `{prev}` → `{new}` "
-            f"(size_multiplier={mult:.2f})"
-        )
+        return f":warning: *Risk level* `{prev}` → `{new}` (size_multiplier={mult:.2f})"
     if kind == "alert":
         sev = data.get("severity", "info")
         title = data.get("title", "alert")

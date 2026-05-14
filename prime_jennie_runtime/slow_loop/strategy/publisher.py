@@ -63,6 +63,11 @@ class PositionSheetPublisher:
         )
         self._dlq_stream = STREAM_POSITION_SHEETS_DLQ
 
+    @property
+    def client(self) -> aioredis.Redis:
+        """Coordinator hook 등 redis client 재사용 (별도 wiring 회피)."""
+        return self._client
+
     async def publish(self, sheet: PositionSheet) -> str:
         """DB upsert → stream 발행. 예외는 DLQ 로 후송.
 

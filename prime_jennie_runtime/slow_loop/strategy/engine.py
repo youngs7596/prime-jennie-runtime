@@ -351,6 +351,9 @@ class StrategyEngine:
             news_score_at_generation=inputs.news_score,
             strategy_policy_version=self._policy.version,
             generated_by=self._generated_by,
+            conviction=float(candidate.conviction)
+            if getattr(candidate, "conviction", None) is not None
+            else None,
         )
 
         # 8. sheet 조립

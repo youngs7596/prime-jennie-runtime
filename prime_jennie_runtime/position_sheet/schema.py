@@ -229,6 +229,9 @@ class ProvenanceSection(BaseModel):
     news_score_at_generation: float | None = None
     strategy_policy_version: str
     generated_by: str
+    # Scout 가 발행한 conviction (0.0~1.0). Phase 0 #1 (conviction × pnl_pct)
+    # 분석 + Coordinator advisory policy 에 필요. 기존 row 호환을 위해 optional.
+    conviction: float | None = None
 
 
 # =====================================================================

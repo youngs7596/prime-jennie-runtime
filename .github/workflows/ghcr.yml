@@ -58,6 +58,8 @@ jobs:
             dockerfile: infra/docker/Dockerfile.monitor
           - service: job-worker
             dockerfile: infra/docker/Dockerfile.job_worker
+          - service: coordinator-listener
+            dockerfile: infra/docker/Dockerfile.coordinator_listener
     steps:
       - uses: actions/checkout@v4
 

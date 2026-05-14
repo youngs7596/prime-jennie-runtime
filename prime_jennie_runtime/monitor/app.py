@@ -16,6 +16,7 @@ from fastapi import FastAPI, Response
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.infra.config import AppConfig
 
+from .coordinator_watch import CoordinatorWatchPoller
 from .metrics import render_metrics
 from .poller import LivePositionsPoller
 
@@ -52,13 +53,21 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         )
         await poller.__aenter__()
         poller.start()
+        coordinator_watch = CoordinatorWatchPoller(
+            redis_client=redis_client,
+            interval_sec=_poll_interval(),
+            notifier=notifier,
+        )
+        coordinator_watch.start()
         app.state.config = cfg
         app.state.redis = redis_client
         app.state.poller = poller
+        app.state.coordinator_watch = coordinator_watch
         app.state.notifier = notifier
         try:
             yield
         finally:
+            await coordinator_watch.stop()
             await poller.stop()
             await poller.close()
             await notifier.close()
@@ -73,6 +82,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/status")
     async def status() -> dict:
         poller: LivePositionsPoller | None = getattr(app.state, "poller", None)
+        watch: CoordinatorWatchPoller | None = getattr(app.state, "coordinator_watch", None)
         if poller is None:
             return {"status": "not_ready"}
         return {
@@ -81,6 +91,16 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "last_failure_ts": poller.last_failure_ts,
             "last_positions_count": poller.last_positions_count,
             "interval_sec": poller._interval,
+            "coordinator_watch": (
+                {
+                    "last_tick_ts": watch.last_tick_ts,
+                    "last_dlq_xlen": watch.last_dlq_xlen_observed,
+                    "listener_heartbeat_ok": watch.last_listener_heartbeat_ok,
+                    "heartbeat_alert_firing": watch._heartbeat_alert_firing,
+                }
+                if watch is not None
+                else None
+            ),
         }
 
     @app.get("/metrics")

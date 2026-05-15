@@ -221,8 +221,16 @@ async def run() -> None:
         # 인한 stale state 즉시 인지 (자동 정리는 하지 않음, 사용자 결정 보존).
         await check_state_kis_mismatch(tracker, kis, notifier)
 
+        sheet_fetcher = PostgresSheetFetcher(pool)
+
         control_consumer = ControlCommandConsumer(
-            redis_client, consumer_name=f"control-fast-{cfg.env}", kis_client=kis
+            redis_client,
+            consumer_name=f"control-fast-{cfg.env}",
+            kis_client=kis,
+            tracker=tracker,
+            recorder=recorder,
+            sheet_fetcher=sheet_fetcher,
+            notifier=notifier,
         )
 
         risk_throttle = IntradayRiskThrottle(redis_client)
@@ -233,8 +241,6 @@ async def run() -> None:
         risk_publisher = TypedStreamPublisher(
             redis_client, STREAM_NOTIFICATIONS, RiskLevelChangeNotification
         )
-
-        sheet_fetcher = PostgresSheetFetcher(pool)
 
         entry_executor = EntryExecutor(
             kis=kis,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
-SCOUT_PROMPT_VERSION = "v0.5"
+SCOUT_PROMPT_VERSION = "v0.6"
 """Scout 프롬프트 버전.
 
 prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
@@ -22,6 +22,9 @@ scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt �
                      fixed_sl+time_stop 필수 명시)
 - v0.5 (2026-05-13): entry_hint 가이드 추가 (limit 사용 시 price_hint 필수,
                      모르면 market 사용). MEAN_REVERT_RSI 2건 engine_error 원인 차단
+- v0.6 (2026-05-15): G1 outcome 피드백 섹션 추가 — 직전 7일 추천 결과
+                     (손절율, 평균 PnL, 최근 손절 ticker) 노출. informational only;
+                     enforcement 는 후행 layer (G2~G4) 에서.
 """
 
 ALLOWED_IMPORTS = (
@@ -214,6 +217,50 @@ exit_hint 사용 가이드 (선택 — 확신 없으면 생략):
 """
 
 
+# G1 (2026-05-15) — 손절로 간주할 exit_reason 화이트리스트.
+# fast_loop/cooldown_check.py 의 STOP_REASONS 와 동일 contract.
+_STOP_LOSS_EXIT_REASONS = frozenset({"fixed_sl", "stop_loss", "breakeven_stop"})
+
+
+def _fmt_outcomes_section(outcomes: list) -> str:
+    """G1 outcome 피드백 섹션 — informational, enforcement 는 후행 layer.
+
+    빈 list 이면 안내 문구만. 비어있지 않으면:
+    - 전체 손절율 + strategy_tag 별 breakdown
+    - 평균 PnL
+    - 최근 손절 5건 ticker + PnL
+    """
+    if not outcomes:
+        return "  (직전 7일 청산 완료 추천 없음 — 데이터 누적 중)"
+
+    total = len(outcomes)
+    losses = [o for o in outcomes if o.exit_reason in _STOP_LOSS_EXIT_REASONS]
+    loss_rate = len(losses) / total
+    avg_pnl = sum(o.pnl_pct for o in outcomes if o.pnl_pct is not None) / max(
+        sum(1 for o in outcomes if o.pnl_pct is not None), 1
+    )
+
+    by_tag: dict[str, tuple[int, int]] = {}
+    for o in outcomes:
+        cur = by_tag.get(o.strategy_tag, (0, 0))
+        is_loss = 1 if o.exit_reason in _STOP_LOSS_EXIT_REASONS else 0
+        by_tag[o.strategy_tag] = (cur[0] + 1, cur[1] + is_loss)
+    tag_str = ", ".join(
+        f"{tag} {loss_n}/{total_n}" for tag, (total_n, loss_n) in sorted(by_tag.items())
+    )
+
+    recent_losses = sorted(losses, key=lambda o: o.exit_at, reverse=True)[:5]
+    recent_str = ", ".join(
+        f"{o.ticker} {o.pnl_pct:+.2%}" if o.pnl_pct is not None else o.ticker for o in recent_losses
+    )
+
+    return (
+        f"  - 손절율: {len(losses)}/{total} = {loss_rate:.0%} (by tag: {tag_str})\n"
+        f"  - 평균 PnL: {avg_pnl:+.2%}\n"
+        f"  - 최근 손절 5건: {recent_str or '(없음)'}"
+    )
+
+
 def _fmt_high_events(events_by_impact: dict[str, dict[str, int]]) -> str:
     """high 임팩트 event_type 분포를 요약 문자열로. 상위 3종."""
     high = events_by_impact.get("high", {})
@@ -337,6 +384,11 @@ Trigger: {ctx.trigger_reason}
 - recent_stop_loss_tickers (24h 내 손절): {(", ".join(ctx.recent_stop_loss_tickers) if ctx.recent_stop_loss_tickers else "(없음)")}
 
 위 종목은 Strategy Engine 단계에서 자동 reject 되므로 추천해도 sheet 안 나갑니다 (effort 낭비). 자가 검열 권장이지만 enforcement 는 후행 layer 가 담당.
+
+## ⚠️ 직전 7일 추천 outcomes (G1 학습 신호 — 같은 패턴 반복 시 손절율 누적)
+{_fmt_outcomes_section(ctx.previous_outcomes)}
+
+위는 informational. 후속 단계에서 strategy_tag 손절율이 임계 초과 시 결정론 차단 예정 (G2). 현 단계에선 가설 작성 시 참고만.
 {retry_section}
 ---
 

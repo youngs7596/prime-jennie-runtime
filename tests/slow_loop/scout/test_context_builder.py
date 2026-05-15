@@ -56,3 +56,30 @@ async def test_custom_trigger_reason():
         trigger_reason="manual",
     )
     assert ctx.trigger_reason == "manual"
+
+
+@pytest.mark.asyncio
+async def test_previous_outcomes_empty_when_no_engine():
+    """engine 미주입 — previous_outcomes 빈 list (fail-open)."""
+    builder = ScoutContextBuilder(
+        universe=StubUniverseFeeder(),
+        news=StubNewsEventFeeder(),
+        sector=StubSectorMomentumFeeder(),
+        market=StubMarketSummaryFeeder(),
+    )
+    macro = MacroStateForScout(gate="open", size_multiplier=1.0, gate_run_id="m1")
+    ctx = await builder.build(as_of=date(2026, 4, 16), macro_state=macro)
+    assert ctx.previous_outcomes == []
+
+
+@pytest.mark.asyncio
+async def test_previous_outcomes_failopen_on_db_error():
+    """DB 장애 / view 미존재 — fail-open 으로 빈 list 반환, Scout 진행 보장."""
+    from prime_jennie_runtime.slow_loop.scout.context_builder import _fetch_previous_outcomes
+
+    class _BrokenEngine:
+        def connect(self):
+            raise RuntimeError("view scout_outcomes_v1 does not exist")
+
+    result = await _fetch_previous_outcomes(_BrokenEngine())
+    assert result == []

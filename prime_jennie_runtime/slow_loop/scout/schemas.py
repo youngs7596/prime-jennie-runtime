@@ -96,6 +96,25 @@ class ScoutRunSummary(BaseModel):
     hit_rate: float | None = None  # 아직 체결 결과 없으면 None
 
 
+class PreviousOutcome(BaseModel):
+    """Scout 직전 추천의 실현 결과 (G1 outcome 피드백, 2026-05-15 도입).
+
+    `scout_outcomes_v1` view 에서 최근 7일 ticker-strategy 단위 추출. exit_at
+    이 있는 row 만 노출 (체결 후 청산 완료). prompt 에서 손절율 / 평균 PnL
+    / 최근 손절 ticker 목록을 LLM 에 노출 — informational, enforcement 는
+    후행 layer (G2 overextension validator 등) 가 담당.
+
+    design: .ai/designs/2026-05-15-scout-overextension-guards.md §3 G1
+    """
+
+    ticker: str
+    strategy_tag: str
+    generated_at: datetime
+    exit_at: datetime
+    exit_reason: str | None
+    pnl_pct: float | None  # decimal (예: -0.0517 = -5.17%)
+
+
 class CodeAttemptHint(BaseModel):
     """동일 scout 호출 내 직전 시도의 실행 결과 — 재시도 시 LLM 에 주입.
 
@@ -138,6 +157,9 @@ class ScoutContext(BaseModel):
     # 24h 내 손절 (fixed_sl/stop_loss/breakeven_stop) 발생한 ticker. cooldown 가드
     # 와 동일 데이터셋 — Scout 단계에서 자체 회피 + fast_loop enforcement 가 2nd layer.
     recent_stop_loss_tickers: list[str] = Field(default_factory=list)
+    # G1 outcome 피드백 (2026-05-15 도입) — 최근 7일 청산 완료 추천 결과.
+    # scout_outcomes_v1 view 에서 추출. enforcement 없음 (informational only).
+    previous_outcomes: list[PreviousOutcome] = Field(default_factory=list)
 
 
 # =====================================================================

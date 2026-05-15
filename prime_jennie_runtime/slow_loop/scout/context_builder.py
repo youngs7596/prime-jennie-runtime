@@ -25,7 +25,7 @@ from .feeders.base import (
     SectorMomentumFeeder,
     UniverseFeeder,
 )
-from .schemas import MacroStateForScout, ScoutContext, ScoutRunSummary
+from .schemas import MacroStateForScout, PreviousOutcome, ScoutContext, ScoutRunSummary
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,20 @@ _SQL_RECENT_STOPS_SA = (
     "  AND (e.metadata_json->>'exit_reason') = ANY(:reasons) "
     "  AND e.executed_at > now() - interval '24 hours' "
     "ORDER BY ps.ticker"
+)
+
+# G1 outcome 피드백 (2026-05-15) — scout_outcomes_v1 view 에서 최근 N일 청산 완료
+# row. limit 으로 안전 가드 (LLM context 폭주 방지).
+_DEFAULT_OUTCOMES_DAYS = 7
+_DEFAULT_OUTCOMES_LIMIT = 50
+
+_SQL_PREVIOUS_OUTCOMES = (
+    "SELECT ticker, strategy_tag, generated_at, exit_at, exit_reason, pnl_pct "
+    "FROM scout_outcomes_v1 "
+    "WHERE exit_at IS NOT NULL "
+    "  AND exit_at > now() - (:days::int * interval '1 day') "
+    "ORDER BY exit_at DESC "
+    "LIMIT :max_rows"
 )
 
 
@@ -77,6 +91,42 @@ async def _fetch_recent_stops(engine: Any | None) -> list[str]:
             return [row[0] for row in result.fetchall()]
     except Exception:
         logger.exception("recent_stops fetch failed — using empty list (fail-open)")
+        return []
+
+
+async def _fetch_previous_outcomes(
+    engine: Any | None,
+    *,
+    days: int = _DEFAULT_OUTCOMES_DAYS,
+    max_rows: int = _DEFAULT_OUTCOMES_LIMIT,
+) -> list[PreviousOutcome]:
+    """scout_outcomes_v1 view 에서 최근 N일 청산 완료 outcomes 추출 (G1).
+
+    View 가 없거나 (migration 미적용) DB 장애 시 빈 list 반환 (fail-open) —
+    Scout 의사결정에 영향 없음.
+    """
+    if engine is None:
+        return []
+    try:
+        from sqlalchemy import text
+
+        sql = text(_SQL_PREVIOUS_OUTCOMES)
+        async with engine.connect() as conn:
+            result = await conn.execute(sql, {"days": days, "max_rows": max_rows})
+            rows = result.mappings().all()
+        return [
+            PreviousOutcome(
+                ticker=row["ticker"],
+                strategy_tag=row["strategy_tag"],
+                generated_at=row["generated_at"],
+                exit_at=row["exit_at"],
+                exit_reason=row["exit_reason"],
+                pnl_pct=float(row["pnl_pct"]) if row["pnl_pct"] is not None else None,
+            )
+            for row in rows
+        ]
+    except Exception:
+        logger.exception("previous_outcomes fetch failed — using empty list (fail-open)")
         return []
 
 
@@ -116,6 +166,8 @@ class ScoutContextBuilder:
         # audit B1 fix — 거래 이력 노출 (engine 주입 시).
         today_entries = await _fetch_today_entries(self.engine)
         recent_stops = await _fetch_recent_stops(self.engine)
+        # G1 — outcome 피드백 (engine 주입 + view 존재 시).
+        previous_outcomes = await _fetch_previous_outcomes(self.engine)
 
         return ScoutContext(
             as_of=as_of,
@@ -130,4 +182,5 @@ class ScoutContextBuilder:
             consensus_data=consensus_data,
             today_entries=today_entries,
             recent_stop_loss_tickers=recent_stops,
+            previous_outcomes=previous_outcomes,
         )

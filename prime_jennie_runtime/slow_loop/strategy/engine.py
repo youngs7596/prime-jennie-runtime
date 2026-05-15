@@ -132,9 +132,13 @@ def _normalize_scout_exit_hint(
             continue  # schema 가 거절할 type 사전 제외
         normalized.append(rule)
 
-    # 필수 룰 보충: fixed_sl, time_stop 중 빠진 게 있으면 default 에서 가져옴
+    # 필수 룰 보충: fixed_sl + time_stop + trailing_tp 중 빠진 게 있으면 default 에서 가져옴.
+    # trailing_tp 강제 부착 (2026-05-15) — scout 가 exit_hint 로 trailing 제외하면
+    # 익절 trigger 가 fixed_sl 외 0 인 sheet 가 발행되어 변동성에 취약. 본 주
+    # 운영 데이터 (KB금융/HD현대중공업/SK스퀘어 EARNINGS_DRIFT 익절 0건) 에서
+    # 정량 확인된 패턴.
     have_types = {r["type"] for r in normalized}
-    for required in ("fixed_sl", "time_stop"):
+    for required in ("fixed_sl", "time_stop", "trailing_tp"):
         if required in have_types:
             continue
         for d in default_rules:
@@ -174,16 +178,112 @@ def _normalize_scout_entry_hint(
 
 @runtime_checkable
 class ActiveSheetChecker(Protocol):
-    """같은 날 같은 ticker에 활성 시트가 있는지 확인."""
+    """같은 날 같은 ticker 시트 + 24h 내 손절 이력 검사.
+
+    audit B1 / B2 / C fix (2026-05-15): default 가 NullActiveSheetChecker 라
+    실 enforcement 가 없던 dead code. PgActiveSheetChecker (DB 기반) 가
+    실제 구현. fail-open 정책 — DB 장애 시 False 반환 (sheet 발행 진행).
+    """
 
     async def has_active_sheet_today(self, ticker: str, as_of_date: datetime) -> bool: ...
 
+    async def has_recent_stop_loss(self, ticker: str) -> bool: ...
+
 
 class NullActiveSheetChecker:
-    """항상 False 반환 — Phase 1 기본 (DB 미연결 환경)."""
+    """항상 False 반환 — fallback / 테스트용. 운영에서는 PgActiveSheetChecker 사용."""
 
     async def has_active_sheet_today(self, ticker: str, as_of_date: datetime) -> bool:
         return False
+
+    async def has_recent_stop_loss(self, ticker: str) -> bool:
+        return False
+
+
+# 24h 내 stop sell 검사 reason — fast_loop/cooldown_check.py 와 동일 contract.
+_STOP_REASONS = ("fixed_sl", "stop_loss", "breakeven_stop")
+
+_SQL_HAS_ACTIVE_TODAY = (
+    "SELECT EXISTS (SELECT 1 FROM position_sheets "
+    "WHERE ticker = $1 "
+    "  AND (generated_at AT TIME ZONE 'Asia/Seoul')::date = "
+    "      ($2::timestamptz AT TIME ZONE 'Asia/Seoul')::date)"
+)
+
+_SQL_HAS_RECENT_STOP = (
+    "SELECT EXISTS ("
+    "  SELECT 1 FROM executions e "
+    "  JOIN position_sheets ps USING (sheet_id) "
+    "  WHERE ps.ticker = $1 "
+    "    AND e.side = 'sell' "
+    "    AND (e.metadata_json->>'reason') = ANY($2) "
+    "    AND e.executed_at > now() - interval '24 hours'"
+    ")"
+)
+
+
+class PgActiveSheetChecker:
+    """SQLAlchemy AsyncEngine 기반 — 운영 구현체.
+
+    slow_loop 의 db_engine (sqlalchemy.ext.asyncio.AsyncEngine) 을 그대로 사용해
+    feeder/screening_executor 와 일관성 유지. fail-open 정책 — DB 장애 시 False
+    반환 (sheet 발행 진행, 매매 path 보호).
+
+    Parameters
+    ----------
+    engine:
+        SQLAlchemy AsyncEngine.
+    stop_reasons:
+        cooldown trigger 가 되는 executions.metadata_json->>'reason' 목록.
+        기본 fast_loop/cooldown_check.py 와 동일.
+    """
+
+    def __init__(self, engine, *, stop_reasons=_STOP_REASONS) -> None:
+        self._engine = engine
+        self._stop_reasons = list(stop_reasons)
+
+    async def has_active_sheet_today(self, ticker: str, as_of_date: datetime) -> bool:
+        from sqlalchemy import text
+
+        sql = text(
+            "SELECT EXISTS (SELECT 1 FROM position_sheets "
+            "WHERE ticker = :ticker "
+            "  AND (generated_at AT TIME ZONE 'Asia/Seoul')::date = "
+            "      (:as_of_date AT TIME ZONE 'Asia/Seoul')::date)"
+        )
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(sql, {"ticker": ticker, "as_of_date": as_of_date})
+                return bool(result.scalar())
+        except Exception:
+            logger.exception(
+                "has_active_sheet_today failed ticker=%s — fail-open (return False)", ticker
+            )
+            return False
+
+    async def has_recent_stop_loss(self, ticker: str) -> bool:
+        from sqlalchemy import text
+
+        # ANY() with text array binding: cast list to text[] via SQLAlchemy.
+        sql = text(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM executions e "
+            "  JOIN position_sheets ps USING (sheet_id) "
+            "  WHERE ps.ticker = :ticker "
+            "    AND e.side = 'sell' "
+            "    AND (e.metadata_json->>'reason') = ANY(:reasons) "
+            "    AND e.executed_at > now() - interval '24 hours'"
+            ")"
+        )
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(sql, {"ticker": ticker, "reasons": self._stop_reasons})
+                return bool(result.scalar())
+        except Exception:
+            logger.exception(
+                "has_recent_stop_loss failed ticker=%s — fail-open (return False)", ticker
+            )
+            return False
 
 
 # =====================================================================
@@ -264,7 +364,7 @@ class StrategyEngine:
             )
             return None, "macro_closed"
 
-        # 3. 중복 체크 (같은 날 같은 ticker 이미 활성)
+        # 3. 중복 체크 (같은 날 같은 ticker 이미 활성) — audit B2
         if await self._active_checker.has_active_sheet_today(candidate.ticker, inputs.generated_at):
             logger.info(
                 "sheet_rejected: duplicate ticker=%s date=%s",
@@ -272,6 +372,16 @@ class StrategyEngine:
                 inputs.generated_at.date(),
             )
             return None, "duplicate_today"
+
+        # 3b. 24h 내 손절 이력 — audit C (recent stop-loss cooldown).
+        # fast_loop cooldown 가드와 동일 logic 을 sheet 발행 단계에서도 검사 —
+        # 발행 자체를 차단하면 후행 path (fast_loop, KIS) 도 안 거침.
+        if await self._active_checker.has_recent_stop_loss(candidate.ticker):
+            logger.info(
+                "sheet_rejected: recent_stoploss_cooldown ticker=%s",
+                candidate.ticker,
+            )
+            return None, "recent_stoploss_cooldown"
 
         # 4. size 계산
         entry = self._policy.get(tag)

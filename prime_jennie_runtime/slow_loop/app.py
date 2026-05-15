@@ -250,6 +250,7 @@ def _build_slow_loop_components(
             news=RealNewsEventFeeder(engine=db_engine),
             sector=RealSectorMomentumFeeder(engine=db_engine),
             market=RealMarketSummaryFeeder(engine=db_engine),
+            engine=db_engine,  # audit B1 — today_entries / recent_stops 조회용
         )
     else:
         scout_builder = ScoutContextBuilder(
@@ -281,7 +282,17 @@ def _build_slow_loop_components(
     policy = load_policy()
     # fast_loop 가 Redis 에 적재한 intraday:risk:level 을 시트 발행 시 그대로 반영.
     risk_throttle = RedisRiskThrottleSnapshot(redis_client=redis_client)
-    engine = StrategyEngine(policy=policy, risk_throttle=risk_throttle)
+    # audit B2 dead code 복구 — db_engine 있으면 실제 enforcement.
+    # 미주입 시 NullActiveSheetChecker 로 fallback (legacy 동작).
+    if db_engine is not None:
+        from prime_jennie_runtime.slow_loop.strategy.engine import PgActiveSheetChecker
+
+        active_checker = PgActiveSheetChecker(db_engine)
+    else:
+        active_checker = None  # StrategyEngine 이 NullActiveSheetChecker fallback
+    engine = StrategyEngine(
+        policy=policy, risk_throttle=risk_throttle, active_checker=active_checker
+    )
     publisher = PositionSheetPublisher(client=redis_client, db_engine=db_engine)
     state_store = MacroStateStore(client=redis_client)
     system_state = SystemState(redis_client=redis_client)

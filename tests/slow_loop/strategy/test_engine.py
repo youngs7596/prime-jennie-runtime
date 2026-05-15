@@ -36,13 +36,19 @@ from prime_jennie_runtime.slow_loop.strategy.risk_throttle import (
 
 
 class _StubChecker:
-    def __init__(self, active: bool = False) -> None:
+    def __init__(self, active: bool = False, recent_stop: bool = False) -> None:
         self._active = active
+        self._recent_stop = recent_stop
         self.calls: list[str] = []
+        self.cooldown_calls: list[str] = []
 
     async def has_active_sheet_today(self, ticker: str, as_of_date: datetime) -> bool:
         self.calls.append(ticker)
         return self._active
+
+    async def has_recent_stop_loss(self, ticker: str) -> bool:
+        self.cooldown_calls.append(ticker)
+        return self._recent_stop
 
 
 def _candidate(
@@ -459,6 +465,30 @@ async def test_build_sheet_with_reason_duplicate_today():
     sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
     assert sheet is None
     assert reason == "duplicate_today"
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_recent_stoploss_cooldown():
+    """audit C — 24h 내 손절 이력 있는 ticker → sheet 발행 차단."""
+    checker = _StubChecker(active=False, recent_stop=True)
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), active_checker=checker)
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
+    assert sheet is None
+    assert reason == "recent_stoploss_cooldown"
+    # duplicate 검사 통과 후 cooldown 검사 호출
+    assert checker.calls == ["005930"]
+    assert checker.cooldown_calls == ["005930"]
+
+
+@pytest.mark.asyncio
+async def test_cooldown_not_called_when_duplicate_today():
+    """duplicate 가드가 먼저 발화하면 cooldown 검사 skip (cost saving)."""
+    checker = _StubChecker(active=True, recent_stop=True)
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), active_checker=checker)
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
+    assert sheet is None
+    assert reason == "duplicate_today"
+    assert checker.cooldown_calls == []  # duplicate 분기에서 early return
 
 
 # =====================================================================

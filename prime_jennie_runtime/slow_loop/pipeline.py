@@ -551,6 +551,11 @@ async def run_slow_loop(
         "consensus_data": {
             t: e.model_dump(mode="json") for t, e in scout_ctx.consensus_data.items()
         },
+        # audit B1 fix (2026-05-15) — 거래 이력 노출. Scout 코드가 candidates 에서
+        # 제외 + LLM prompt 도 동일 정보 인지. enforcement 는 fast_loop cooldown
+        # 가드 (cooldown_check.py) 가 2nd layer.
+        "today_entries": list(scout_ctx.today_entries),
+        "recent_stop_loss_tickers": list(scout_ctx.recent_stop_loss_tickers),
     }
 
     async def _primary_scout_validated():

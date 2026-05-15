@@ -132,6 +132,12 @@ class ScoutContext(BaseModel):
     # Forward 컨센서스 (v3 DB 적재 전 — 현재 모두 None). 후속 작업에서 RealConsensusFeeder
     # 가 채운다. ``{}`` 면 feeder 미주입, 값이 있으면 ticker 별 ConsensusEntry.
     consensus_data: dict[str, ConsensusEntry] = Field(default_factory=dict)
+    # Audit B1 (Scout history blindness) 대응 — 2026-05-15 도입.
+    # 같은 거래일 이미 sheet 발행된 ticker. LLM 이 중복 추천 자체검열 가능.
+    today_entries: list[str] = Field(default_factory=list)
+    # 24h 내 손절 (fixed_sl/stop_loss/breakeven_stop) 발생한 ticker. cooldown 가드
+    # 와 동일 데이터셋 — Scout 단계에서 자체 회피 + fast_loop enforcement 가 2nd layer.
+    recent_stop_loss_tickers: list[str] = Field(default_factory=list)
 
 
 # =====================================================================

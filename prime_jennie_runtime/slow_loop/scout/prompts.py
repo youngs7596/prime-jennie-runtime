@@ -331,6 +331,12 @@ Trigger: {ctx.trigger_reason}
 
 ## Universe 크기
 {len(ctx.universe)} 종목
+
+## 참고 — 시스템이 강제 차단할 종목 (informational, LLM 검열 의존 X)
+- today_entries (오늘 sheet 이미 발행): {(", ".join(ctx.today_entries) if ctx.today_entries else "(없음)")}
+- recent_stop_loss_tickers (24h 내 손절): {(", ".join(ctx.recent_stop_loss_tickers) if ctx.recent_stop_loss_tickers else "(없음)")}
+
+위 종목은 Strategy Engine 단계에서 자동 reject 되므로 추천해도 sheet 안 나갑니다 (effort 낭비). 자가 검열 권장이지만 enforcement 는 후행 layer 가 담당.
 {retry_section}
 ---
 

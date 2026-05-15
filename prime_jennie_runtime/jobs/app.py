@@ -65,6 +65,7 @@ from .market_data import (
 )
 from .minute_chart import collect_minute_chart
 from .positions import sync_positions
+from .positions_reconcile import reconcile_state_kis
 from .stock_masters import seed_stock_masters
 from .wsj_gmail_ingest import wsj_gmail_ingest
 
@@ -182,6 +183,11 @@ def build_handlers(
             stop_loss_pct=stop_loss_pct,
         )
 
+    async def h_reconcile_state_kis() -> None:
+        await reconcile_state_kis(
+            redis_client=redis_client, http=http, kis_gateway_url=kis_gateway_url
+        )
+
     async def h_weekly_factor_analysis(period_days: int = 30) -> None:
         await weekly_factor_analysis(pool, redis_client, period_days=period_days)
 
@@ -244,6 +250,7 @@ def build_handlers(
         "seed_stock_masters": h_seed_stock_masters,
         "daily_asset_snapshot": h_daily_asset_snapshot,
         "sync_positions": h_sync_positions,
+        "reconcile_state_kis": h_reconcile_state_kis,
         "weekly_factor_analysis": h_weekly_factor_analysis,
         "collect_minute_chart": h_collect_minute_chart,
         "collect_full_market_data": h_collect_full_market_data,

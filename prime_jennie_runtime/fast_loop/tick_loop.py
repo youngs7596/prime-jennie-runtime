@@ -72,6 +72,8 @@ class TickLoop:
         consumer: str = "fast_loop_tick_1",
         stream: str = STREAM_PRICES,
         block_ms: int = 1000,
+        max_entry_rejects: int = 5,
+        notifier=None,
     ):
         self._redis = redis_client
         self._tracker = tracker
@@ -90,6 +92,12 @@ class TickLoop:
         self._stream = stream
         self._block_ms = block_ms
         self._running = False
+        # audit A1 fix (2026-05-15) — entry KIS reject 누적 차단.
+        # 같은 sheet 가 매 tick 재시도하다 N회 도달 시 큐에서 제거 + critical alert.
+        # 5-13 max_exit_failures 와 같은 원리의 entry 측 가드. KIS rate limit 폭주 방어.
+        self._max_entry_rejects = max(1, max_entry_rejects)
+        self._entry_reject_counts: dict[str, int] = {}
+        self._notifier = notifier
 
     async def ensure_group(self) -> None:
         try:
@@ -322,12 +330,54 @@ class TickLoop:
                     outcome.filled_price,
                 )
                 await self._queue.remove(sheet.sheet_id)
+                self._entry_reject_counts.pop(sheet.sheet_id, None)
             else:
+                # audit A1 — reject 누적 + max 도달 시 큐 제거 (KIS rate limit 방어)
+                cnt = self._entry_reject_counts.get(sheet.sheet_id, 0) + 1
+                self._entry_reject_counts[sheet.sheet_id] = cnt
                 logger.warning(
-                    "pending entry failed: sheet=%s reason=%s — leaving in queue for retry",
+                    "pending entry failed: sheet=%s reason=%s reject_count=%d/%d",
                     sheet.sheet_id,
                     outcome.reason,
+                    cnt,
+                    self._max_entry_rejects,
                 )
+                if cnt >= self._max_entry_rejects:
+                    logger.error(
+                        "pending entry max rejects — removing from queue: sheet=%s ticker=%s",
+                        sheet.sheet_id,
+                        sheet.ticker,
+                    )
+                    await self._queue.remove(sheet.sheet_id)
+                    self._entry_reject_counts.pop(sheet.sheet_id, None)
+                    if self._notifier is not None:
+                        try:
+                            from datetime import UTC, datetime
+
+                            from prime_jennie_runtime.fast_loop.schemas import (
+                                GenericAlertNotification,
+                            )
+
+                            await self._notifier.emit(
+                                GenericAlertNotification(
+                                    severity="critical",
+                                    title="entry max rejects",
+                                    body=(
+                                        f"sheet={sheet.sheet_id} ticker={sheet.ticker} "
+                                        f"reason={outcome.reason} count={cnt} — 큐에서 제거"
+                                    ),
+                                    ts=datetime.now(UTC),
+                                    metadata={
+                                        "component": "tick_loop",
+                                        "sheet_id": sheet.sheet_id,
+                                        "ticker": sheet.ticker,
+                                        "reject_count": cnt,
+                                        "last_reason": outcome.reason or "",
+                                    },
+                                )
+                            )
+                        except Exception:
+                            logger.exception("entry max-rejects alert emit failed")
 
     async def _emit_entry_decided(
         self,

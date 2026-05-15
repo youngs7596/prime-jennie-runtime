@@ -280,6 +280,7 @@ async def run() -> None:
             entry_executor=entry_executor,
             account_sizer=sizer,
             bar_engine=bar_engine,
+            notifier=notifier,  # audit A1 max-rejects alert
         )
         await tick_loop.ensure_group()
 

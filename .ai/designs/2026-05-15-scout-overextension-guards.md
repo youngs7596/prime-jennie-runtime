@@ -57,7 +57,7 @@
 
 (d) 는 이번 세션에서 해결. 본 design 은 (a)(b)(c) 를 다룬다.
 
-## 3. Four-Layer Guards — Layer 배치
+## 3. Five-Layer Guards — Layer 배치
 
 | # | 가드 | Layer | 의사결정에 작용 | 막는 손실 패턴 |
 |---|---|---|---|---|
@@ -65,6 +65,7 @@
 | **G2** | Overextension validator | **Strategy Engine sheet 발행 단계** | scout 가 추천해도 시트 발행 차단 | 상투 종목 (10건 중 8건) |
 | **G3** | 시초 갭다운 entry 가드 | **fast_loop entry path** | 시초가 갭다운 시 entry 보류 | 신규 시초 진입 (오늘 4건) |
 | **G4** | 시초 추격 손절 timing 변경 | **fast_loop exit_evaluator** | 시초 5분 손절 보류 (변동성 흡수) | 어제 진입 → 오늘 시초 갭다운 손절 (오늘 8건) |
+| **G5** | today_exit_cooldown (2026-05-15 후속) | **Strategy Engine sheet 발행 단계** | 같은 거래일 청산 (익절/손절 무관) 시 reject | 손절→재진입→손절 11건 + 익절→재진입→손절 2건 |
 
 핵심 원칙 (사용자 정립 `feedback_prompt_control_limit`):
 - **모든 enforcement 는 결정론 코드 layer**. Scout prompt 변경은 정보 노출만, 차단은 후행 layer.
@@ -106,9 +107,21 @@ calibration: 5-15 시초 갭다운 폭 실측치 ground truth 로 사용 (오늘
 
 ## 5. 도입 순서 + 오늘 범위
 
-### 오늘 (5-15, 장 마감 15:30 후)
-- **G1 outcome 피드백 only** — read-only 데이터 흐름. scout 의사결정에 즉시 영향 없음, 학습 신호만 확보.
-- 배포 위험: 낮음 (SQL view + ScoutContext 확장, 의사결정 로직 변경 없음).
+### 오늘 (5-15) 실제 도입 — 장중 emergency 포함
+
+**KST 13:25 ~ 14:00 동안 5 commit 일괄:**
+1. `aefda5a` fix(guards): metadata key 'reason' → 'exit_reason' — 이번 세션 cooldown 가드
+   5종이 모두 잘못된 키 사용 → 5-15 부터 가드 무용지물 사실 발견 후 hotfix.
+2. `f4b5679` feat(scout) G1: scout_outcomes_v1 view + ScoutContext.previous_outcomes +
+   prompt v0.5 → v0.6 (outcomes 섹션).
+3. `b895d78` fix(scout): G1 SQL asyncpg syntax (:days::int → make_interval).
+4. `048b915` feat(guards): **today_exit_cooldown (G5)** — 5월 첫 주 데이터 (손절→재진입
+   11건 + 익절→재진입→손절 2건 vs 회복 2건, net +48%p) 근거. prompt v0.6 → v0.7.
+
+**검증 결과 (직접 호출):**
+- `_fetch_today_exits` → 12 ticker 정확 검출 (오늘 손절 10 + 익절 011070 + manual 128940)
+- `PgActiveSheetChecker.has_recent_exit_today` → True/False 정확 판정
+- 14:30 cron 은 `macro_closed` 라 scout 미실행 — 자연 검증은 5-18 시초로 이월
 
 ### 다음 거래일 (5-18 월) 시초 자연 검증
 - 어제 (이번 세션) cooldown 가드 효과 측정.

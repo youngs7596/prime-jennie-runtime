@@ -178,16 +178,22 @@ def _normalize_scout_entry_hint(
 
 @runtime_checkable
 class ActiveSheetChecker(Protocol):
-    """같은 날 같은 ticker 시트 + 24h 내 손절 이력 검사.
+    """같은 날 같은 ticker 시트 + 24h 내 손절 + 같은 거래일 청산 이력 검사.
 
     audit B1 / B2 / C fix (2026-05-15): default 가 NullActiveSheetChecker 라
     실 enforcement 가 없던 dead code. PgActiveSheetChecker (DB 기반) 가
     실제 구현. fail-open 정책 — DB 장애 시 False 반환 (sheet 발행 진행).
+
+    `has_recent_exit_today` (2026-05-15 후속): 같은 KST 거래일 내 exit_reason
+    무관 sell 1건 이상이면 True — "익절 후 재진입 → 손절" 패턴 (5-15 011070)
+    + "손절 후 재진입 → 또 손절" (1주일 11건) 모두 차단.
     """
 
     async def has_active_sheet_today(self, ticker: str, as_of_date: datetime) -> bool: ...
 
     async def has_recent_stop_loss(self, ticker: str) -> bool: ...
+
+    async def has_recent_exit_today(self, ticker: str, as_of_date: datetime) -> bool: ...
 
 
 class NullActiveSheetChecker:
@@ -197,6 +203,9 @@ class NullActiveSheetChecker:
         return False
 
     async def has_recent_stop_loss(self, ticker: str) -> bool:
+        return False
+
+    async def has_recent_exit_today(self, ticker: str, as_of_date: datetime) -> bool:
         return False
 
 
@@ -219,6 +228,18 @@ _SQL_HAS_RECENT_STOP = (
     "    AND e.side = 'sell' "
     "    AND (e.metadata_json->>'exit_reason') = ANY($2) "
     "    AND e.executed_at > now() - interval '24 hours'"
+    ")"
+)
+
+# today_exit_cooldown (2026-05-15) — exit_reason 무관, 같은 KST 거래일 sell 존재.
+_SQL_HAS_RECENT_EXIT_TODAY = (
+    "SELECT EXISTS ("
+    "  SELECT 1 FROM executions e "
+    "  JOIN position_sheets ps USING (sheet_id) "
+    "  WHERE ps.ticker = $1 "
+    "    AND e.side = 'sell' "
+    "    AND (e.executed_at AT TIME ZONE 'Asia/Seoul')::date = "
+    "        ($2::timestamptz AT TIME ZONE 'Asia/Seoul')::date"
     ")"
 )
 
@@ -283,6 +304,30 @@ class PgActiveSheetChecker:
         except Exception:
             logger.exception(
                 "has_recent_stop_loss failed ticker=%s — fail-open (return False)", ticker
+            )
+            return False
+
+    async def has_recent_exit_today(self, ticker: str, as_of_date: datetime) -> bool:
+        """같은 KST 거래일 내 exit_reason 무관 sell 존재 시 True."""
+        from sqlalchemy import text
+
+        sql = text(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM executions e "
+            "  JOIN position_sheets ps USING (sheet_id) "
+            "  WHERE ps.ticker = :ticker "
+            "    AND e.side = 'sell' "
+            "    AND (e.executed_at AT TIME ZONE 'Asia/Seoul')::date = "
+            "        (:as_of_date AT TIME ZONE 'Asia/Seoul')::date"
+            ")"
+        )
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(sql, {"ticker": ticker, "as_of_date": as_of_date})
+                return bool(result.scalar())
+        except Exception:
+            logger.exception(
+                "has_recent_exit_today failed ticker=%s — fail-open (return False)", ticker
             )
             return False
 
@@ -383,6 +428,17 @@ class StrategyEngine:
                 candidate.ticker,
             )
             return None, "recent_stoploss_cooldown"
+
+        # 3c. 같은 거래일 청산 이력 (exit_reason 무관) — today_exit_cooldown.
+        # 근거: 7일간 손절→재진입 11건 + 익절→재진입→손절 2건. cooldown 가드 (3b)
+        # 는 STOP_REASONS 만 봐서 trailing_tp 익절 후 재진입은 못 막음 (5-15 011070
+        # 사례 — trailing_tp +3.66% 후 13분 만에 재진입 → fixed_sl -4.11%).
+        if await self._active_checker.has_recent_exit_today(candidate.ticker, inputs.generated_at):
+            logger.info(
+                "sheet_rejected: today_exit_cooldown ticker=%s",
+                candidate.ticker,
+            )
+            return None, "today_exit_cooldown"
 
         # 4. size 계산
         entry = self._policy.get(tag)

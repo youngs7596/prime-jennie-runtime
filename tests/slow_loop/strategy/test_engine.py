@@ -36,11 +36,18 @@ from prime_jennie_runtime.slow_loop.strategy.risk_throttle import (
 
 
 class _StubChecker:
-    def __init__(self, active: bool = False, recent_stop: bool = False) -> None:
+    def __init__(
+        self,
+        active: bool = False,
+        recent_stop: bool = False,
+        recent_exit_today: bool = False,
+    ) -> None:
         self._active = active
         self._recent_stop = recent_stop
+        self._recent_exit_today = recent_exit_today
         self.calls: list[str] = []
         self.cooldown_calls: list[str] = []
+        self.today_exit_calls: list[str] = []
 
     async def has_active_sheet_today(self, ticker: str, as_of_date: datetime) -> bool:
         self.calls.append(ticker)
@@ -49,6 +56,10 @@ class _StubChecker:
     async def has_recent_stop_loss(self, ticker: str) -> bool:
         self.cooldown_calls.append(ticker)
         return self._recent_stop
+
+    async def has_recent_exit_today(self, ticker: str, as_of_date: datetime) -> bool:
+        self.today_exit_calls.append(ticker)
+        return self._recent_exit_today
 
 
 def _candidate(
@@ -489,6 +500,33 @@ async def test_cooldown_not_called_when_duplicate_today():
     assert sheet is None
     assert reason == "duplicate_today"
     assert checker.cooldown_calls == []  # duplicate 분기에서 early return
+
+
+@pytest.mark.asyncio
+async def test_build_sheet_with_reason_today_exit_cooldown():
+    """today_exit_cooldown — 익절 포함 같은 거래일 exit 이력 시 sheet 차단.
+
+    근거 (5-15 011070): trailing_tp +3.66% 후 13분 만에 같은 종목 재진입 →
+    fixed_sl -4.11%. recent_stop_loss 가드 (3b) 는 익절 제외라 못 막음.
+    """
+    checker = _StubChecker(active=False, recent_stop=False, recent_exit_today=True)
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), active_checker=checker)
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
+    assert sheet is None
+    assert reason == "today_exit_cooldown"
+    # duplicate / cooldown 통과 후 today_exit 가드 호출
+    assert checker.today_exit_calls == ["005930"]
+
+
+@pytest.mark.asyncio
+async def test_today_exit_not_called_when_recent_stoploss():
+    """recent_stoploss 가 먼저 발화하면 today_exit 검사 skip."""
+    checker = _StubChecker(active=False, recent_stop=True, recent_exit_today=True)
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), active_checker=checker)
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(), _inputs())
+    assert sheet is None
+    assert reason == "recent_stoploss_cooldown"
+    assert checker.today_exit_calls == []
 
 
 # =====================================================================

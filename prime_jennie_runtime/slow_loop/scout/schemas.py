@@ -157,6 +157,10 @@ class ScoutContext(BaseModel):
     # 24h 내 손절 (fixed_sl/stop_loss/breakeven_stop) 발생한 ticker. cooldown 가드
     # 와 동일 데이터셋 — Scout 단계에서 자체 회피 + fast_loop enforcement 가 2nd layer.
     recent_stop_loss_tickers: list[str] = Field(default_factory=list)
+    # 같은 KST 거래일 내 청산 (exit_reason 무관) 발생한 ticker — 2026-05-15 도입.
+    # 데이터 근거: 5월 첫 주 "손절→재진입→손절" 11건 + "익절→재진입→손절" 2건 vs
+    # "익절→재진입→회복" 2건. Strategy Engine sheet 발행 단계에서 차단.
+    recently_exited_today_tickers: list[str] = Field(default_factory=list)
     # G1 outcome 피드백 (2026-05-15 도입) — 최근 7일 청산 완료 추천 결과.
     # scout_outcomes_v1 view 에서 추출. enforcement 없음 (informational only).
     previous_outcomes: list[PreviousOutcome] = Field(default_factory=list)

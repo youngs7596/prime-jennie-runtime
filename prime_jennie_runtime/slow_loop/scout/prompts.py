@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
-SCOUT_PROMPT_VERSION = "v0.6"
+SCOUT_PROMPT_VERSION = "v0.7"
 """Scout 프롬프트 버전.
 
 prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
@@ -25,6 +25,8 @@ scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt �
 - v0.6 (2026-05-15): G1 outcome 피드백 섹션 추가 — 직전 7일 추천 결과
                      (손절율, 평균 PnL, 최근 손절 ticker) 노출. informational only;
                      enforcement 는 후행 layer (G2~G4) 에서.
+- v0.7 (2026-05-15): recently_exited_today_tickers (today_exit_cooldown) 라인 추가.
+                     같은 거래일 청산 (익절/손절 무관) ticker 자동 reject 안내.
 """
 
 ALLOWED_IMPORTS = (
@@ -382,6 +384,7 @@ Trigger: {ctx.trigger_reason}
 ## 참고 — 시스템이 강제 차단할 종목 (informational, LLM 검열 의존 X)
 - today_entries (오늘 sheet 이미 발행): {(", ".join(ctx.today_entries) if ctx.today_entries else "(없음)")}
 - recent_stop_loss_tickers (24h 내 손절): {(", ".join(ctx.recent_stop_loss_tickers) if ctx.recent_stop_loss_tickers else "(없음)")}
+- recently_exited_today_tickers (오늘 청산, 익절/손절 무관): {(", ".join(ctx.recently_exited_today_tickers) if ctx.recently_exited_today_tickers else "(없음)")}
 
 위 종목은 Strategy Engine 단계에서 자동 reject 되므로 추천해도 sheet 안 나갑니다 (effort 낭비). 자가 검열 권장이지만 enforcement 는 후행 layer 가 담당.
 

@@ -56,6 +56,18 @@ def test_pg_active_sheet_checker_reads_exit_reason():
     assert "metadata_json->>'reason'" not in src
 
 
+def test_pg_active_sheet_checker_has_today_exit_method():
+    """today_exit_cooldown contract: has_recent_exit_today 가 KST 거래일 기준
+    sell row 검사 (exit_reason 무관)."""
+    from prime_jennie_runtime.slow_loop.strategy import engine
+
+    src = inspect.getsource(engine.PgActiveSheetChecker.has_recent_exit_today)
+    # exit_reason 키를 보지 않아야 함 (모든 sell 대상)
+    assert "exit_reason" not in src or "metadata_json->>'exit_reason'" not in src
+    # KST 거래일 기준
+    assert "Asia/Seoul" in src
+
+
 def test_scout_context_builder_reads_exit_reason():
     from prime_jennie_runtime.slow_loop.scout import context_builder
 

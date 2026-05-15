@@ -38,6 +38,16 @@ _SQL_TODAY_ENTRIES = (
     "      (now() AT TIME ZONE 'Asia/Seoul')::date "
     "ORDER BY ticker"
 )
+
+# today_exit_cooldown (2026-05-15) — exit_reason 무관, KST 거래일 sell 있는 ticker.
+_SQL_TODAY_EXITS_SA = (
+    "SELECT DISTINCT ps.ticker "
+    "FROM executions e JOIN position_sheets ps USING (sheet_id) "
+    "WHERE e.side = 'sell' "
+    "  AND (e.executed_at AT TIME ZONE 'Asia/Seoul')::date = "
+    "      (now() AT TIME ZONE 'Asia/Seoul')::date "
+    "ORDER BY ps.ticker"
+)
 # SQLAlchemy named param 형식 — :reasons 는 list[str] bind.
 # 2026-05-15 emergency fix: persistence.py:143 키는 'exit_reason'.
 _SQL_RECENT_STOPS_SA = (
@@ -92,6 +102,21 @@ async def _fetch_recent_stops(engine: Any | None) -> list[str]:
             return [row[0] for row in result.fetchall()]
     except Exception:
         logger.exception("recent_stops fetch failed — using empty list (fail-open)")
+        return []
+
+
+async def _fetch_today_exits(engine: Any | None) -> list[str]:
+    """같은 KST 거래일 청산 ticker (exit_reason 무관). fail-open."""
+    if engine is None:
+        return []
+    try:
+        from sqlalchemy import text
+
+        async with engine.connect() as conn:
+            result = await conn.execute(text(_SQL_TODAY_EXITS_SA))
+            return [row[0] for row in result.fetchall()]
+    except Exception:
+        logger.exception("today_exits fetch failed — using empty list (fail-open)")
         return []
 
 
@@ -167,6 +192,8 @@ class ScoutContextBuilder:
         # audit B1 fix — 거래 이력 노출 (engine 주입 시).
         today_entries = await _fetch_today_entries(self.engine)
         recent_stops = await _fetch_recent_stops(self.engine)
+        # today_exit_cooldown — 같은 거래일 청산 ticker (exit_reason 무관).
+        today_exits = await _fetch_today_exits(self.engine)
         # G1 — outcome 피드백 (engine 주입 + view 존재 시).
         previous_outcomes = await _fetch_previous_outcomes(self.engine)
 
@@ -183,5 +210,6 @@ class ScoutContextBuilder:
             consensus_data=consensus_data,
             today_entries=today_entries,
             recent_stop_loss_tickers=recent_stops,
+            recently_exited_today_tickers=today_exits,
             previous_outcomes=previous_outcomes,
         )

@@ -69,13 +69,16 @@ class PgCooldownChecker:
         cooldown trigger 되는 metadata reason 목록.
     """
 
+    # 2026-05-15 emergency fix: persistence.py:143 는 'exit_reason' 키로 저장
+    # 하는데 본 SQL 이 'reason' 키를 보고 있어 가드가 항상 false negative.
+    # row 별칭은 RecentStopLoss.reason 필드와 contract 유지를 위해 'reason' 으로 둠.
     _SQL = (
-        "SELECT e.executed_at, e.metadata_json->>'reason' AS reason "
+        "SELECT e.executed_at, e.metadata_json->>'exit_reason' AS reason "
         "FROM executions e "
         "JOIN position_sheets ps USING (sheet_id) "
         "WHERE ps.ticker = $1 "
         "  AND e.side = 'sell' "
-        "  AND (e.metadata_json->>'reason') = ANY($2) "
+        "  AND (e.metadata_json->>'exit_reason') = ANY($2) "
         "  AND e.executed_at > now() - ($3::int * interval '1 hour') "
         "ORDER BY e.executed_at DESC "
         "LIMIT 1"

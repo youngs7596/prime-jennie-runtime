@@ -39,11 +39,12 @@ _SQL_TODAY_ENTRIES = (
     "ORDER BY ticker"
 )
 # SQLAlchemy named param 형식 — :reasons 는 list[str] bind.
+# 2026-05-15 emergency fix: persistence.py:143 키는 'exit_reason'.
 _SQL_RECENT_STOPS_SA = (
     "SELECT DISTINCT ps.ticker "
     "FROM executions e JOIN position_sheets ps USING (sheet_id) "
     "WHERE e.side = 'sell' "
-    "  AND (e.metadata_json->>'reason') = ANY(:reasons) "
+    "  AND (e.metadata_json->>'exit_reason') = ANY(:reasons) "
     "  AND e.executed_at > now() - interval '24 hours' "
     "ORDER BY ps.ticker"
 )

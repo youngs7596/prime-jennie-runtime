@@ -210,13 +210,14 @@ _SQL_HAS_ACTIVE_TODAY = (
     "      ($2::timestamptz AT TIME ZONE 'Asia/Seoul')::date)"
 )
 
+# 2026-05-15 emergency fix: persistence.py:143 키는 'exit_reason'.
 _SQL_HAS_RECENT_STOP = (
     "SELECT EXISTS ("
     "  SELECT 1 FROM executions e "
     "  JOIN position_sheets ps USING (sheet_id) "
     "  WHERE ps.ticker = $1 "
     "    AND e.side = 'sell' "
-    "    AND (e.metadata_json->>'reason') = ANY($2) "
+    "    AND (e.metadata_json->>'exit_reason') = ANY($2) "
     "    AND e.executed_at > now() - interval '24 hours'"
     ")"
 )
@@ -234,7 +235,7 @@ class PgActiveSheetChecker:
     engine:
         SQLAlchemy AsyncEngine.
     stop_reasons:
-        cooldown trigger 가 되는 executions.metadata_json->>'reason' 목록.
+        cooldown trigger 가 되는 executions.metadata_json->>'exit_reason' 목록.
         기본 fast_loop/cooldown_check.py 와 동일.
     """
 
@@ -271,7 +272,7 @@ class PgActiveSheetChecker:
             "  JOIN position_sheets ps USING (sheet_id) "
             "  WHERE ps.ticker = :ticker "
             "    AND e.side = 'sell' "
-            "    AND (e.metadata_json->>'reason') = ANY(:reasons) "
+            "    AND (e.metadata_json->>'exit_reason') = ANY(:reasons) "
             "    AND e.executed_at > now() - interval '24 hours'"
             ")"
         )

@@ -25,13 +25,15 @@ from prime_jennie_runtime.coordinator.policies.base import Policy, PolicyResult
 DEFAULT_WINDOW_HOURS = 24
 STOP_REASONS = ("fixed_sl", "stop_loss", "breakeven_stop")
 
+# 2026-05-15 emergency fix: persistence.py:143 키는 'exit_reason'. 별칭은
+# context["last_exit_reason"] 의 데이터 source contract 유지를 위해 'reason' 으로 둠.
 _SQL = (
-    "SELECT e.executed_at, e.metadata_json->>'reason' AS reason "
+    "SELECT e.executed_at, e.metadata_json->>'exit_reason' AS reason "
     "FROM executions e "
     "JOIN position_sheets ps USING (sheet_id) "
     "WHERE ps.ticker = $1 "
     "  AND e.side = 'sell' "
-    "  AND (e.metadata_json->>'reason') = ANY($2) "
+    "  AND (e.metadata_json->>'exit_reason') = ANY($2) "
     "  AND e.executed_at > now() - ($3::int * interval '1 hour') "
     "ORDER BY e.executed_at DESC "
     "LIMIT 1"

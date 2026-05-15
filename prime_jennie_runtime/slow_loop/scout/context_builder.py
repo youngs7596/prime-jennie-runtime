@@ -54,11 +54,12 @@ _SQL_RECENT_STOPS_SA = (
 _DEFAULT_OUTCOMES_DAYS = 7
 _DEFAULT_OUTCOMES_LIMIT = 50
 
+# asyncpg 는 :days::int * interval 패턴 syntax error → make_interval 사용.
 _SQL_PREVIOUS_OUTCOMES = (
     "SELECT ticker, strategy_tag, generated_at, exit_at, exit_reason, pnl_pct "
     "FROM scout_outcomes_v1 "
     "WHERE exit_at IS NOT NULL "
-    "  AND exit_at > now() - (:days::int * interval '1 day') "
+    "  AND exit_at > now() - make_interval(days => :days) "
     "ORDER BY exit_at DESC "
     "LIMIT :max_rows"
 )

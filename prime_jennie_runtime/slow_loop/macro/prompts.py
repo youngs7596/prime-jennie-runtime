@@ -89,10 +89,7 @@ def build_user_prompt(ctx: MacroContext) -> str:
     retry_section = ""
     if ctx.previous_attempts:
         attempts_str = "\n\n".join(
-            (
-                f"### 시도 #{a.attempt_no} — 실패 사유: {a.error}\n"
-                f"세부:\n```\n{a.details}\n```"
-            )
+            (f"### 시도 #{a.attempt_no} — 실패 사유: {a.error}\n세부:\n```\n{a.details}\n```")
             for a in ctx.previous_attempts
         )
         retry_section = f"""

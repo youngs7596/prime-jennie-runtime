@@ -577,9 +577,7 @@ async def fetch_previous_run_candidates(
                     exit_hint = ExitHint.model_validate(exit_dict)
             factors_raw = r["factors_json"]
             factors = (
-                factors_raw
-                if isinstance(factors_raw, dict)
-                else json.loads(factors_raw or "{}")
+                factors_raw if isinstance(factors_raw, dict) else json.loads(factors_raw or "{}")
             )
             candidates.append(
                 ScreeningCandidate(

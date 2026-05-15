@@ -32,6 +32,7 @@ from prime_jennie_runtime.control.consumer import ControlCommandConsumer
 from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.bar_engine import BarEngine, BarEngineIndicatorProvider
 from prime_jennie_runtime.fast_loop.consumer import PositionSheetConsumer
+from prime_jennie_runtime.fast_loop.cooldown_check import PgCooldownChecker
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
 from prime_jennie_runtime.fast_loop.gateway_subscriber import subscribe_on_startup
@@ -259,6 +260,7 @@ async def run() -> None:
             pending_queue=pending_queue,
             tracker=tracker,
             kis=kis,
+            cooldown_checker=PgCooldownChecker(pool),
         )
         await sheet_consumer.ensure_group()
 

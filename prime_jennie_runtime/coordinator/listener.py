@@ -144,6 +144,8 @@ async def _handle_message(
     db_pool: Any,
     msg_id: str,
     data: dict,
+    *,
+    notifier: Any | None = None,
 ) -> bool:
     """단일 메시지 처리. ACK 가능 여부 (True=성공) 반환.
 
@@ -207,6 +209,20 @@ async def _handle_message(
         subject_id,
         msg_id,
     )
+
+    # Stage 2 advisory policies — archive 성공 후 best-effort 평가.
+    # 실패해도 archive 는 끝났고 ACK 됨. 정책 evaluation 자체가 listener throughput
+    # 에 영향을 주지 않도록 try/except 로 격리.
+    try:
+        from prime_jennie_runtime.coordinator.policies import evaluate_policies
+
+        await evaluate_policies(db_pool, event, notifier=notifier)
+    except Exception:
+        logger.exception(
+            "coordinator policy dispatch crashed kind=%s id=%s",
+            event.event_kind,
+            msg_id,
+        )
     return True
 
 
@@ -301,6 +317,7 @@ async def run_listener(
     stream_key: str = COORDINATOR_STREAM,
     consumer_group: str = COORDINATOR_GROUP,
     consumer_name: str | None = None,
+    notifier: Any | None = None,
 ) -> None:
     """``coordinator:events`` 를 구독해서 ``event_log`` 에 archive.
 
@@ -374,7 +391,7 @@ async def run_listener(
             for raw_id, data in entries:
                 mid = raw_id.decode() if isinstance(raw_id, bytes) else str(raw_id)
                 try:
-                    ok = await _handle_message(db_pool, mid, data)
+                    ok = await _handle_message(db_pool, mid, data, notifier=notifier)
                 except asyncio.CancelledError:
                     raise
                 except Exception:

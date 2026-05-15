@@ -17,6 +17,10 @@ from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 
+from prime_jennie_runtime.fast_loop.cooldown_check import (
+    CooldownChecker,
+    NullCooldownChecker,
+)
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.pending_entry import PendingEntryQueue
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
@@ -42,12 +46,14 @@ class PositionSheetConsumer:
         group: str = "fast_loop",
         consumer: str = "fast_loop_1",
         subscribe_on_enqueue: bool = True,
+        cooldown_checker: CooldownChecker | None = None,
     ):
         self._redis = redis_client
         self._queue = pending_queue
         self._tracker = tracker
         self._kis = kis
         self._subscribe_on_enqueue = subscribe_on_enqueue
+        self._cooldown = cooldown_checker or NullCooldownChecker()
         self._consumer = TypedStreamConsumer(
             redis_client,
             STREAM_POSITION_SHEETS,
@@ -89,7 +95,30 @@ class PositionSheetConsumer:
             await self._emit_entry_rejected(sheet, reason="ticker_pending")
             return
 
-        # 3) 큐 적재 — 같은 sheet_id 가 이미 있으면 noop
+        # 3) recent stop-loss cooldown — 24h 내 같은 종목 손절 이력 있으면 reject.
+        # design: .ai/designs/2026-05-15-cooldown-and-duplicate-guard.md §3
+        try:
+            recent = await self._cooldown.has_recent_stoploss(sheet.ticker)
+        except Exception:
+            logger.exception(
+                "cooldown check failed (fail-open) ticker=%s sheet=%s",
+                sheet.ticker,
+                sheet.sheet_id,
+            )
+            recent = None
+        if recent is not None:
+            logger.info(
+                "sheet rejected (recent_stoploss_cooldown): "
+                "ticker=%s sheet=%s last_exit=%s reason=%s",
+                sheet.ticker,
+                sheet.sheet_id,
+                recent.last_exit_at.isoformat(),
+                recent.reason,
+            )
+            await self._emit_entry_rejected(sheet, reason="recent_stoploss_cooldown")
+            return
+
+        # 4) 큐 적재 — 같은 sheet_id 가 이미 있으면 noop
         added = await self._queue.add(sheet)
         if not added:
             logger.info(
@@ -132,7 +161,7 @@ class PositionSheetConsumer:
                 "coordinator publish_event(EntryQueued) failed sheet=%s", sheet.sheet_id
             )
 
-        # 4) tick 수신을 위해 KIS streamer 에 ticker subscribe
+        # 5) tick 수신을 위해 KIS streamer 에 ticker subscribe
         if self._subscribe_on_enqueue:
             try:
                 await self._kis.subscribe([sheet.ticker])

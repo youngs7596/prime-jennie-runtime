@@ -25,6 +25,7 @@ import asyncpg
 import redis.asyncio as aioredis
 
 from prime_jennie_runtime.coordinator.listener import run_listener
+from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.infra.config import AppConfig
 from prime_jennie_runtime.infra.heartbeat import HeartbeatPublisher
 
@@ -60,6 +61,11 @@ async def run() -> None:
         )
         stack.push_async_callback(pool.close)
 
+        # Stage 2 advisory policies 가 GenericAlertNotification 을 publish 하기 위해
+        # Notifier 주입. fast_loop / monitor 와 동일 v3:notifications stream.
+        notifier = Notifier(redis_client)
+        stack.push_async_callback(notifier.close)
+
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
 
@@ -70,7 +76,7 @@ async def run() -> None:
             loop.add_signal_handler(sig, _request_stop)
 
         logger.info("coordinator listener daemon ready — entering run_listener")
-        await run_listener(redis_client, pool, stop_event=stop_event)
+        await run_listener(redis_client, pool, stop_event=stop_event, notifier=notifier)
         logger.info("coordinator listener daemon shutting down")
 
 

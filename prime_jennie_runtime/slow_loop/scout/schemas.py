@@ -13,6 +13,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from prime_jennie_runtime.position_sheet.schema import ThesisCondition, ThesisSpec
+
+__all__ = ["ThesisCondition", "ThesisSpec"]  # re-export for downstream
+
 # =====================================================================
 # 뉴스 / 매크로 입력 보조 타입
 # =====================================================================
@@ -200,6 +204,9 @@ class ScreeningCandidate(BaseModel):
     exit_hint: ExitHint | None = None
     factors: dict[str, float] = Field(default_factory=dict)
     notes: str = ""
+    # G6 thesis-aware exit Phase A (2026-05-17) — entry 시점 thesis 영속.
+    # Scout LLM 점진 도입기 동안 None 허용 (revaluator 가 None 시 skip).
+    thesis_spec: ThesisSpec | None = None
 
 
 # =====================================================================

@@ -17,7 +17,12 @@ from datetime import datetime
 
 import pytest
 
-from prime_jennie_runtime.position_sheet.schema import KST, MacroStateSnapshot
+from prime_jennie_runtime.position_sheet.schema import (
+    KST,
+    MacroStateSnapshot,
+    ThesisCondition,
+    ThesisSpec,
+)
 from prime_jennie_runtime.slow_loop.scout.schemas import EntryHint, ScreeningCandidate
 from prime_jennie_runtime.slow_loop.strategy.engine import (
     ActiveSheetChecker,
@@ -624,3 +629,70 @@ async def test_gap_up_rebound_limit_with_null_price_no_auto_price_above():
     assert sheet.entry.trigger == "market"
     # price 기준 없으니 price_above 자동 부착 안 됨
     assert not any(c.type == "price_above" for c in sheet.entry.conditions)
+
+
+# =====================================================================
+# G6 thesis-aware exit Phase A (2026-05-17) — candidate.thesis_spec → provenance 영속
+# design `.ai/designs/2026-05-17-g6-thesis-aware-exit.md` §7
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_thesis_spec_persists_through_provenance():
+    """candidate.thesis_spec → sheet.provenance.thesis_spec 영속 path."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    spec = ThesisSpec(
+        natural_language="반도체 +30% + KOSPI open + 20일 모멘텀",
+        conditions=[
+            ThesisCondition(type="kospi_gate", params={"required": "open"}),
+            ThesisCondition(
+                type="sector_momentum_above",
+                params={"sector": "semiconductor", "lookback_days": 5, "min_pct": 0.0},
+            ),
+            ThesisCondition(type="r20d_above_threshold", params={"min_pct": 0.0}),
+        ],
+        critical_conditions=[0, 1],
+    )
+    cand = ScreeningCandidate(
+        ticker="005930",
+        strategy_tag="SECTOR_MOMENTUM",
+        conviction=0.7,
+        entry_hint=EntryHint(trigger="market"),
+        thesis_spec=spec,
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    assert sheet.provenance.thesis_spec is not None
+    assert sheet.provenance.thesis_spec.natural_language.startswith("반도체")
+    assert len(sheet.provenance.thesis_spec.conditions) == 3
+    assert sheet.provenance.thesis_spec.critical_conditions == [0, 1]
+    assert sheet.provenance.thesis_spec.conditions[2].type == "r20d_above_threshold"
+
+
+@pytest.mark.asyncio
+async def test_thesis_spec_optional_default_none():
+    """candidate 가 thesis_spec 없으면 provenance.thesis_spec is None (Phase A 호환)."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet = await engine.build_sheet(_candidate(), _inputs())
+    assert sheet is not None
+    assert sheet.provenance.thesis_spec is None
+
+
+@pytest.mark.asyncio
+async def test_thesis_spec_empty_conditions_persists():
+    """Scout LLM 이 thesis_spec wrapper 만 채우고 conditions 비웠을 때 영속 OK."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    cand = ScreeningCandidate(
+        ticker="000660",
+        strategy_tag="SECTOR_MOMENTUM",
+        conviction=0.5,
+        entry_hint=EntryHint(trigger="market"),
+        thesis_spec=ThesisSpec(
+            natural_language="가설만 있음", conditions=[], critical_conditions=[]
+        ),
+    )
+    sheet = await engine.build_sheet(cand, _inputs())
+    assert sheet is not None
+    assert sheet.provenance.thesis_spec is not None
+    assert sheet.provenance.thesis_spec.natural_language == "가설만 있음"
+    assert sheet.provenance.thesis_spec.conditions == []

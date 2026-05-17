@@ -508,7 +508,7 @@ class StrategyEngine:
         rules = _sort_exit_rules(raw_rules)
         exit_section = ExitSection(rules=rules, priority="first_match")  # type: ignore[arg-type]
 
-        # 7. provenance
+        # 7. provenance — G6 Phase A (2026-05-17): candidate.thesis_spec 통과 path
         provenance = ProvenanceSection(
             scout_run_id=inputs.scout_run_id,
             scout_code_hash=inputs.scout_code_hash,
@@ -521,6 +521,7 @@ class StrategyEngine:
             conviction=float(candidate.conviction)
             if getattr(candidate, "conviction", None) is not None
             else None,
+            thesis_spec=getattr(candidate, "thesis_spec", None),
         )
 
         # 8. sheet 조립

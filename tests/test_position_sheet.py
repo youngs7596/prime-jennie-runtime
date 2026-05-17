@@ -9,6 +9,8 @@ import pytest
 from prime_jennie_runtime.position_sheet.schema import (
     KST,
     PositionSheet,
+    ThesisCondition,
+    ThesisSpec,
 )
 
 
@@ -169,3 +171,84 @@ def test_json_roundtrip():
     restored = PositionSheet.model_validate_json(json_str)
     assert restored.sheet_id == sheet.sheet_id
     assert restored.size.final_pct == sheet.size.final_pct
+
+
+# =====================================================================
+# G6 thesis-aware exit Phase A (2026-05-17) — ThesisSpec / ThesisCondition schema
+# design `.ai/designs/2026-05-17-g6-thesis-aware-exit.md` §4
+# =====================================================================
+
+
+def test_thesis_condition_catalog_8_types_accepted():
+    """catalog 8종 type 모두 ThesisCondition 으로 인스턴스화 가능."""
+    types = [
+        "kospi_gate",
+        "kospi_change_pct_above",
+        "sector_momentum_above",
+        "no_risk_event_high",
+        "earnings_event_window",
+        "rsi_below",
+        "price_above_breakout",
+        "r20d_above_threshold",
+    ]
+    for t in types:
+        c = ThesisCondition(type=t, params={"k": 1})
+        assert c.type == t
+        assert c.params == {"k": 1}
+
+
+def test_thesis_condition_unknown_type_rejected():
+    """catalog 외 type 은 Literal 검증으로 거절."""
+    with pytest.raises(ValueError):
+        ThesisCondition(type="custom_type", params={})
+
+
+def test_thesis_spec_defaults_to_empty():
+    """ThesisSpec 모든 필드 default — Phase A 호환."""
+    spec = ThesisSpec()
+    assert spec.natural_language == ""
+    assert spec.conditions == []
+    assert spec.critical_conditions == []
+
+
+def test_thesis_spec_roundtrip():
+    """model_dump / validate roundtrip — provenance_json 영속 시 사용 패턴."""
+    original = ThesisSpec(
+        natural_language="hypothesis",
+        conditions=[
+            ThesisCondition(type="kospi_gate", params={"required": "open"}),
+            ThesisCondition(type="r20d_above_threshold", params={"min_pct": 0.0}),
+        ],
+        critical_conditions=[0],
+    )
+    dumped = original.model_dump(mode="json")
+    restored = ThesisSpec.model_validate(dumped)
+    assert restored == original
+    assert restored.conditions[0].type == "kospi_gate"
+    assert restored.critical_conditions == [0]
+
+
+def test_position_sheet_with_thesis_spec_roundtrip():
+    """PositionSheet 의 provenance.thesis_spec 직렬화/역직렬화."""
+    data = _base_sheet()
+    data["provenance"]["thesis_spec"] = {
+        "natural_language": "test",
+        "conditions": [
+            {"type": "kospi_gate", "params": {"required": "open"}},
+        ],
+        "critical_conditions": [0],
+    }
+    sheet = PositionSheet(**data)
+    assert sheet.provenance.thesis_spec is not None
+    assert sheet.provenance.thesis_spec.conditions[0].type == "kospi_gate"
+
+    json_str = sheet.model_dump_json()
+    restored = PositionSheet.model_validate_json(json_str)
+    assert restored.provenance.thesis_spec is not None
+    assert restored.provenance.thesis_spec.critical_conditions == [0]
+
+
+def test_position_sheet_thesis_spec_default_none():
+    """기존 sheet (thesis_spec 미포함) 도 PositionSheet 생성 가능 — 호환."""
+    sheet = PositionSheet(**_base_sheet())
+    assert sheet.provenance.thesis_spec is None

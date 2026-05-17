@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from .schemas import ScoutContext
 
-SCOUT_PROMPT_VERSION = "v0.7"
+SCOUT_PROMPT_VERSION = "v0.8"
 """Scout 프롬프트 버전.
 
 prompt 텍스트 또는 SCOUT_SYSTEM_PROMPT 의 의미론적 변경 시 bump.
@@ -27,6 +27,58 @@ scout_runs.prompt_version 으로 저장되어 회귀 분석 시 동일 prompt �
                      enforcement 는 후행 layer (G2~G4) 에서.
 - v0.7 (2026-05-15): recently_exited_today_tickers (today_exit_cooldown) 라인 추가.
                      같은 거래일 청산 (익절/손절 무관) ticker 자동 reject 안내.
+- v0.8 (2026-05-17): G6 thesis_spec 가이드 추가 — screen() 가 반환하는 각
+                     candidate dict 에 thesis_spec (catalog 8종) 옵션 필드. Phase A
+                     영속만, Phase B (6월~) 의 revaluator 가 catalog 평가 후
+                     invalidated 시 forced_liquidation:thesis 발화.
+"""
+
+# G6 thesis catalog 8종 — Pre-flight 2026-05-17 검증 후 확정.
+# design `.ai/designs/2026-05-17-g6-thesis-aware-exit.md` §4.2
+THESIS_CATALOG_GUIDE = """
+## G6 thesis_spec (optional, Phase A 영속만)
+
+각 candidate 에 검증 가능한 thesis 를 catalog 8종 condition 으로 표현. Phase A
+는 영속만 — revaluator 도입 (Phase B, 6월~) 시 catalog 평가 후 invalidated
+시점에 시장가 매도.
+
+| catalog type | 의미 | params 예 |
+|---|---|---|
+| `kospi_gate` | macro 종합 (open/closed) | `{"required": "open"}` |
+| `kospi_change_pct_above` | KOSPI 단일 정량 등락률 | `{"min_pct": -0.02}` |
+| `sector_momentum_above` | 섹터 N일 누적 모멘텀 | `{"sector": "semiconductor", "lookback_days": 5, "min_pct": 0.0}` |
+| `no_risk_event_high` | 24h 내 high-impact risk_event 부재 | `{"hours": 24}` |
+| `earnings_event_window` | earnings event 후 N영업일 이내 | `{"max_days": 7}` |
+| `rsi_below` | 1일봉 RSI 임계 미만 | `{"window": 14, "max": 30}` |
+| `price_above_breakout` | 직전 봉 high 돌파 유지 | `{"reference_price": 12500}` |
+| `r20d_above_threshold` | 종목 20영업일 누적 수익률 유지 | `{"min_pct": 0.0}` |
+
+`critical_conditions` 는 깨지면 즉시 매도 — **보수적으로 1~2개만**. policy 가
+strategy_tag 별 critical 후보를 강제하므로 (예: SECTOR_MOMENTUM 은
+sector_momentum_above / kospi_gate / r20d_above_threshold 만 critical 인정),
+off-target critical 지정은 일반 condition 으로 demote 됨.
+
+예시 (SECTOR_MOMENTUM thesis):
+```python
+thesis = {
+    "natural_language": "반도체 섹터 +30% 모멘텀 + KOSPI open + 20일 모멘텀 유지",
+    "conditions": [
+        {"type": "kospi_gate", "params": {"required": "open"}},
+        {"type": "sector_momentum_above",
+         "params": {"sector": "semiconductor", "lookback_days": 5, "min_pct": 0.0}},
+        {"type": "r20d_above_threshold", "params": {"min_pct": 0.0}},
+        {"type": "no_risk_event_high", "params": {"hours": 24}},
+    ],
+    "critical_conditions": [0, 1],  # kospi_gate + sector_momentum_above
+}
+# 모든 candidate dict 에 동일하게 첨부 (run 단위 thesis 공유 패턴):
+for c in candidates:
+    c["thesis_spec"] = thesis
+```
+
+Phase A 호환 — thesis_spec 생략 가능. 빈 conditions / 빈 critical_conditions 도
+허용 (revaluator 가 skip). 단 hypothesis 와 thesis 가 일치하면 Phase B 부터
+의미적 매도 트리거.
 """
 
 ALLOWED_IMPORTS = (
@@ -211,6 +263,8 @@ exit_hint 사용 가이드 (선택 — 확신 없으면 생략):
   - SECTOR_MOMENTUM: trailing_tp activate 0.06 drop 0.03 + fixed_sl 0.04 + time_stop hold_days 10 (중기 추세)
   - MEAN_REVERT_RSI: fixed_tp 0.04 + fixed_sl 0.03 + time_stop hold_days 3 (좁은 범위 mean-revert)
 - **금지**: schema 에 없는 rule type (예: `trailing_stop`, `stop_loss`) — 즉시 거절됨.
+
+{THESIS_CATALOG_GUIDE}
 
 안티패턴 (절대 금지):
 {chr(10).join(f"  - {p}" for p in FORBIDDEN_PATTERNS)}

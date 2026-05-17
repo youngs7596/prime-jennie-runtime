@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, time, timedelta, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -217,6 +217,48 @@ class MacroStateSnapshot(BaseModel):
     gate_run_id: str
 
 
+# =====================================================================
+# Thesis Spec (G6 thesis-aware exit, 2026-05-17 Phase A 도입)
+# =====================================================================
+# design: .ai/designs/2026-05-17-g6-thesis-aware-exit.md §4
+# Pre-flight: .ai/analyses/2026-05-17-g6-hypothesis-catalog-coverage.md
+# 정의 위치 — slow_loop 가 import. position_sheet 가 fundamental layer.
+
+
+class ThesisCondition(BaseModel):
+    """결정론 evaluator 로 평가 가능한 단일 thesis condition.
+
+    catalog 8종 (Pre-flight 2026-05-17 으로 7→8). params 의 type 별 schema
+    검증은 Phase B (evaluator) 가 담당, Phase A 는 raw dict 영속만.
+    """
+
+    type: Literal[
+        "kospi_gate",
+        "kospi_change_pct_above",
+        "sector_momentum_above",
+        "no_risk_event_high",
+        "earnings_event_window",
+        "rsi_below",
+        "price_above_breakout",
+        "r20d_above_threshold",
+    ]
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class ThesisSpec(BaseModel):
+    """Scout 가 entry 시점에 생성, ProvenanceSection.thesis_spec 영속.
+
+    natural_language 는 기존 scout_hypothesis 와 동일 — 점진 도입기 호환.
+    critical_conditions 는 conditions index 리스트 — LLM 지정 후 policy
+    intersection 으로 최종 critical 결정 (design §4.4). Phase A 는 LLM 원본
+    그대로 영속, intersection 은 Phase B (evaluator) 가 적용.
+    """
+
+    natural_language: str = ""
+    conditions: list[ThesisCondition] = Field(default_factory=list)
+    critical_conditions: list[int] = Field(default_factory=list)
+
+
 class ProvenanceSection(BaseModel):
     scout_run_id: str
     scout_code_hash: str
@@ -232,6 +274,9 @@ class ProvenanceSection(BaseModel):
     # Scout 가 발행한 conviction (0.0~1.0). Phase 0 #1 (conviction × pnl_pct)
     # 분석 + Coordinator advisory policy 에 필요. 기존 row 호환을 위해 optional.
     conviction: float | None = None
+    # G6 thesis-aware exit Phase A (2026-05-17). Scout LLM 점진 도입기 동안
+    # None 허용 (revaluator 가 None sheet 는 skip — fail-open §5.5 A).
+    thesis_spec: ThesisSpec | None = None
 
 
 # =====================================================================

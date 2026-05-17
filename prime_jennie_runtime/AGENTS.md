@@ -2,6 +2,8 @@
 
 이 디렉토리는 v3 실행 엔진의 전체 Python 패키지입니다.
 
+> **Slow Loop Awareness 가드 (2026-05-17 단순화)** — 3 카테고리: `outcome_feedback` (Scout context), `same_day_cooldown` (Strategy Engine 3c), `thesis_aware_hold` (Phase A 영속, Phase 1~2 도입 예정). 결정 + cross-ref: [`.ai/designs/2026-05-17-g-series-simplification.md`](../.ai/designs/2026-05-17-g-series-simplification.md). 구 G1~G6 명명은 commit history 에서만 인용.
+
 ## 서브모듈 지도
 
 | 디렉토리 | 책임 | Track | 상태 |

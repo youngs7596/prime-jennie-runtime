@@ -417,13 +417,29 @@ interface ProvenanceSection {
   scout_code_hash: string        // sha256:...
   scout_hypothesis: string       // 자연어 가설 복사본
   macro_state_snapshot: {
-    gate: "open" | "closed"
+    gate: "open" | "closed" | "manual_override"
     size_multiplier: number
     gate_run_id: string          // macro_runs 테이블 FK
   }
+  macro_run_id: string | null              // top-level FK (gate_run_id 와 동일, 인덱스 단순화)
   news_score_at_generation: number | null  // -1.0 ~ +1.0
   strategy_policy_version: string          // "v3.0.1" semver
   generated_by: string                      // "prime-jennie-runtime@v3.0.1"
+  conviction: number | null                 // Scout 발행 conviction (0.0~1.0), Phase 0 #1 correlation 용
+  thesis_spec: ThesisSpec | null            // G6 thesis_aware_hold Phase A (2026-05-17)
+}
+
+interface ThesisSpec {                    // 2026-05-17 신규
+  natural_language: string                  // scout_hypothesis 와 동일 호환
+  conditions: ThesisCondition[]             // 검증 가능한 조건 list (catalog 8종 — Phase A v0.8)
+  critical_conditions: number[]             // conditions index — 깨지면 즉시 invalidated (Phase 2 enforce 시 trigger)
+}
+
+interface ThesisCondition {
+  type: "kospi_gate" | "kospi_change_pct_above" | "sector_momentum_above"
+      | "no_risk_event_high" | "earnings_event_window" | "rsi_below"
+      | "price_above_breakout" | "r20d_above_threshold"
+  params: Record<string, any>               // type 별 schema (evaluator 가 검증)
 }
 ```
 
@@ -437,6 +453,8 @@ meta Eval이 "이 매매가 왜 들어갔는가"를 3개월 뒤에도 재구성�
 - `news_score_at_generation`: 뉴스 감성 (Scout 입력 중 가장 변동성 큰 것)
 - `strategy_policy_version`: 룰셋 버전
 - `generated_by`: 발행 코드 버전
+- `conviction`: Scout 의 자신감 (Phase 0 #1 conviction-outcome correlation 분석 용)
+- `thesis_spec`: G6 thesis_aware_hold 가드의 검증 가능한 hypothesis 조건. **None 허용** (Phase A 도입 전 sheet 호환). revaluator (Phase 1 advisory, 5-22~) 가 보유 중 정기 평가, invalidated 시 `forced_liquidation:thesis` Redis SET 적재 (Phase 2, 5-29~). 단순화 결정: [`.ai/designs/2026-05-17-g-series-simplification.md`](../.ai/designs/2026-05-17-g-series-simplification.md). catalog v1 은 5종 (kospi_gate / sector_momentum_above / no_risk_event_high / earnings_event_window / rsi_below) — 위 type Literal 의 나머지 3종 (kospi_change_pct_above / price_above_breakout / r20d_above_threshold) 은 schema 만 정의, Phase A 측정 후 catalog 편입 결정.
 
 ### 6.2 Scout 없이 발행된 시트
 

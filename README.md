@@ -166,6 +166,7 @@ psql -h localhost -U pj_admin -d prime_jennie_v3 -c "\dt+" | wc -l
 | **010** | v2 뉴스/거래 보관 테이블 |
 | **011** | global_macro_news_articles + digests (Phase 2.13) |
 | **012** | screening_candidates + scout_runs.context_snapshot_json (Phase 2.13 백테스트 재현성) |
+| **019** | scout_outcomes_v1 view (G1 outcome feedback, 2026-05-15) |
 
 #### Step 3 — Scheduled Jobs Seed
 
@@ -608,6 +609,35 @@ prime-jennie-runtime/
 
 상세 명세 + Edge case 카탈로그: [`docs/POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md) §5, §8.
 
+위 9-rule 은 가격 기반 결정론 exit. **thesis-aware hold** (산 이유가 깨졌으니 가격 무관 매도) 는 별도 layer — 아래 §"Slow Loop Awareness 가드" 참조.
+
+---
+
+## Slow Loop Awareness 가드 (2026-05-17 단순화)
+
+2026-05-15 사고 (-3.35M) 진단 = "slow_loop 정보 결손 + hold/exit 결정의 시장 무관성" → 결정 3 가지 = 가드 3 카테고리.
+
+| 카테고리 | 가드 | 위치 | 상태 |
+|---|---|---|---|
+| **Awareness** | `outcome_feedback` | Scout context + prompt — `scout_outcomes_v1` view + `ScoutContext.previous_outcomes` | DONE 2026-05-15 |
+| **Cooldown** | `same_day_cooldown` | Strategy Engine sheet 발행 3c — 같은 거래일 청산 후 재진입 차단 (익절/손절/manual 무관) | DONE 2026-05-15 |
+| **Hold-thesis** | `thesis_aware_hold` | Scout `ThesisSpec` (catalog 5종 condition) + slow_loop revaluator + fast_loop `forced_liquidation:thesis` | Phase A 진입 2026-05-17 |
+| [별개 트랙] | 시초 timing (gap_down_block / open_5min_hold) | fast_loop entry/exit | backlog |
+| [Deprecated] | `overextension_entry_guard` (구 G2) | — | Pre-flight 부정으로 폐기 2026-05-17 |
+
+**진행 상태**:
+- Awareness + Cooldown 작동 중 (2026-05-15 도입 후 운영 검증)
+- `thesis_aware_hold` Phase A: `ProvenanceSection.thesis_spec` 영속 + Scout prompt v0.8 (catalog 가이드). revaluator + forced_liquidation 트리거는 Phase 1 (5-22~5-29 advisory) + Phase 2 (5-29~ enforce) 예정.
+
+**catalog 5종** (Phase A 측정 후 확장):
+- `kospi_gate` (macro 종합)
+- `sector_momentum_above` (섹터 N일 누적)
+- `no_risk_event_high` (24h high-impact risk 부재)
+- `earnings_event_window` (earnings event 후 N영업일)
+- `rsi_below` (1일봉 RSI)
+
+상세: [`.ai/designs/2026-05-17-g-series-simplification.md`](./.ai/designs/2026-05-17-g-series-simplification.md). Pre-flight 분석 산출물 (`overextension_entry_guard` 폐기 근거 포함): [`.ai/analyses/`](./.ai/analyses/).
+
 ---
 
 ## 리스크 관리
@@ -746,8 +776,14 @@ push to main → GitHub Actions (self-hosted runner `ms-01-v3`)
 ### 설계 (항상 유효)
 - [`docs/prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md) — 전체 v3 설계 (v0.3)
 - [`docs/POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md) — 포지션 시트 JSON 스키마 + 9 exit rules
-- [`docs/SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) — Scout LLM 코드 생성 명세
+- [`docs/SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) — Scout LLM 코드 생성 명세 (prompt v0.8 thesis_spec 가이드 포함)
 - [`docs/MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md) — Macro Gate 이진 판정 명세
+
+### 가드 / 단순화 (2026-05-17)
+- [`.ai/designs/2026-05-17-g-series-simplification.md`](./.ai/designs/2026-05-17-g-series-simplification.md) — G 시리즈 명명 폐기, 의미 기반 3 카테고리 재정립 (decision)
+- [`.ai/designs/2026-05-14-agent-coordinator.md`](./.ai/designs/2026-05-14-agent-coordinator.md) — Coordinator (State Hub + Decision Authority + Event Bus) design
+- [`.ai/designs/2026-05-15-scout-overextension-guards.md`](./.ai/designs/2026-05-15-scout-overextension-guards.md) — G1~G5 통합 design (5-15)
+- [`.ai/analyses/`](./.ai/analyses/) — Pre-flight 분석 산출물 (G2 폐기 / G6 catalog coverage)
 
 ### 로드맵 / 진행 상황
 - [`docs/PHASE2_PLAN.md`](./docs/PHASE2_PLAN.md) — Phase 2 원 계획 (완료)

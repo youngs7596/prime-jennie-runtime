@@ -190,6 +190,7 @@ class ScreeningCandidate(BaseModel):
     exit_hint: ExitHint | None    # 없으면 strategy_tag 기본값 사용
     factors: dict[str, float]     # 이 종목이 통과한 팩터 값들
     notes: str                    # 짧은 사유 (100자 이내)
+    thesis_spec: ThesisSpec | None  # G6 thesis_aware_hold (2026-05-17, prompt v0.8 추가)
 ```
 
 ```python
@@ -203,6 +204,50 @@ class EntryHint(BaseModel):
 class ExitHint(BaseModel):
     rules_hint: list[dict]        # POSITION_SHEET_SPEC §5 rules
 ```
+
+```python
+class ThesisSpec(BaseModel):
+    """검증 가능한 hypothesis 조건 — Phase A 영속, Phase 1 advisory, Phase 2 enforce.
+
+    Scout LLM 이 hypothesis 자연어와 함께 condition list 를 생성. revaluator
+    (slow_loop/thesis/, Phase 1 5-22~) 가 보유 sheet 의 conditions 를 정기 평가,
+    critical_conditions 깨지면 invalidated → forced_liquidation:thesis Redis SET
+    적재 (Phase 2 5-29~).
+
+    Phase A 호환: thesis_spec None 허용. screen() 가 채우지 않으면 revaluator skip.
+    """
+    natural_language: str         # scout_hypothesis 와 동일 호환
+    conditions: list[ThesisCondition]
+    critical_conditions: list[int]  # conditions index 리스트
+
+class ThesisCondition(BaseModel):
+    type: Literal[
+        "kospi_gate", "kospi_change_pct_above", "sector_momentum_above",
+        "no_risk_event_high", "earnings_event_window", "rsi_below",
+        "price_above_breakout", "r20d_above_threshold",
+    ]
+    params: dict[str, Any]
+```
+
+**catalog v1 (5종, Phase A 측정 후 확장)** — 단순화 결정 [`.ai/designs/2026-05-17-g-series-simplification.md`](../.ai/designs/2026-05-17-g-series-simplification.md):
+- `kospi_gate` (macro 종합 판정 open/closed)
+- `sector_momentum_above` (섹터 N영업일 누적 모멘텀)
+- `no_risk_event_high` (24h high-impact risk_event 부재)
+- `earnings_event_window` (earnings event 후 N영업일 이내)
+- `rsi_below` (1일봉 RSI 임계 미만)
+
+남은 3종 (`kospi_change_pct_above` / `price_above_breakout` / `r20d_above_threshold`) 은 schema 만 정의, Phase A 1주 측정 (Scout LLM 의 실 thesis_spec 반환률 / catalog 사용 빈도) 후 catalog 편입 또는 제거 결정.
+
+**critical_conditions 선정** — policy-only (LLM 자유 지정 제거):
+
+| strategy_tag | policy critical 후보 |
+|---|---|
+| GAP_UP_REBOUND | `kospi_gate` (Phase 1 측정 후 sector breakout 추가 검토) |
+| SECTOR_MOMENTUM | `kospi_gate`, `sector_momentum_above` |
+| EARNINGS_DRIFT | `earnings_event_window`, `no_risk_event_high` |
+| MEAN_REVERT_RSI | `rsi_below` |
+
+screen() 함수가 반환하는 모든 candidate 에 동일한 thesis_spec 첨부 (run 단위 thesis 공유). prompt v0.8 (`slow_loop/scout/prompts.py:SCOUT_PROMPT_VERSION = "v0.8"`) 에 catalog 가이드 + 예시 코드 포함.
 
 ### 3.3 Scout가 **하지 않는 것**
 

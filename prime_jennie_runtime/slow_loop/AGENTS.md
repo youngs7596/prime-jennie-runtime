@@ -60,6 +60,16 @@ LLM 호출은 Macro, Scout 각 한 번씩만 (fast path: `output_schema` + `max_
 ### 루트
 - `pipeline.py` — `SlowLoopComponents` 묶음 + `run_slow_loop()` 래퍼
 
+### `thesis/` (Phase 1 도입 예정, 5-22~)
+
+`thesis_aware_hold` 가드 — 보유 sheet 의 `ProvenanceSection.thesis_spec` (catalog 5종 condition) 을 정기 평가, `critical_conditions` 깨지면 `forced_liquidation:thesis` Redis SET 적재 → fast_loop 즉시 매도.
+
+- Phase A (DONE 2026-05-17 commit `498264d`): `ThesisSpec` schema + Scout prompt v0.8 catalog 가이드 + ProvenanceSection 영속만. revaluator 미포함.
+- Phase 1 (5-22 ~ 5-29 advisory): `thesis/evaluators.py` (catalog 함수) + `thesis/revaluator.py` (1시간 cron). log + telegram, 매도 X.
+- Phase 2 (5-29 ~ enforce): `forced_liquidation:thesis` 적재 + fast_loop `tick_loop._evaluate_forced_liquidation` 두 SET 분리 (`:user` / `:thesis`).
+
+결정: [`.ai/designs/2026-05-17-g-series-simplification.md`](../../.ai/designs/2026-05-17-g-series-simplification.md)
+
 ## 핵심 규칙
 
 - `scout/`는 코드를 생성하지 종목을 추천하지 않는다 (SCOUT_CODE_GENERATION.md)

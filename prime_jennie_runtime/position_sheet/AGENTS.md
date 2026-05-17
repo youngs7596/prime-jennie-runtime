@@ -4,7 +4,7 @@ Track A에서 생성, 모든 Track이 소비. **수정 시 stop-the-world.**
 
 ## 파일
 
-- `schema.py` — PositionSheet Pydantic v1.1 전수 구현
+- `schema.py` — PositionSheet Pydantic v1.1 전수 구현. 2026-05-17 `ThesisCondition` + `ThesisSpec` 추가 (G6 thesis_aware_hold Phase A), `ProvenanceSection.thesis_spec` 영속 (None 허용 호환).
 
 ## 정본 문서
 

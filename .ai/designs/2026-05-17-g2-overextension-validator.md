@@ -1,5 +1,15 @@
 # G2 Overextension Validator Design (2026-05-17)
 
+> **⚠️ DEPRECATED 2026-05-17** — Pre-flight (`.ai/analyses/2026-05-17-g2-thresholds-historical-validation.md`)
+> 결과 임계값이 손익 구분 못함 (익절 80% > 손절 70% 차단). 가격 기반 지표는
+> outcome 예측력 없음 학습. 공식 폐기 결정: `.ai/designs/2026-05-17-g-series-simplification.md`
+> §3. hold 측면은 `thesis_aware_hold` (구 G6) catalog 가 흡수. entry 측면은
+> future backlog.
+>
+> 아래 본문은 archive — 결정 학습 산출물로 보관.
+>
+> ---
+>
 > 본 문서는 `2026-05-15-scout-overextension-guards.md` (G1~G5 통합 design) 의
 > 후속. G2 (overextension validator) 만 깊게 다룬다. G1/G5 는 5-15 도입 완료,
 > G2 는 5-18 자연 검증 후 구현 예정 — 본 문서는 그 사전 준비.

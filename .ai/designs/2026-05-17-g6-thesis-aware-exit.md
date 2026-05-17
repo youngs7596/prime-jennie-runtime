@@ -1,5 +1,18 @@
 # G6 Thesis-Aware Exit Design (2026-05-17)
 
+> **⚠️ SIMPLIFIED 2026-05-17** — `.ai/designs/2026-05-17-g-series-simplification.md`
+> §4 에서 단순화 결정:
+> - 명명: G6 → **`thesis_aware_hold`** (의미 기반)
+> - catalog 8 → **5종** (kospi_change_pct_above / price_above_breakout / r20d_above_threshold 제거, Phase 1 측정 후 확장)
+> - Phase A/B/C → **2 단계** (Phase 1 = schema+revaluator advisory 1주, Phase 2 = enforce). 6-08 → 5-29 단축.
+> - 4-state → **2-state** (valid / invalidated, weakened/strengthened 는 Phase 1 측정 후)
+> - critical = **policy-only** (LLM × policy intersection 제거)
+> - Fail 정책 5종 → **2종** (skip / alert+skip)
+>
+> Phase A (schema + Scout prompt v0.8) 는 commit 498264d 로 이미 도입 완료 — 그 본문은 archive 로 보관, Phase 1 advisory + Phase 2 enforce 구현 시 본 doc 보다 simplification doc 의 결정 우선.
+>
+> ---
+>
 > 본 문서는 같은 날 `2026-05-17-g2-overextension-validator.md` 의 자매 design.
 > G2 가 "entry 가드 강화" 라면 본 G6 는 **"hold 가드 신설"** — 직교 축.
 >

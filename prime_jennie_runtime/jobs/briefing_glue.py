@@ -13,6 +13,7 @@ v3 어댑터:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import date
 
 import httpx
@@ -24,6 +25,22 @@ from prime_jennie_runtime.infra.config import TelegramConfig
 from prime_jennie_runtime.telegram_bot.bot import TelegramBot
 
 logger = logging.getLogger(__name__)
+
+
+async def _fetch_kis_balance(http: httpx.AsyncClient) -> list[dict] | None:
+    """KIS gateway /api/balance 응답의 positions 리스트. 실패 시 None — context_builder
+    가 DB fallback 으로 우회한다."""
+    url = os.environ.get("KIS_GATEWAY_URL", "http://kis-gateway:8080")
+    try:
+        resp = await http.get(f"{url.rstrip('/')}/api/balance", timeout=5.0)
+        resp.raise_for_status()
+        positions = resp.json().get("positions") or []
+        return list(positions)
+    except Exception:
+        logger.warning(
+            "daily_briefing: KIS balance fetch failed — falling back to DB", exc_info=True
+        )
+        return None
 
 
 async def daily_briefing_report(
@@ -47,7 +64,10 @@ async def daily_briefing_report(
     # 지연 import: briefing.context_builder 가 없는 환경 (테스트) 에서 import 실패 방지.
     from prime_jennie_runtime.briefing.context_builder import collect_briefing_data
 
-    data = await collect_briefing_data(engine, as_of=as_of, redis_client=redis_client)
+    kis_balance = await _fetch_kis_balance(http)
+    data = await collect_briefing_data(
+        engine, as_of=as_of, redis_client=redis_client, kis_balance=kis_balance
+    )
     result = await generate_briefing(data, llm_caller=llm_caller)
 
     telegram_sent = False

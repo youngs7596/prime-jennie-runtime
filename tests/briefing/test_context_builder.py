@@ -150,6 +150,45 @@ async def test_collect_briefing_data_maps_trades_and_positions():
 
 
 @pytest.mark.asyncio
+async def test_collect_briefing_data_uses_kis_balance_when_provided():
+    """kis_balance 주입 시 KIS 응답 (외부 매수 포함, 한글 종목명) 이 그대로 positions
+    으로 매핑되어야 한다. DB SQL fallback 은 우회."""
+    kis_balance = [
+        {
+            "stock_code": "069500",
+            "stock_name": "KODEX 200",
+            "quantity": 1598,
+            "average_buy_price": 116139,
+        },
+        {
+            "stock_code": "241560",
+            "stock_name": "두산밥캣",
+            "quantity": 41,
+            "average_buy_price": 69077,
+        },
+        # quantity 0 → 필터링되어야 함
+        {
+            "stock_code": "000660",
+            "stock_name": "SK하이닉스",
+            "quantity": 0,
+            "average_buy_price": 100000,
+        },
+    ]
+    engine = _FakeEngine(_FakeConn())
+    data = await collect_briefing_data(engine, as_of=date(2026, 5, 18), kis_balance=kis_balance)
+
+    assert len(data["positions"]) == 2
+    assert data["positions"][0] == {
+        "stock_code": "069500",
+        "stock_name": "KODEX 200",
+        "quantity": 1598,
+        "avg_price": 116139.0,
+        "total_buy": 1598 * 116139.0,
+    }
+    assert data["positions"][1]["stock_name"] == "두산밥캣"
+
+
+@pytest.mark.asyncio
 async def test_collect_briefing_data_macro_maps_gate_and_risks():
     conn = _FakeConn(
         rows_by_prefix={

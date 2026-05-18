@@ -44,11 +44,15 @@ async def collect_briefing_data(
     *,
     as_of: date | None = None,
     redis_client: Any | None = None,
+    kis_balance: list[dict] | None = None,
 ) -> dict:
     """v3 DB + Redis 를 읽어 브리핑 데이터 dict 를 만든다.
 
     redis_client 는 optional — 없으면 매크로 dict 에 VIX/닛케이/항셍/SOX/NVDA/환율/수급
     필드가 채워지지 않는다.
+
+    kis_balance 는 optional — 주입되면 KIS 응답 그대로 보유 종목으로 사용 (외부
+    매수 포함, 한글 종목명 보존). 미주입 시 position_sheets+executions 기반 근사.
 
     Returns:
         formatters.build_llm_context / format_fallback_html 이 소비하는 dict.
@@ -57,7 +61,7 @@ async def collect_briefing_data(
 
     async with engine.connect() as conn:
         trades = await _collect_trades(conn, today)
-        positions = await _collect_positions(conn)
+        positions = await _collect_positions(conn, kis_balance=kis_balance)
         macro = await _collect_macro(conn, today, redis_client=redis_client)
         watchlist = await _collect_watchlist(conn)
         news = await _collect_news(conn, today)
@@ -148,12 +152,31 @@ async def _collect_trades(conn, today: date) -> list[dict]:
     return trades
 
 
-async def _collect_positions(conn) -> list[dict]:
-    """미청산 포지션 (outcomes 미기록 시트 → 아직 보유 중).
+async def _collect_positions(conn, *, kis_balance: list[dict] | None = None) -> list[dict]:
+    """보유 포지션.
 
-    주의: v3 는 KIS snapshot 연동이 아직 없다. 시트 기반 근사치.
-    Track B sync-positions 이후 이 함수는 v3 portfolio 테이블을 읽도록 교체 예정.
+    kis_balance 주입 시 KIS /api/balance 응답 (stock_code/stock_name/quantity/
+    average_buy_price) 을 그대로 변환 — 외부 매수 종목 포함, 한글 종목명 사용.
+    미주입 시 position_sheets+executions 기반 근사 (외부 매수 누락).
     """
+    if kis_balance is not None:
+        positions: list[dict] = []
+        for p in kis_balance:
+            qty = int(p.get("quantity", 0) or 0)
+            if qty <= 0:
+                continue
+            avg_price = float(p.get("average_buy_price", 0) or 0)
+            positions.append(
+                {
+                    "stock_code": str(p.get("stock_code", "")),
+                    "stock_name": str(p.get("stock_name") or p.get("stock_code", "")),
+                    "quantity": qty,
+                    "avg_price": avg_price,
+                    "total_buy": qty * avg_price,
+                }
+            )
+        return positions
+
     stmt = text(
         """
         SELECT

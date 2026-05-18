@@ -83,8 +83,10 @@ async def collect_briefing_data(
 async def _collect_trades(conn, today: date) -> list[dict]:
     """오늘 체결된 매매 내역.
 
-    v3 에선 `executions` + `position_sheets` + `outcomes` 조합으로 구성.
-    executions 한 행 = 매매 한 건. 매도 건은 outcomes.pnl_* 로 profit_* 채움.
+    매도 건은 같은 sheet 의 buy 평균가 대비 pnl 을 executions 만으로 계산.
+    `outcomes` 테이블은 production 적재 path 가 없어 항상 비어있음 — 5-15 이후
+    `scout_outcomes_v1` view 와 동일 로직 (executions 기반) 으로 통일.
+    exit_reason 은 `executions.metadata_json->>'exit_reason'` 에서 직접 추출.
     """
     day_start = datetime.combine(today, datetime.min.time())
     day_end = day_start + timedelta(days=1)
@@ -98,12 +100,25 @@ async def _collect_trades(conn, today: date) -> list[dict]:
             e.executed_at,
             ps.ticker AS stock_code,
             ps.strategy_tag,
-            o.pnl_krw,
-            o.pnl_pct,
-            o.exit_reason
+            CASE WHEN e.side IN ('sell','SELL','S') THEN
+                (e.price - (
+                    SELECT AVG(b.price)
+                    FROM executions b
+                    WHERE b.sheet_id = e.sheet_id
+                      AND b.side IN ('buy','BUY','B')
+                )) * e.qty
+            END AS pnl_krw,
+            CASE WHEN e.side IN ('sell','SELL','S') THEN
+                (e.price / NULLIF((
+                    SELECT AVG(b.price)
+                    FROM executions b
+                    WHERE b.sheet_id = e.sheet_id
+                      AND b.side IN ('buy','BUY','B')
+                ), 0) - 1) * 100
+            END AS pnl_pct,
+            e.metadata_json->>'exit_reason' AS exit_reason
         FROM executions e
         JOIN position_sheets ps ON ps.sheet_id = e.sheet_id
-        LEFT JOIN outcomes o ON o.sheet_id = e.sheet_id
         WHERE e.executed_at >= :day_start AND e.executed_at < :day_end
         ORDER BY e.executed_at
         """

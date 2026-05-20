@@ -61,6 +61,23 @@ class FakeKisApi:
             "stock_eval_amount": 710_000,
         }
 
+    async def get_daily_executions(self, start_date, end_date, *, stock_code: str = ""):
+        return [
+            {
+                "order_date": "20260514",
+                "order_time": "103114",
+                "stock_code": "241560",
+                "stock_name": "두산밥캣",
+                "side": "buy",
+                "order_qty": 113,
+                "filled_qty": 113,
+                "avg_price": 69076.0,
+                "filled_amount": 7805700,
+                "order_no": "0018495800",
+                "cancelled": False,
+            }
+        ]
+
     async def close(self) -> None:
         return None
 
@@ -127,6 +144,29 @@ def test_cash_endpoint(kis_config):
     resp = client.get("/api/cash")
     assert resp.status_code == 200
     assert resp.json()["cash_balance"] == 1_500_000
+
+
+def test_executions_endpoint(kis_config):
+    client = _build_client(kis_config, FakeKisApi())
+    resp = client.get(
+        "/api/executions",
+        params={"start_date": "20260501", "end_date": "20260520", "stock_code": "241560"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["stock_code"] == "241560"
+    assert body[0]["side"] == "buy"
+    assert body[0]["filled_qty"] == 113
+    assert body[0]["order_no"] == "0018495800"
+
+
+def test_executions_endpoint_rejects_bad_date(kis_config):
+    client = _build_client(kis_config, FakeKisApi())
+    resp = client.get(
+        "/api/executions", params={"start_date": "2026-05-01", "end_date": "20260520"}
+    )
+    assert resp.status_code == 422
 
 
 def test_is_market_open_endpoint(kis_config):

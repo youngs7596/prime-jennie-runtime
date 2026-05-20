@@ -467,6 +467,70 @@ class KISApi:
             return int(ord_cash)
         return 0
 
+    async def get_daily_executions(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        stock_code: str = "",
+    ) -> list[dict[str, Any]]:
+        """일별 주문체결 조회 (TTTC8001R / VTTC8001R).
+
+        ``start_date``~``end_date`` (KIS 제한 3개월 이내) 의 체결내역. ``stock_code``
+        가 빈 문자열이면 전 종목. runtime state ↔ KIS drift 진단용 — reconcile 의
+        qty_mismatch 가 떴을 때 해당 ticker 의 실제 KIS 체결을 대조한다.
+
+        단일 페이지만 조회한다. 결과가 한 페이지를 넘으면 (ctx_area_nk100 비어있지
+        않음) WARN 로깅 후 첫 페이지만 반환 — 종목 1개 진단 (주 용도) 은 거의 항상
+        단일 페이지이며, 전 종목 장기 조회가 필요하면 기간을 좁혀 재호출한다.
+        """
+        tr_id = "VTTC8001R" if self._config.is_paper else "TTTC8001R"
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+            tr_id=tr_id,
+            params={
+                "CANO": self._config.account_no,
+                "ACNT_PRDT_CD": self._config.account_product_code,
+                "INQR_STRT_DT": start_date.strftime("%Y%m%d"),
+                "INQR_END_DT": end_date.strftime("%Y%m%d"),
+                "SLL_BUY_DVSN_CD": "00",  # 전체 (매수+매도)
+                "INQR_DVSN": "01",  # 정순
+                "PDNO": stock_code,
+                "CCLD_DVSN": "00",  # 전체 (체결+미체결)
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_3": "00",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+            },
+        )
+        if (data.get("ctx_area_nk100") or "").strip():
+            logger.warning(
+                "get_daily_executions: 결과가 1페이지 초과 — 첫 페이지만 반환 "
+                "(조회 기간을 좁혀 재호출 권장)"
+            )
+
+        executions: list[dict[str, Any]] = []
+        for item in data.get("output1", []) or []:
+            executions.append(
+                {
+                    "order_date": item.get("ord_dt", ""),
+                    "order_time": item.get("ord_tmd", ""),
+                    "stock_code": item.get("pdno", ""),
+                    "stock_name": item.get("prdt_name", ""),
+                    "side": "sell" if item.get("sll_buy_dvsn_cd") == "01" else "buy",
+                    "order_qty": int(item.get("ord_qty", 0) or 0),
+                    "filled_qty": int(item.get("tot_ccld_qty", 0) or 0),
+                    "avg_price": _safe_float(item.get("avg_prvs")) or 0.0,
+                    "filled_amount": int(item.get("tot_ccld_amt", 0) or 0),
+                    "order_no": item.get("odno", ""),
+                    "cancelled": (item.get("cncl_yn", "") or "").strip() == "Y",
+                }
+            )
+        return executions
+
     async def is_trading_day(self, target_date: date | None = None) -> bool:
         """거래일 여부 확인 (CTCA0903R)."""
         target = target_date or date.today()

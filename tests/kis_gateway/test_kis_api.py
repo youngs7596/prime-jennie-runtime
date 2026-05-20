@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -100,6 +101,71 @@ async def test_snapshot_success(kis_config):
     assert snap.high_price == 71500
     assert snap.volume == 1_000_000
     assert snap.per == 12.5
+
+
+async def test_daily_executions_parses_output1(kis_config):
+    """inquire-daily-ccld output1 → 정규화된 체결 dict 리스트."""
+    with respx.mock(base_url=kis_config.base_url, assert_all_called=True) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/trading/inquire-daily-ccld").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "rt_cd": "0",
+                    "msg_cd": "",
+                    "msg1": "",
+                    "ctx_area_fk100": "",
+                    "ctx_area_nk100": "",
+                    "output1": [
+                        {
+                            "ord_dt": "20260514",
+                            "ord_tmd": "103114",
+                            "pdno": "241560",
+                            "prdt_name": "두산밥캣",
+                            "sll_buy_dvsn_cd": "02",
+                            "sll_buy_dvsn_cd_name": "현금매수",
+                            "ord_qty": "113",
+                            "tot_ccld_qty": "113",
+                            "avg_prvs": "69076",
+                            "tot_ccld_amt": "7805700",
+                            "odno": "0018495800",
+                            "cncl_yn": "",
+                        },
+                        {
+                            "ord_dt": "20260518",
+                            "ord_tmd": "091520",
+                            "pdno": "241560",
+                            "prdt_name": "두산밥캣",
+                            "sll_buy_dvsn_cd": "01",
+                            "sll_buy_dvsn_cd_name": "현금매도",
+                            "ord_qty": "72",
+                            "tot_ccld_qty": "72",
+                            "avg_prvs": "65500",
+                            "tot_ccld_amt": "4716000",
+                            "odno": "0008991900",
+                            "cncl_yn": "",
+                        },
+                    ],
+                    "output2": {},
+                },
+            )
+        )
+        api = KISApi(kis_config)
+        try:
+            rows = await api.get_daily_executions(
+                date(2026, 5, 1), date(2026, 5, 20), stock_code="241560"
+            )
+        finally:
+            await api.close()
+
+    assert len(rows) == 2
+    assert rows[0]["side"] == "buy"
+    assert rows[0]["filled_qty"] == 113
+    assert rows[0]["avg_price"] == 69076.0
+    assert rows[0]["order_no"] == "0018495800"
+    assert rows[0]["cancelled"] is False
+    assert rows[1]["side"] == "sell"
+    assert rows[1]["filled_qty"] == 72
 
 
 async def test_request_nonzero_rt_cd_raises(kis_config):

@@ -129,6 +129,25 @@ class PortfolioState(BaseModel):
     timestamp: datetime
 
 
+class DailyExecution(BaseModel):
+    """일별 주문체결 1건 — KIS inquire-daily-ccld output1.
+
+    runtime state ↔ KIS drift 진단용 (positions_reconcile 의 qty_mismatch 후속).
+    """
+
+    order_date: str  # 주문일자 YYYYMMDD
+    order_time: str  # 주문시각 HHMMSS
+    stock_code: str
+    stock_name: str
+    side: Literal["buy", "sell"]
+    order_qty: int  # 주문수량
+    filled_qty: int  # 총체결수량
+    avg_price: float  # 체결평균가
+    filled_amount: int  # 총체결금액
+    order_no: str  # 주문번호
+    cancelled: bool  # 취소 여부
+
+
 # ─── Gateway request bodies ──────────────────────────────────────
 
 

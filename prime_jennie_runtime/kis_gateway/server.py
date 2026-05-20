@@ -37,6 +37,7 @@ from .price_repo import PriceRepo
 from .rate_limiter import AsyncRateLimiter
 from .schemas import (
     CancelRequest,
+    DailyExecution,
     DailyPrice,
     DailyPricesRequest,
     MinutePrice,
@@ -361,6 +362,35 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         try:
             data = await gw.circuit_breaker.call(gw.kis_api.get_balance)
             return {"cash_balance": data.get("cash_balance", 0)}
+        except CircuitBreakerError as err:
+            raise HTTPException(503, "Circuit breaker open") from err
+        except KISApiError as e:
+            raise HTTPException(502, f"KIS API error: {e}") from e
+
+    @app.get("/api/executions", response_model=list[DailyExecution])
+    async def api_daily_executions(
+        start_date: str,
+        end_date: str,
+        stock_code: str = "",
+    ) -> list[DailyExecution]:
+        """일별 주문체결 조회 — runtime state ↔ KIS drift 진단용.
+
+        start_date / end_date 는 YYYYMMDD (KIS 제한 3개월 이내). stock_code 가
+        빈 문자열이면 전 종목, 6자리 종목코드면 해당 종목만.
+        """
+        gw = _gw(app.state)
+        gw.record_request("executions", stock_code or "all")
+        try:
+            sd = datetime.strptime(start_date, "%Y%m%d").date()
+            ed = datetime.strptime(end_date, "%Y%m%d").date()
+        except ValueError as e:
+            raise HTTPException(422, "start_date/end_date must be YYYYMMDD") from e
+        await gw.trade_limiter.acquire()
+        try:
+            rows = await gw.circuit_breaker.call(
+                gw.kis_api.get_daily_executions, sd, ed, stock_code=stock_code
+            )
+            return [DailyExecution(**r) for r in rows]
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err
         except KISApiError as e:

@@ -10,6 +10,11 @@ position_sync_check.py 가 같은 logic 을 **startup 1회** 만 검사. 본 job
 5분 주기 runtime 검사 — alert 만, 자동 정리는 안 함 (feedback_sync_positions_manual
 메모리 준수).
 
+ticker 존재 여부뿐 아니라 **수량(quantity) 도 비교** — 양쪽에 ticker 가 다 있어도
+수량이 어긋나면 (외부 일부 매도/매수) qty_mismatch 로 검출. ticker set 만 비교하던
+구버전은 v3 sell 로 ticker 가 한쪽에서 사라질 때까지 drift 를 놓쳤다
+(2026-05-18 241560 20주 갭 9일 지연 검출 학습).
+
 자동 정리 안 하는 이유: 차이가 "오류 (외부 매도 발생)" 인지 "in-progress 상태
 (주문 발행 중)" 인지 단순 검사로 판별 불가. 사용자 결정 보존.
 """
@@ -28,21 +33,26 @@ logger = logging.getLogger(__name__)
 POSITION_STATE_PREFIX = "position_state:"
 
 
-async def _kis_balance_tickers(http: httpx.AsyncClient, gateway_url: str) -> set[str]:
-    """KIS gateway balance 호출 후 quantity > 0 ticker set 반환."""
+async def _kis_balance_quantities(http: httpx.AsyncClient, gateway_url: str) -> dict[str, int]:
+    """KIS gateway balance 호출 후 ``{ticker: quantity}`` 반환 (quantity > 0 만)."""
     resp = await http.get(f"{gateway_url.rstrip('/')}/api/balance", timeout=5.0)
     resp.raise_for_status()
     payload = resp.json()
-    return {
-        str(p["stock_code"])
-        for p in payload.get("positions", []) or []
-        if int(p.get("quantity", 0)) > 0
-    }
+    out: dict[str, int] = {}
+    for p in payload.get("positions", []) or []:
+        qty = int(p.get("quantity", 0) or 0)
+        if qty > 0:
+            out[str(p["stock_code"])] = qty
+    return out
 
 
-async def _redis_state_tickers(redis: aioredis.Redis) -> set[str]:
-    """redis 의 position_state:* key 들에서 quantity > 0 ticker set 반환."""
-    tickers: set[str] = set()
+async def _redis_state_quantities(redis: aioredis.Redis) -> dict[str, int]:
+    """position_state:* key 들에서 ``{ticker: 합산 quantity}`` 반환 (quantity > 0 만).
+
+    같은 ticker 에 여러 state key (manual sync key + v3 sheet key 등) 가 존재하면
+    합산한다 — v3 가 인식하는 그 ticker 의 총 보유 수량.
+    """
+    out: dict[str, int] = {}
     cursor: int = 0
     while True:
         cursor, keys = await redis.scan(cursor, match=f"{POSITION_STATE_PREFIX}*", count=100)
@@ -52,13 +62,15 @@ async def _redis_state_tickers(redis: aioredis.Redis) -> set[str]:
                 if raw is None:
                     continue
                 data = json.loads(raw.decode() if isinstance(raw, bytes) else raw)
-                if int(data.get("quantity", 0)) > 0 and data.get("ticker"):
-                    tickers.add(str(data["ticker"]))
+                qty = int(data.get("quantity", 0) or 0)
+                ticker = data.get("ticker")
+                if qty > 0 and ticker:
+                    out[str(ticker)] = out.get(str(ticker), 0) + qty
             except Exception:
                 logger.exception("state parse failed key=%s", raw_key)
         if cursor == 0:
             break
-    return tickers
+    return out
 
 
 async def reconcile_state_kis(
@@ -66,37 +78,46 @@ async def reconcile_state_kis(
     redis_client: aioredis.Redis,
     http: httpx.AsyncClient,
     kis_gateway_url: str,
-) -> dict[str, list[str]]:
+) -> dict[str, list]:
     """KIS balance vs v3 redis state 비교 + 차이 시 alert (notification stream).
 
     Returns:
-        ``{"only_in_state": [...], "only_in_kis": [...]}``
+        ``{"only_in_state": [...], "only_in_kis": [...], "qty_mismatch": [...]}``
         - only_in_state: KIS 잔고에는 없는데 v3 state 에 남은 ticker (외부 매도)
         - only_in_kis: v3 state 에 없는데 KIS 에 있는 ticker (외부 매수)
+        - qty_mismatch: 양쪽에 다 있지만 수량이 다른 ticker. 각 원소는
+          ``{"ticker", "state_qty", "kis_qty"}`` dict — 외부 일부 매도/매수.
 
     KIS / redis 장애 시 빈 dict 반환 + WARN log (fail-open).
     """
     try:
-        kis_tickers = await _kis_balance_tickers(http, kis_gateway_url)
+        kis = await _kis_balance_quantities(http, kis_gateway_url)
     except Exception:
         logger.warning("reconcile: balance fetch failed", exc_info=True)
         return {}
 
     try:
-        state_tickers = await _redis_state_tickers(redis_client)
+        state = await _redis_state_quantities(redis_client)
     except Exception:
         logger.warning("reconcile: redis scan failed", exc_info=True)
         return {}
 
+    kis_tickers = set(kis)
+    state_tickers = set(state)
     only_in_state = sorted(state_tickers - kis_tickers)
     only_in_kis = sorted(kis_tickers - state_tickers)
+    qty_mismatch = [
+        {"ticker": t, "state_qty": state[t], "kis_qty": kis[t]}
+        for t in sorted(state_tickers & kis_tickers)
+        if state[t] != kis[t]
+    ]
 
-    if not only_in_state and not only_in_kis:
+    if not only_in_state and not only_in_kis and not qty_mismatch:
         logger.info(
             "reconcile: state-KIS aligned (%d tickers)",
             len(state_tickers),
         )
-        return {"only_in_state": [], "only_in_kis": []}
+        return {"only_in_state": [], "only_in_kis": [], "qty_mismatch": []}
 
     # Notifier 없어도 stream 에 직접 publish (jobs/app.py 의 다른 alert 와 동일 패턴).
     body_parts: list[str] = []
@@ -110,16 +131,31 @@ async def reconcile_state_kis(
             f"only_in_kis ({len(only_in_kis)}): {', '.join(only_in_kis)} — "
             f"외부 매수 가능성. v3 미추적."
         )
+    if qty_mismatch:
+        detail = ", ".join(
+            f"{m['ticker']}(state={m['state_qty']} kis={m['kis_qty']})" for m in qty_mismatch
+        )
+        body_parts.append(
+            f"qty_mismatch ({len(qty_mismatch)}): {detail} — 수량 drift. "
+            f"외부 일부 매도/매수 가능성."
+        )
+
+    # v3 가 실제(KIS)보다 많이 보유 중이라 착각하는 경우 — only_in_state 또는
+    # state_qty > kis_qty — 는 phantom 청산/oversell 위험이라 critical.
+    # 그 외 (외부 매수 미추적 / v3 과소 카운트) 는 warning.
+    state_overcount = any(m["state_qty"] > m["kis_qty"] for m in qty_mismatch)
+    severity = "critical" if (only_in_state or state_overcount) else "warning"
 
     logger.warning(
-        "reconcile mismatch: only_in_state=%s only_in_kis=%s",
+        "reconcile mismatch: only_in_state=%s only_in_kis=%s qty_mismatch=%s",
         only_in_state,
         only_in_kis,
+        qty_mismatch,
     )
 
     payload = {
         "kind": "alert",
-        "severity": "critical" if only_in_state else "warning",
+        "severity": severity,
         "title": "runtime state-KIS mismatch",
         "body": " | ".join(body_parts),
         "ts": datetime.now(UTC).isoformat(),
@@ -127,6 +163,7 @@ async def reconcile_state_kis(
             "component": "positions_reconcile",
             "only_in_state": only_in_state,
             "only_in_kis": only_in_kis,
+            "qty_mismatch": qty_mismatch,
         },
     }
     try:
@@ -136,4 +173,8 @@ async def reconcile_state_kis(
     except Exception:
         logger.exception("reconcile alert publish failed")
 
-    return {"only_in_state": only_in_state, "only_in_kis": only_in_kis}
+    return {
+        "only_in_state": only_in_state,
+        "only_in_kis": only_in_kis,
+        "qty_mismatch": qty_mismatch,
+    }

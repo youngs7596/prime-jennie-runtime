@@ -67,12 +67,18 @@ class _FakeEngine:
 @dataclass
 class _FakeRedis:
     payloads: dict[str, str] = field(default_factory=dict)
+    hashes: dict[str, dict] = field(default_factory=dict)
     raise_on_get: bool = False
 
     async def get(self, key: str) -> str | None:
         if self.raise_on_get:
             raise RuntimeError("simulated redis failure")
         return self.payloads.get(key)
+
+    async def hgetall(self, key: str) -> dict:
+        if self.raise_on_get:
+            raise RuntimeError("simulated redis failure")
+        return self.hashes.get(key, {})
 
 
 @pytest.mark.asyncio
@@ -337,14 +343,28 @@ async def test_collect_briefing_data_assets_none_when_snapshot_stale():
 
 
 @pytest.mark.asyncio
-async def test_collect_briefing_data_watchlist_is_empty():
-    """legacy_quant_scores 가 migration 016 으로 drop 된 뒤 워치리스트는
-    무조건 빈 리스트 (v3 워치리스트 의미는 scout_runs/screening_candidates 가 흡수).
-    """
+async def test_collect_briefing_data_watchlist_empty_without_redis():
+    """redis_client 미주입 시 워치리스트는 빈 리스트 (watchlist:manual 못 읽음)."""
     conn = _FakeConn()
     engine = _FakeEngine(conn)
     data = await collect_briefing_data(engine, as_of=date(2026, 4, 17))
     assert data["watchlist"] == []
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_watchlist_from_redis_manual():
+    """telegram /watch 가 적재한 Redis hash watchlist:manual 을 종목코드 정렬로 반환."""
+    from prime_jennie_runtime.briefing.context_builder import WATCHLIST_MANUAL_KEY
+
+    redis = _FakeRedis(
+        hashes={WATCHLIST_MANUAL_KEY: {"005930": "삼성전자", "000660": "SK하이닉스"}}
+    )
+    engine = _FakeEngine(_FakeConn())
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 17), redis_client=redis)
+    assert data["watchlist"] == [
+        {"stock_code": "000660", "stock_name": "SK하이닉스"},
+        {"stock_code": "005930", "stock_name": "삼성전자"},
+    ]
 
 
 @pytest.mark.asyncio

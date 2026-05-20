@@ -25,6 +25,7 @@ from .formatters import compute_trade_summary
 logger = logging.getLogger(__name__)
 
 MACRO_SNAPSHOT_KEY_PREFIX = "macro:data:snapshot:"
+WATCHLIST_MANUAL_KEY = "watchlist:manual"
 
 
 def _parse_json_field(raw: str | dict | list | None) -> list | dict | None:
@@ -63,7 +64,7 @@ async def collect_briefing_data(
         trades = await _collect_trades(conn, today)
         positions = await _collect_positions(conn, kis_balance=kis_balance)
         macro = await _collect_macro(conn, today, redis_client=redis_client)
-        watchlist = await _collect_watchlist(conn)
+        watchlist = await _collect_watchlist(redis_client)
         news = await _collect_news(conn, today)
         assets = await _collect_assets(conn, today)
 
@@ -396,12 +397,29 @@ async def _collect_assets(conn, today: date) -> dict | None:
     }
 
 
-async def _collect_watchlist(conn) -> list[dict]:
-    """워치리스트 — v2 legacy_quant_scores 기반 Top 10 은 migration 016 으로
-    테이블이 drop 되면서 비워졌다. v3 는 scout_runs / screening_candidates
-    조합으로 워치리스트 의미가 흡수돼 별도 daily 워치리스트 잡을 두지 않음.
+async def _collect_watchlist(redis_client: Any | None) -> list[dict]:
+    """워치리스트 — telegram `/watch` 가 적재하는 Redis hash `watchlist:manual`
+    (``{종목코드: 종목명}``) 를 읽어 ``[{stock_code, stock_name}]`` 으로 반환.
+
+    v2 의 legacy_quant_scores Top 10 (점수 기반) 은 migration 016 으로 drop.
+    v3 워치리스트는 사용자가 손수 고른 수동 목록 — 점수/티어/랭크 개념이 없다.
+    redis_client 미주입 또는 key 부재/장애 시 빈 리스트.
     """
-    return []
+    if redis_client is None:
+        return []
+    try:
+        raw = await redis_client.hgetall(WATCHLIST_MANUAL_KEY)
+    except Exception:
+        logger.warning("watchlist:manual 조회 실패 — 워치리스트 생략", exc_info=True)
+        return []
+
+    out: list[dict] = []
+    for code_b, name_b in (raw or {}).items():
+        code = code_b.decode() if isinstance(code_b, bytes) else str(code_b)
+        name = name_b.decode() if isinstance(name_b, bytes) else str(name_b)
+        out.append({"stock_code": code, "stock_name": name})
+    out.sort(key=lambda w: w["stock_code"])
+    return out
 
 
 async def _collect_news(conn, today: date) -> list[dict]:

@@ -68,13 +68,7 @@ def _sample_data(**overrides) -> dict:
             "trading_reasoning": "선별적 매수",
         },
         "watchlist": [
-            {
-                "stock_code": "005930",
-                "stock_name": "삼성전자",
-                "hybrid_score": 78.5,
-                "trade_tier": "A",
-                "rank": 1,
-            },
+            {"stock_code": "005930", "stock_name": "삼성전자"},
         ],
         "assets": {
             "total_asset": 10_000_000,
@@ -129,7 +123,8 @@ def test_build_llm_context_includes_all_sections():
     assert "== 매매 상세 ==" in ctx
     assert "== 보유 종목 (1개) ==" in ctx
     assert "== 시장 현황 ==" in ctx
-    assert "== 워치리스트 Top 1 ==" in ctx
+    assert "== 워치리스트 (1종목) ==" in ctx
+    assert "삼성전자 (005930)" in ctx
     assert "== 주요 뉴스 ==" in ctx
     # 값 렌더링 스팟체크
     assert "총자산: 10,000,000원" in ctx
@@ -220,7 +215,7 @@ def test_format_fallback_html_uses_html_tags_only():
     assert "<b>오늘 매매</b> (매수 1건 / 매도 2건)" in html_out
     assert "<b>보유 종목</b>" in html_out
     assert "<b>시장 현황</b>" in html_out
-    # Markdown 헤딩/코드블럭 금지 — watchlist 의 "#1" 랭크는 허용
+    # Markdown 헤딩/코드블럭 금지
     for line in html_out.splitlines():
         assert not line.lstrip().startswith("# ")
     assert "```" not in html_out

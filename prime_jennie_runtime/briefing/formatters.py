@@ -25,7 +25,7 @@
         "crude_oil", "crude_oil_change_pct", "gold", "gold_change_pct",
         "kospi_foreign_net", "kospi_institutional_net", "kospi_retail_net",
     } | None,
-    "watchlist": [{"stock_code", "stock_name", "hybrid_score", "trade_tier", "rank"}, ...],
+    "watchlist": [{"stock_code", "stock_name"}, ...],
     "assets": {"total_asset", "cash_balance", "stock_eval", "position_count"} | None,
     "news": [{"stock_code", "headline", "score"}, ...],
   }
@@ -225,14 +225,11 @@ def build_llm_context(data: dict) -> str:
         lines.append("매크로 데이터 없음")
     lines.append("")
 
-    # 워치리스트
+    # 워치리스트 (telegram /watch 수동 목록)
     if data.get("watchlist"):
-        lines.append(f"== 워치리스트 Top {len(data['watchlist'])} ==")
+        lines.append(f"== 워치리스트 ({len(data['watchlist'])}종목) ==")
         for w in data["watchlist"]:
-            rank = w["rank"] if w["rank"] is not None else "-"
-            score = f"{w['hybrid_score']:.0f}" if w["hybrid_score"] is not None else "-"
-            tier = w["trade_tier"] or "-"
-            lines.append(f"#{rank} {w['stock_name']} ({score}점, {tier})")
+            lines.append(f"{w['stock_name']} ({w['stock_code']})")
         lines.append("")
 
     # 뉴스
@@ -346,14 +343,11 @@ def format_fallback_html(data: dict) -> str:
             )
         lines.append("")
 
-    # 워치리스트
+    # 워치리스트 (telegram /watch 수동 목록)
     if data.get("watchlist"):
-        lines.append(f"<b>워치리스트</b> Top {len(data['watchlist'])}")
-        for w in data["watchlist"][:5]:
-            rank = w["rank"] if w["rank"] is not None else "-"
-            score = f"{w['hybrid_score']:.0f}" if w["hybrid_score"] is not None else "-"
-            tier = w["trade_tier"] or "-"
-            lines.append(f"  #{rank} {_safe(w['stock_name'])} ({score}점, {tier})")
+        lines.append(f"<b>워치리스트</b> ({len(data['watchlist'])}종목)")
+        for w in data["watchlist"][:10]:
+            lines.append(f"  {_safe(w['stock_name'])} ({_safe(w['stock_code'])})")
         lines.append("")
 
     # 뉴스

@@ -248,3 +248,54 @@ async def test_multiple_state_keys_for_same_ticker_summed():
         assert await redis.xlen("v3:notifications") == 0
     finally:
         await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_identical_mismatch_is_debounced():
+    """동일 mismatch 가 연속으로 와도 debounce window 내엔 alert 1회만 publish.
+    (2026-05-18 동일 mismatch 84회 spam 학습)"""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await redis.set(f"{POSITION_STATE_PREFIX}ps_a", _state("128940"))
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://kis:8080/api/balance").mock(
+                return_value=httpx.Response(200, json=_balance_payload([]))
+            )
+            async with httpx.AsyncClient() as client:
+                r1 = await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+                r2 = await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+        # 두 호출 다 mismatch 를 반환하지만 alert publish 는 1회만
+        assert r1["only_in_state"] == ["128940"]
+        assert r2["only_in_state"] == ["128940"]
+        assert await redis.xlen("v3:notifications") == 1
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_changed_mismatch_re_alerts_despite_debounce():
+    """mismatch 내용이 바뀌면 (새 ticker 추가) signature 가 달라져 즉시 재알림 —
+    debounce 가 새 문제를 가리지 않는다."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await redis.set(f"{POSITION_STATE_PREFIX}ps_a", _state("128940"))
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://kis:8080/api/balance").mock(
+                return_value=httpx.Response(200, json=_balance_payload([]))
+            )
+            async with httpx.AsyncClient() as client:
+                await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+                # 새 mismatch ticker 추가 → signature 변경
+                await redis.set(f"{POSITION_STATE_PREFIX}ps_b", _state("999999"))
+                await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+        assert await redis.xlen("v3:notifications") == 2
+    finally:
+        await redis.aclose()

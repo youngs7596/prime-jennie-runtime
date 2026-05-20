@@ -17,12 +17,19 @@ ticker 존재 여부뿐 아니라 **수량(quantity) 도 비교** — 양쪽에 
 
 자동 정리 안 하는 이유: 차이가 "오류 (외부 매도 발생)" 인지 "in-progress 상태
 (주문 발행 중)" 인지 단순 검사로 판별 불가. 사용자 결정 보존.
+
+alert debounce: 동일 mismatch 가 5분 주기마다 텔레그램 spam 을 내지 않도록
+mismatch signature 별로 RECONCILE_ALERT_DEBOUNCE_SEC (기본 30분) debounce.
+mismatch 내용이 바뀌면 (새 ticker / 수량 변화) signature 가 달라져 즉시 재알림
+— 새 문제를 가리지 않는다. (2026-05-18 84회 spam 학습)
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 from datetime import UTC, datetime
 
 import httpx
@@ -31,6 +38,42 @@ import redis.asyncio as aioredis
 logger = logging.getLogger(__name__)
 
 POSITION_STATE_PREFIX = "position_state:"
+ALERT_DEBOUNCE_KEY_PREFIX = "reconcile:alert:debounce:"
+_ALERT_DEBOUNCE_SEC = int(os.environ.get("RECONCILE_ALERT_DEBOUNCE_SEC", "1800"))
+
+
+async def _should_alert(
+    redis: aioredis.Redis,
+    only_in_state: list[str],
+    only_in_kis: list[str],
+    qty_mismatch: list[dict],
+) -> bool:
+    """동일 mismatch 의 연속 alert 를 debounce — SET NX 성공 시에만 alert.
+
+    mismatch 3종을 직렬화한 signature 로 키를 만들고 ``SET NX EX`` 한다. window
+    (``_ALERT_DEBOUNCE_SEC``) 내에 동일 signature 가 다시 오면 키가 이미 있어
+    False. 내용이 바뀌면 signature 가 달라 새 키 → True (즉시 재알림).
+
+    window <= 0 이면 debounce off (항상 True). debounce SET 자체가 실패하면
+    fail-open — alert 를 잃지 않도록 True.
+    """
+    if _ALERT_DEBOUNCE_SEC <= 0:
+        return True
+    sig_src = json.dumps(
+        {"s": only_in_state, "k": only_in_kis, "q": qty_mismatch},
+        sort_keys=True,
+        default=str,
+    )
+    sig = hashlib.sha1(sig_src.encode()).hexdigest()[:16]
+    try:
+        return bool(
+            await redis.set(
+                f"{ALERT_DEBOUNCE_KEY_PREFIX}{sig}", "1", nx=True, ex=_ALERT_DEBOUNCE_SEC
+            )
+        )
+    except Exception:
+        logger.warning("reconcile debounce SET 실패 — alert 진행 (fail-open)", exc_info=True)
+        return True
 
 
 async def _kis_balance_quantities(http: httpx.AsyncClient, gateway_url: str) -> dict[str, int]:
@@ -153,6 +196,16 @@ async def reconcile_state_kis(
         qty_mismatch,
     )
 
+    # 동일 mismatch 연속 alert spam 차단 — 내용이 바뀌면 즉시 재알림.
+    result = {
+        "only_in_state": only_in_state,
+        "only_in_kis": only_in_kis,
+        "qty_mismatch": qty_mismatch,
+    }
+    if not await _should_alert(redis_client, only_in_state, only_in_kis, qty_mismatch):
+        logger.info("reconcile: 동일 mismatch — alert debounce 로 publish skip")
+        return result
+
     payload = {
         "kind": "alert",
         "severity": severity,
@@ -173,8 +226,4 @@ async def reconcile_state_kis(
     except Exception:
         logger.exception("reconcile alert publish failed")
 
-    return {
-        "only_in_state": only_in_state,
-        "only_in_kis": only_in_kis,
-        "qty_mismatch": qty_mismatch,
-    }
+    return result

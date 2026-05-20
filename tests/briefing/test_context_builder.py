@@ -102,6 +102,7 @@ async def test_collect_briefing_data_maps_trades_and_positions():
                     "qty": 5,
                     "executed_at": None,
                     "stock_code": "005930",
+                    "stock_name": "삼성전자",
                     "strategy_tag": "momentum",
                     "pnl_krw": None,
                     "pnl_pct": None,
@@ -113,6 +114,7 @@ async def test_collect_briefing_data_maps_trades_and_positions():
                     "qty": 3,
                     "executed_at": None,
                     "stock_code": "005930",
+                    "stock_name": "삼성전자",
                     "strategy_tag": "momentum",
                     "pnl_krw": 30,
                     "pnl_pct": 10.0,
@@ -120,7 +122,12 @@ async def test_collect_briefing_data_maps_trades_and_positions():
                 },
             ],
             "FROM position_sheets ps\n        JOIN executions e": [
-                {"stock_code": "005930", "quantity": 2, "avg_price": 100.0},
+                {
+                    "stock_code": "005930",
+                    "stock_name": "삼성전자",
+                    "quantity": 2,
+                    "avg_price": 100.0,
+                },
             ],
         }
     )
@@ -130,6 +137,7 @@ async def test_collect_briefing_data_maps_trades_and_positions():
     assert len(data["trades"]) == 2
     assert data["trades"][0]["trade_type"] == "BUY"
     assert data["trades"][0]["reason"] == "momentum"
+    assert data["trades"][0]["stock_name"] == "삼성전자"
     assert data["trades"][1]["trade_type"] == "SELL"
     assert data["trades"][1]["reason"] == "tp"
     assert data["trades"][1]["profit_pct"] == 10.0
@@ -141,12 +149,48 @@ async def test_collect_briefing_data_maps_trades_and_positions():
     assert data["positions"] == [
         {
             "stock_code": "005930",
-            "stock_name": "005930",
+            "stock_name": "삼성전자",
             "quantity": 2,
             "avg_price": 100.0,
             "total_buy": 200.0,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_collect_briefing_data_stock_name_falls_back_to_code():
+    """stock_masters LEFT JOIN 이 미스나면 (stock_name NULL) ticker code 로 fallback."""
+    conn = _FakeConn(
+        rows_by_prefix={
+            "FROM executions e": [
+                {
+                    "side": "sell",
+                    "price": 110,
+                    "qty": 3,
+                    "executed_at": None,
+                    "stock_code": "999999",
+                    "stock_name": None,
+                    "strategy_tag": "momentum",
+                    "pnl_krw": 30,
+                    "pnl_pct": 10.0,
+                    "exit_reason": "tp",
+                },
+            ],
+            "FROM position_sheets ps\n        JOIN executions e": [
+                {
+                    "stock_code": "999999",
+                    "stock_name": None,
+                    "quantity": 2,
+                    "avg_price": 100.0,
+                },
+            ],
+        }
+    )
+    engine = _FakeEngine(conn)
+    data = await collect_briefing_data(engine, as_of=date(2026, 4, 17))
+
+    assert data["trades"][0]["stock_name"] == "999999"
+    assert data["positions"][0]["stock_name"] == "999999"
 
 
 @pytest.mark.asyncio

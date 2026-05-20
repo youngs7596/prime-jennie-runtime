@@ -91,6 +91,7 @@ async def _collect_trades(conn, today: date) -> list[dict]:
     `outcomes` 테이블은 production 적재 path 가 없어 항상 비어있음 — 5-15 이후
     `scout_outcomes_v1` view 와 동일 로직 (executions 기반) 으로 통일.
     exit_reason 은 `executions.metadata_json->>'exit_reason'` 에서 직접 추출.
+    stock_name 은 stock_masters LEFT JOIN — 없으면 ticker fallback.
     """
     day_start = datetime.combine(today, datetime.min.time())
     day_end = day_start + timedelta(days=1)
@@ -103,6 +104,7 @@ async def _collect_trades(conn, today: date) -> list[dict]:
             e.qty,
             e.executed_at,
             ps.ticker AS stock_code,
+            sm.stock_name AS stock_name,
             ps.strategy_tag,
             CASE WHEN e.side IN ('sell','SELL','S') THEN
                 (e.price - (
@@ -123,6 +125,7 @@ async def _collect_trades(conn, today: date) -> list[dict]:
             e.metadata_json->>'exit_reason' AS exit_reason
         FROM executions e
         JOIN position_sheets ps ON ps.sheet_id = e.sheet_id
+        LEFT JOIN stock_masters sm ON sm.stock_code = ps.ticker
         WHERE e.executed_at >= :day_start AND e.executed_at < :day_end
         ORDER BY e.executed_at
         """
@@ -137,7 +140,7 @@ async def _collect_trades(conn, today: date) -> list[dict]:
         trades.append(
             {
                 "stock_code": r["stock_code"],
-                "stock_name": r["stock_code"],  # v3 에 종목명 캐시 없음 — code 로 대체
+                "stock_name": r["stock_name"] or r["stock_code"],
                 "trade_type": "SELL" if is_sell else "BUY",
                 "quantity": int(r["qty"]),
                 "price": float(r["price"]),
@@ -181,13 +184,15 @@ async def _collect_positions(conn, *, kis_balance: list[dict] | None = None) -> 
         """
         SELECT
             ps.ticker AS stock_code,
+            sm.stock_name AS stock_name,
             SUM(CASE WHEN e.side IN ('buy','BUY','B') THEN e.qty ELSE -e.qty END) AS quantity,
             AVG(CASE WHEN e.side IN ('buy','BUY','B') THEN e.price END) AS avg_price
         FROM position_sheets ps
         JOIN executions e ON e.sheet_id = ps.sheet_id
         LEFT JOIN outcomes o ON o.sheet_id = ps.sheet_id
+        LEFT JOIN stock_masters sm ON sm.stock_code = ps.ticker
         WHERE o.closed_at IS NULL
-        GROUP BY ps.ticker
+        GROUP BY ps.ticker, sm.stock_name
         HAVING SUM(CASE WHEN e.side IN ('buy','BUY','B') THEN e.qty ELSE -e.qty END) > 0
         ORDER BY ps.ticker
         """
@@ -200,7 +205,7 @@ async def _collect_positions(conn, *, kis_balance: list[dict] | None = None) -> 
         positions.append(
             {
                 "stock_code": r["stock_code"],
-                "stock_name": r["stock_code"],
+                "stock_name": r["stock_name"] or r["stock_code"],
                 "quantity": qty,
                 "avg_price": avg_price,
                 "total_buy": qty * avg_price,

@@ -20,6 +20,9 @@ class FakeKisClient:
 
     fill_price: float = 70000.0
     fill_qty_override: dict[str, int] = field(default_factory=dict)
+    # confirm_order 가 check_order_status 와 다른 값을 반환하도록 — 부분 체결
+    # (confirm 시점 체결량 < 주문량) 시뮬레이션용.
+    confirm_qty_override: dict[str, int] = field(default_factory=dict)
     should_fill: bool = True
     _counter: int = 0
     buy_calls: list[OrderRequest] = field(default_factory=list)
@@ -75,6 +78,18 @@ class FakeKisClient:
         max_retries: int = 5,
         interval: float = 3.0,
     ) -> OrderStatusResult | None:
+        # confirm_qty_override 지정 시 부분 체결 시뮬레이션 — confirm_order 가
+        # check_order_status (취소 후 재조회) 와 다른 체결량을 반환하게 한다.
+        qty = self.confirm_qty_override.get(order_no)
+        if qty is not None:
+            ordered = (
+                self.buy_calls[-1].quantity
+                if order_no.startswith("BUY")
+                else (self.sell_calls[-1].quantity if self.sell_calls else qty)
+            )
+            return OrderStatusResult(
+                filled=qty >= ordered, filled_qty=qty, avg_price=self.fill_price
+            )
         return await self.check_order_status(order_no)
 
     async def get_balance(self) -> PortfolioState:

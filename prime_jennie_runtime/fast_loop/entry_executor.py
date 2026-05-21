@@ -194,6 +194,30 @@ class EntryExecutor:
                 reason="not_filled",
             )
 
+        # 부분 체결 — 미체결 잔량을 취소하고 terminal status 로 실체결량을 확정.
+        # confirm_order 의 폴링 윈도우가 만료되면 부분 체결 status 를 그대로 반환하는데,
+        # 잔량 주문을 남겨두면 v3 추적 밖에서 나중에 체결돼 보유수량이 어긋난다
+        # (2026-05-21 진단: 5-14 241560 시장가 113주 주문이 confirm 시점 72주만
+        #  체결돼 v3 가 72 로 기록 → 잔량 41 이 이후 체결되며 orphan).
+        if status.filled_qty < quantity:
+            logger.warning(
+                "entry partial fill sheet=%s ticker=%s order=%s filled=%d/%d "
+                "— 잔량 취소 후 실체결량 확정",
+                sheet.sheet_id,
+                sheet.ticker,
+                result.order_no,
+                status.filled_qty,
+                quantity,
+            )
+            try:
+                await self._kis.cancel_order(result.order_no)
+            except Exception:
+                logger.exception("entry partial: cancel_order 실패 order=%s", result.order_no)
+            # 취소 직후 재조회 — 취소 처리 중 추가 체결분까지 반영된 terminal 값.
+            final = await self._kis.check_order_status(result.order_no)
+            if final is not None and final.filled_qty > 0:
+                status = final
+
         filled_qty = status.filled_qty
         filled_price = status.avg_price
 

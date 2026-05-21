@@ -150,3 +150,49 @@ async def test_entry_dryrun_skips_kis(fake_redis):
     assert outcome.filled_qty == 10
     assert kis.buy_calls == []  # KIS 호출 0
     assert await fake_redis.xlen(STREAM_NOTIFICATIONS) == 1
+
+
+@pytest.mark.asyncio
+async def test_entry_partial_fill_cancels_remainder(fake_redis):
+    """confirm_order 가 부분 체결을 반환하면 잔량을 취소하고 실체결량으로 등록.
+
+    회귀 가드 — 2026-05-21 진단: confirm 윈도우 만료 시 부분 체결을 그대로
+    기록하고 잔량 주문을 남겨두면, 잔량이 v3 추적 밖에서 체결돼 보유수량이
+    어긋난다 (5-14 241560 113주 중 72주만 기록 → 41주 orphan).
+    """
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=70000.0)
+    # confirm 시점 7/10 부분 체결, 취소 후 재조회도 7 (잔량 미체결)
+    kis.confirm_qty_override["BUY000001"] = 7
+    kis.fill_qty_override["BUY000001"] = 7
+    executor = EntryExecutor(kis, tracker, notifier)
+
+    outcome = await executor.execute(_sheet(trigger="market", price=None), quantity=10)
+
+    assert outcome.success is True
+    assert outcome.filled_qty == 7  # 주문량 10 이 아닌 실체결량 7 로 확정
+    assert "BUY000001" in kis.cancel_calls  # 미체결 잔량 취소
+    state = tracker.get(outcome.sheet_id)
+    assert state is not None
+    assert state.quantity == 7  # v3 보유수량 = KIS 실체결량
+
+
+@pytest.mark.asyncio
+async def test_entry_partial_then_full_on_recheck(fake_redis):
+    """confirm 시점엔 부분 체결이나 취소 직후 재조회에서 전량 체결로 확정되는 경우."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=70000.0)
+    kis.confirm_qty_override["BUY000001"] = 7  # confirm 시점 7/10
+    kis.fill_qty_override["BUY000001"] = 10  # 취소 처리 중 잔량 체결 → terminal 10
+    executor = EntryExecutor(kis, tracker, notifier)
+
+    outcome = await executor.execute(_sheet(trigger="market", price=None), quantity=10)
+
+    assert outcome.success is True
+    assert outcome.filled_qty == 10  # terminal 재조회값으로 확정
+    assert "BUY000001" in kis.cancel_calls
+    state = tracker.get(outcome.sheet_id)
+    assert state is not None
+    assert state.quantity == 10

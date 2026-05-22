@@ -51,12 +51,18 @@ SEEDS: list[SeedJob] = [
     # placeholder 였으나 collect_minute_chart 와 완전 중복(top30 안에 5종목 모두 포함)으로
     # 2026-05-08 obsolete 처리. 운영 DB 에서도 enabled=false. 새 환경에서도 시드하지
     # 않기 위해 SeedJob 자체 제거.
+    #
+    # collect_daily 도 2026-05-22 disabled — job_worker.collect_full_market_data
+    # (top300 자동발견, _DEFAULT_UNIVERSE 5종목을 모두 포함) 가 운영 일봉 수집자로
+    # 전환되며 완전 중복. collect_minute → collect_minute_chart 와 동일 패턴.
+    # SeedJob 은 이력 보존을 위해 enabled=False 로 남긴다.
     SeedJob(
         id="price_scheduler.collect_daily",
         owner="price_scheduler",
         handler_key="collect_daily",
         cron="0 16 * * 1-5",
         kwargs={"universe": _DEFAULT_UNIVERSE, "days": 150},
+        enabled=False,
     ),
     # Track B — scout/macro 주기 (v2 scout_job_dag: 30 8-14 * * 1-5)
     SeedJob(
@@ -225,14 +231,16 @@ SEEDS: list[SeedJob] = [
         kwargs={"top_n": 30},
     ),
     # Track B — collect_full_market_data (v2 utility_jobs_dag: 0 16 * * 1-5, 일봉 top300).
-    # price_scheduler.collect_daily 와 동일 시간대 → 기본 disabled. 운영 전환 시 enable.
+    # 운영 일봉 수집자 — stock_masters 시총 top300 자동발견, 18 req/s 페이싱, idempotent
+    # upsert. 2026-05-22 운영 전환 (enabled): 시드 placeholder 로 disabled 상태가 승격
+    # 누락돼 daily_prices 가 04-17 에 동결됐던 것을 발견 → 활성화. days=45 는 결정 선정
+    # 코어의 ≥20 거래일 윈도우 + 마진 + 소규모 공백 self-heal 용.
     SeedJob(
         id="job_worker.collect_full_market_data",
         owner="job_worker",
         handler_key="collect_full_market_data",
         cron="0 16 * * 1-5",
-        kwargs={"top_n": 300, "days": 30},
-        enabled=False,
+        kwargs={"top_n": 300, "days": 45},
     ),
     # Track B — daily_briefing_report (v2 utility_jobs_dag: 0 17 * * 1-5, 장마감 후 브리핑).
     # Telegram 전송은 TELEGRAM_BOT_TOKEN/CHAT_ID 가 설정되어야 실제 발송. 기본은 skip.

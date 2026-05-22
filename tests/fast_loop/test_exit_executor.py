@@ -77,6 +77,38 @@ async def test_exit_scale_out_partial(fake_redis):
 
 
 @pytest.mark.asyncio
+async def test_exit_partial_fill_cancels_remainder_and_keeps_sheet(fake_redis):
+    """전량청산 결정이 부분 체결되면: 미체결 잔량 취소 + sheet 를 잔여 수량으로 유지.
+
+    e708586 entry partial-fill fix 의 exit 측 대칭. 잔량 주문을 남기면 추적 밖
+    체결로 보유수량이 어긋나거나 다음 tick 에 이중 매도가 날 수 있다.
+    """
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=66500.0)
+    executor = ExitExecutor(kis, tracker, notifier)
+
+    state = _state()  # quantity 10
+    await tracker.register(state)
+
+    decision = ExitDecision(should_close=True, reason="fixed_sl", portion=1.0)
+    # confirm 시점 6/10 부분 체결, 취소 후 재조회(terminal)도 6.
+    kis.confirm_qty_override = {"SELL000001": 6}
+    kis.fill_qty_override = {"SELL000001": 6}
+    outcome = await executor.execute(state, decision)
+
+    assert outcome.success is True
+    assert outcome.fully_closed is False  # 잔량 남음 → sheet 유지
+    assert outcome.closed_qty == 6
+    # 미체결 잔량 취소됨
+    assert kis.cancel_calls == ["SELL000001"]
+    # sheet 는 잔여 4주로 살아있음 (다음 tick 에 exit rule 이 재청산)
+    remaining = tracker.get(state.sheet_id)
+    assert remaining is not None
+    assert remaining.quantity == 4
+
+
+@pytest.mark.asyncio
 async def test_breakeven_sl_raise_no_order(fake_redis):
     """should_close=False + new_sl_price → sell 주문 안 함, state.breakeven_sl_price 갱신."""
     tracker = PositionTracker(fake_redis)

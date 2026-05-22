@@ -82,6 +82,29 @@ class PostgresSheetFetcher:
             return []
 
 
+class PostgresDailyClosesFetcher:
+    """`daily_prices` 에서 ticker 의 최근 종가를 oldest→newest 로 반환.
+
+    fast_loop TickLoop 의 death_cross rule 평가용. TickLoop 이 종목별 KST 1일
+    1회만 호출(내부 캐시)하므로 별도 캐시 없이 매 호출 쿼리해도 부하 무시 가능.
+    """
+
+    _SQL = (
+        "SELECT close_price FROM daily_prices "
+        "WHERE stock_code = $1 ORDER BY price_date DESC LIMIT $2"
+    )
+
+    def __init__(self, pool: asyncpg.Pool, *, lookback: int = 60) -> None:
+        self._pool = pool
+        self._lookback = lookback
+
+    async def __call__(self, ticker: str) -> list[float]:
+        rows = await self._pool.fetch(self._SQL, ticker, self._lookback)
+        # price_date DESC 로 받았으므로 뒤집어 oldest→newest 로 정렬 —
+        # indicators.check_death_cross 가 시간순(과거→현재) 입력을 가정한다.
+        return [float(r["close_price"]) for r in reversed(rows)]
+
+
 class BalanceAwareSizer:
     """총자산 × final_pct × intraday_mult / current_price → 정수 수량.
 
@@ -281,6 +304,7 @@ async def run() -> None:
             account_sizer=sizer,
             bar_engine=bar_engine,
             notifier=notifier,  # audit A1 max-rejects alert
+            daily_closes_fetcher=PostgresDailyClosesFetcher(pool),
         )
         await tick_loop.ensure_group()
 

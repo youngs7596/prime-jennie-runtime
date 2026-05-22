@@ -258,13 +258,37 @@ class ExitExecutor:
                 reason="sell_not_filled",
             )
 
+        # 부분 체결 — 미체결 잔량을 취소하고 terminal status 로 실체결량 확정.
+        # entry_executor 의 e708586 fix 와 대칭. 잔량 주문을 남기면 (1) 추적 밖에서
+        # 나중에 체결돼 보유수량이 어긋나고 (2) 같은 sheet 가 다음 tick 에 또 매도
+        # 주문을 내 이중 매도가 날 수 있다. 취소 후엔 sheet 를 잔여 수량으로 열어
+        # 둬 다음 tick 에 exit rule 이 깨끗한 주문으로 재시도하게 한다.
+        if status.filled_qty < qty_to_sell:
+            logger.warning(
+                "exit partial fill sheet=%s ticker=%s order=%s filled=%d/%d "
+                "— 잔량 취소 후 실체결량 확정",
+                state.sheet_id,
+                state.ticker,
+                result.order_no,
+                status.filled_qty,
+                qty_to_sell,
+            )
+            try:
+                await self._kis.cancel_order(result.order_no)
+            except Exception:
+                logger.exception("exit partial: cancel_order 실패 order=%s", result.order_no)
+            final = await self._kis.check_order_status(result.order_no)
+            if final is not None and final.filled_qty > 0:
+                status = final
+
         filled_qty = status.filled_qty
         filled_price = status.avg_price
         now = datetime.now(UTC)
 
-        # 부분 청산인지 여부 판단
+        # 실제 체결량만큼 차감 — 부분 체결이면 fully_closed=False 로 sheet 를
+        # 잔여 수량과 함께 유지 (다음 tick 에 exit rule 이 나머지를 재청산).
         state.quantity -= filled_qty
-        fully_closed = state.quantity <= 0 or decision.portion >= 1.0
+        fully_closed = state.quantity <= 0
         is_partial = not fully_closed
 
         # 성공 매도 — fail count 리셋

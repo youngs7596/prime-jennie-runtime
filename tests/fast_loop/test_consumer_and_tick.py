@@ -21,6 +21,7 @@ from prime_jennie_runtime.fast_loop.pending_entry import (
 )
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.tick_loop import TickLoop
+from prime_jennie_runtime.infra.redis_streams import STREAM_NOTIFICATIONS
 from prime_jennie_runtime.position_sheet.schema import KST, PositionSheet
 
 from .fakes import FakeKisClient
@@ -32,6 +33,7 @@ def _sheet(
     *,
     ticker: str = "005930",
     conditions: list[dict] | None = None,
+    exit_rules: list[dict] | None = None,
 ) -> PositionSheet:
     now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)
     return PositionSheet(
@@ -54,7 +56,8 @@ def _sheet(
             "conditions": conditions or [],
         },
         exit={
-            "rules": [
+            "rules": exit_rules
+            or [
                 {"type": "fixed_sl", "pct": sl_pct},
                 {"type": "time_stop", "mode": "eod"},
             ]
@@ -299,6 +302,256 @@ async def test_tick_loop_no_match_persists_state(fake_redis):
     updated = tracker.get(state.sheet_id)
     assert updated is not None
     assert updated.high_watermark == 71000.0
+    assert kis.sell_calls == []
+
+
+# =====================================================================
+# Tick Loop — 죽은 청산 rule 배선 복구 (step3: time_stop / death_cross)
+# =====================================================================
+
+
+def test_business_days_since():
+    """진입 후 경과 영업일수 — 주말 제외. time_stop hold_days 평가용."""
+    from prime_jennie_runtime.fast_loop.tick_loop import _business_days_since
+
+    entered = datetime(2026, 4, 16, 9, 15, tzinfo=KST)  # 목요일
+    assert _business_days_since(entered, datetime(2026, 4, 16, 15, 30, tzinfo=KST)) == 0
+    assert _business_days_since(entered, datetime(2026, 4, 17, 15, 30, tzinfo=KST)) == 1
+    # 토·일 건너뛰고 월 → 2
+    assert _business_days_since(entered, datetime(2026, 4, 20, 15, 30, tzinfo=KST)) == 2
+    # 다음 목 → 5 영업일 (금·월·화·수·목)
+    assert _business_days_since(entered, datetime(2026, 4, 23, 15, 30, tzinfo=KST)) == 5
+    # 미래가 진입보다 앞서면 0
+    assert _business_days_since(entered, datetime(2026, 4, 15, 15, 30, tzinfo=KST)) == 0
+
+
+async def _run_one_tick(loop: TickLoop, fake_redis, group: str, consumer: str) -> None:
+    messages = await fake_redis.xreadgroup(group, consumer, {"kis:prices": ">"}, count=1, block=100)
+    for _stream, entries in messages:
+        for msg_id, data in entries:
+            await loop.process_one(msg_id, data)
+
+
+async def _last_notification(fake_redis) -> dict:
+    entries = await fake_redis.xrange(STREAM_NOTIFICATIONS)
+    assert entries, "expected an exit notification"
+    return json.loads(entries[-1][1][b"payload"].decode())
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_time_stop_hold_days_fires(fake_redis):
+    """hold_days time_stop — tick_loop 이 entered_business_days 를 산출·전달하면
+    N영업일 경과 + 15:20 이후에 청산된다 (배선 복구 회귀 방지).
+    """
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=69000.0)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(
+        exit_rules=[
+            {"type": "fixed_sl", "pct": 0.05},
+            {"type": "time_stop", "mode": "hold_days", "value": 2},
+        ]
+    )
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=70000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),  # 목
+        high_watermark=70000.0,
+    )
+    await tracker.register(state)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        group="tg_ts",
+        consumer="tc_ts",
+    )
+    await loop.ensure_group()
+
+    # 목→월 = 2영업일 경과 + 15:25 (>= 15:20). 가격 -1.4% — fixed_sl(5%) 미달.
+    tick_ts = datetime(2026, 4, 20, 15, 25, 0, tzinfo=KST).isoformat()
+    await fake_redis.xadd(
+        "kis:prices",
+        {"payload": json.dumps({"ticker": "005930", "price": 69000.0, "ts": tick_ts})},
+    )
+    await _run_one_tick(loop, fake_redis, "tg_ts", "tc_ts")
+
+    assert tracker.get(state.sheet_id) is None
+    assert len(kis.sell_calls) == 1
+    assert (await _last_notification(fake_redis))["reason"] == "time_stop"
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_time_stop_hold_days_not_yet(fake_redis):
+    """hold_days time_stop — N영업일 미경과면 미발동."""
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=69000.0)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(
+        exit_rules=[
+            {"type": "fixed_sl", "pct": 0.05},
+            {"type": "time_stop", "mode": "hold_days", "value": 2},
+        ]
+    )
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=70000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),  # 목
+        high_watermark=70000.0,
+    )
+    await tracker.register(state)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        group="tg_ts2",
+        consumer="tc_ts2",
+    )
+    await loop.ensure_group()
+
+    # 목→금 = 1영업일 (< 2) — cutoff 지나도 미발동.
+    tick_ts = datetime(2026, 4, 17, 15, 25, 0, tzinfo=KST).isoformat()
+    await fake_redis.xadd(
+        "kis:prices",
+        {"payload": json.dumps({"ticker": "005930", "price": 69000.0, "ts": tick_ts})},
+    )
+    await _run_one_tick(loop, fake_redis, "tg_ts2", "tc_ts2")
+
+    assert tracker.get(state.sheet_id) is not None
+    assert kis.sell_calls == []
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_death_cross_fires_with_fetcher(fake_redis):
+    """death_cross — tick_loop 이 daily_closes_fetcher 를 배선하면 일봉 MA 하향
+    교차 + 손실 구간에서 청산된다 (배선 복구 회귀 방지).
+    """
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=98000.0)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(
+        exit_rules=[
+            {"type": "death_cross", "ma_short": 5, "ma_long": 20, "min_loss_pct": 0.01},
+            {"type": "fixed_sl", "pct": 0.05},
+            {"type": "time_stop", "mode": "eod"},
+        ]
+    )
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=100000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        high_watermark=100000.0,
+    )
+    await tracker.register(state)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    # MA5 하향 교차 패턴 (24일 100 + 마지막 급락 70).
+    async def daily_closes(_ticker: str) -> list[float]:
+        return [100.0] * 24 + [70.0]
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        group="tg_dc",
+        consumer="tc_dc",
+        daily_closes_fetcher=daily_closes,
+    )
+    await loop.ensure_group()
+
+    # -2% 손실 (min_loss 1% 충족, fixed_sl 5% 미달) → death_cross 만 매칭.
+    tick_ts = datetime(2026, 4, 16, 10, 0, 0, tzinfo=KST).isoformat()
+    await fake_redis.xadd(
+        "kis:prices",
+        {"payload": json.dumps({"ticker": "005930", "price": 98000.0, "ts": tick_ts})},
+    )
+    await _run_one_tick(loop, fake_redis, "tg_dc", "tc_dc")
+
+    assert tracker.get(state.sheet_id) is None
+    assert len(kis.sell_calls) == 1
+    assert (await _last_notification(fake_redis))["reason"] == "death_cross"
+
+
+@pytest.mark.asyncio
+async def test_tick_loop_death_cross_inert_without_fetcher(fake_redis):
+    """daily_closes_fetcher 미주입 시 death_cross 는 미발동 (fail-safe)."""
+    from prime_jennie_runtime.fast_loop.domain import PositionState
+
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=98000.0)
+    exit_exec = ExitExecutor(kis, tracker, notifier)
+
+    sheet = _sheet(
+        exit_rules=[
+            {"type": "death_cross", "ma_short": 5, "ma_long": 20, "min_loss_pct": 0.01},
+            {"type": "fixed_sl", "pct": 0.05},
+            {"type": "time_stop", "mode": "eod"},
+        ]
+    )
+    state = PositionState(
+        sheet_id=sheet.sheet_id,
+        ticker="005930",
+        entry_price=100000.0,
+        quantity=10,
+        entered_at=datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
+        high_watermark=100000.0,
+    )
+    await tracker.register(state)
+
+    async def fetch(sheet_id: str):
+        return [sheet]
+
+    loop = _build_tick_loop(
+        fake_redis,
+        tracker=tracker,
+        exit_executor=exit_exec,
+        sheet_fetcher=fetch,
+        group="tg_dc2",
+        consumer="tc_dc2",
+        # daily_closes_fetcher 미주입
+    )
+    await loop.ensure_group()
+
+    tick_ts = datetime(2026, 4, 16, 10, 0, 0, tzinfo=KST).isoformat()
+    await fake_redis.xadd(
+        "kis:prices",
+        {"payload": json.dumps({"ticker": "005930", "price": 98000.0, "ts": tick_ts})},
+    )
+    await _run_one_tick(loop, fake_redis, "tg_dc2", "tc_dc2")
+
+    assert tracker.get(state.sheet_id) is not None
     assert kis.sell_calls == []
 
 

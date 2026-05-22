@@ -14,10 +14,11 @@ POSITION_SHEET_SPEC §4.1 / §4.3 의 "valid_until 내 재평가" 의미가 여�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import redis.asyncio as aioredis
 
@@ -32,7 +33,7 @@ from prime_jennie_runtime.fast_loop.pending_entry import (
 )
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.infra.redis_streams import STREAM_PRICES
-from prime_jennie_runtime.position_sheet.schema import PositionSheet
+from prime_jennie_runtime.position_sheet.schema import KST, PositionSheet
 from prime_jennie_runtime.telegram_bot.control import (
     KEY_FORCED_LIQUIDATION,
     STATE_KEY_LIQUIDATE_ARMED,
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 # 시트 조회 콜백 — sheet_id → 해당 시트. 캐시 구현은 호출자 책임.
 SheetFetcher = Callable[[str], Awaitable[list[PositionSheet]]]
 AccountSizer = Callable[[PositionSheet], Awaitable[int]]
+# ticker → 일봉 종가 리스트 (oldest→newest). death_cross rule 평가용.
+DailyClosesFetcher = Callable[[str], Awaitable[list[float]]]
 Clock = Callable[[], datetime]
 
 
@@ -74,6 +77,7 @@ class TickLoop:
         block_ms: int = 1000,
         max_entry_rejects: int = 5,
         notifier=None,
+        daily_closes_fetcher: DailyClosesFetcher | None = None,
     ):
         self._redis = redis_client
         self._tracker = tracker
@@ -98,6 +102,10 @@ class TickLoop:
         self._max_entry_rejects = max(1, max_entry_rejects)
         self._entry_reject_counts: dict[str, int] = {}
         self._notifier = notifier
+        # death_cross rule 평가용 일봉 종가 fetcher + 종목별 1일 1회 캐시.
+        # 미주입 시 death_cross 는 자연히 미발동 (fail-safe).
+        self._daily_closes_fetcher = daily_closes_fetcher
+        self._daily_closes_cache: dict[str, tuple[date, list[float]]] = {}
 
     async def ensure_group(self) -> None:
         try:
@@ -119,8 +127,16 @@ class TickLoop:
                     block=self._block_ms,
                 )
             except aioredis.ConnectionError:
-                logger.exception("redis connection lost in tick_loop")
-                break
+                # 일시적 redis 끊김에 fast_loop 전체를 재시작하지 않는다 —
+                # 5초 후 재시도. redis 가 재기동돼 group 이 사라졌을 수 있어
+                # ensure_group 도 재호출 (BUSYGROUP 은 idempotent).
+                logger.exception("redis connection lost in tick_loop — retrying in 5s")
+                await asyncio.sleep(5.0)
+                try:
+                    await self.ensure_group()
+                except Exception:
+                    logger.exception("ensure_group after redis reconnect failed")
+                continue
             if not messages:
                 continue
             for _stream, entries in messages:
@@ -192,6 +208,8 @@ class TickLoop:
         sheet_ids = self._tracker.sheet_ids_for(tick.ticker)
         if not sheet_ids:
             return
+        # death_cross rule 평가용 일봉 종가 — 종목별 1일 1회 fetch (캐시).
+        daily_closes = await self._get_daily_closes(tick.ticker, tick.ts)
         for sheet_id in sheet_ids:
             state = self._tracker.get(sheet_id)
             if state is None:
@@ -200,7 +218,15 @@ class TickLoop:
             if not sheets:
                 continue
             sheet = sheets[0]
-            decision = evaluate_exit(sheet, state, tick)
+            # time_stop hold_days 평가용 — 진입 후 경과 영업일수.
+            entered_business_days = _business_days_since(state.entered_at, tick.ts)
+            decision = evaluate_exit(
+                sheet,
+                state,
+                tick,
+                daily_closes=daily_closes,
+                entered_business_days=entered_business_days,
+            )
             if decision is None:
                 # state 변경 가능 (high_watermark 등) 만 persist
                 try:
@@ -245,6 +271,26 @@ class TickLoop:
                     tick.ticker,
                     decision.reason,
                 )
+
+    async def _get_daily_closes(self, ticker: str, now: datetime) -> list[float] | None:
+        """death_cross 평가용 일봉 종가 (oldest→newest). 종목별 KST 날짜 단위 캐시.
+
+        fetcher 미주입이거나 조회 실패 시 None — death_cross rule 은 그러면
+        자연히 미발동 (`exit_evaluator._check_death_cross` 가 None 을 skip).
+        """
+        if self._daily_closes_fetcher is None:
+            return None
+        today = _kst_date(now)
+        cached = self._daily_closes_cache.get(ticker)
+        if cached is not None and cached[0] == today:
+            return cached[1]
+        try:
+            closes = await self._daily_closes_fetcher(ticker)
+        except Exception:
+            logger.exception("daily_closes fetch failed ticker=%s", ticker)
+            return cached[1] if cached is not None else None
+        self._daily_closes_cache[ticker] = (today, closes)
+        return closes
 
     async def _evaluate_pending_entries(self, tick: TickData) -> None:
         pending_sheets = self._queue.snapshot_for_ticker(tick.ticker)
@@ -415,6 +461,33 @@ class TickLoop:
                 sheet.sheet_id,
                 passed_reason,
             )
+
+
+def _kst_date(dt: datetime) -> date:
+    """datetime → KST 날짜. naive 는 KST 로 간주 (exit_evaluator 와 동일 관례)."""
+    if dt.tzinfo is None:
+        return dt.date()
+    return dt.astimezone(KST).date()
+
+
+def _business_days_since(entered_at: datetime, now: datetime) -> int:
+    """진입일로부터 경과한 영업일 수 (KST 날짜 기준, 주말 제외).
+
+    진입 당일 = 0, 다음 영업일 = 1. ``time_stop`` hold_days rule 평가용.
+    공휴일은 영업일로 계산되는 근사 — 정확한 거래일 반영이 필요하면 거래일
+    캘린더 연동을 별도 검토. 현재는 토/일만 제외한다.
+    """
+    entry_date = _kst_date(entered_at)
+    cur_date = _kst_date(now)
+    if cur_date <= entry_date:
+        return 0
+    count = 0
+    d = entry_date + timedelta(days=1)
+    while d <= cur_date:
+        if d.weekday() < 5:  # 0=Mon .. 4=Fri
+            count += 1
+        d += timedelta(days=1)
+    return count
 
 
 def _parse_tick(data: dict) -> TickData | None:

@@ -246,6 +246,7 @@ async def test_run_job_failure_records_failed_status():
         owner="test",
         handlers={"handler_a": handler_a},
         store=store,
+        max_retries=0,
     )
     await runner.run_job(
         job_id="j1",
@@ -269,9 +270,84 @@ async def test_run_job_truncates_long_error_message():
         owner="test",
         handlers={"handler_a": handler_a},
         store=store,
+        max_retries=0,
     )
     await runner.run_job(job_id="j1", handler=handler_a, handler_kwargs={})
     assert len(store.run_ends[0]["error"]) <= 500
+
+
+# -----------------------------------------------------------------------------
+# run_job retry — handler 실패 시 max_retries 회까지 재시도 (v2 Airflow retries 대체)
+# -----------------------------------------------------------------------------
+
+
+async def test_run_job_retries_then_succeeds():
+    """첫 시도 실패 → 재시도에서 성공 → status='success' + handler 2회 호출."""
+    store = FakeStore()
+    attempts = {"n": 0}
+
+    async def flaky(**kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise ConnectionError("transient")
+
+    runner = SchedulerRunner(
+        owner="test",
+        handlers={"handler_a": flaky},
+        store=store,
+        max_retries=1,
+        retry_delay_sec=0.0,
+    )
+    await runner.run_job(job_id="j1", handler=flaky, handler_kwargs={})
+    assert attempts["n"] == 2  # 최초 1회 + 재시도 1회
+    assert len(store.run_ends) == 1
+    end = store.run_ends[0]
+    assert end["status"] == "success"
+    assert end["error"] is None
+
+
+async def test_run_job_retry_exhausted_records_failed():
+    """모든 시도 실패 → status='failed', handler 가 max_retries+1 회 호출됨."""
+    store = FakeStore()
+    attempts = {"n": 0}
+
+    async def always_fail(**kwargs):
+        attempts["n"] += 1
+        raise RuntimeError("boom")
+
+    runner = SchedulerRunner(
+        owner="test",
+        handlers={"handler_a": always_fail},
+        store=store,
+        max_retries=2,
+        retry_delay_sec=0.0,
+    )
+    await runner.run_job(job_id="j1", handler=always_fail, handler_kwargs={})
+    assert attempts["n"] == 3  # 최초 1회 + 재시도 2회
+    end = store.run_ends[0]
+    assert end["status"] == "failed"
+    assert "RuntimeError" in (end["error"] or "")
+    assert "after 3 attempts" in (end["error"] or "")
+
+
+async def test_run_job_no_retry_when_max_retries_zero():
+    """max_retries=0 → handler 1회만 호출, 재시도 없음."""
+    store = FakeStore()
+    attempts = {"n": 0}
+
+    async def always_fail(**kwargs):
+        attempts["n"] += 1
+        raise RuntimeError("boom")
+
+    runner = SchedulerRunner(
+        owner="test",
+        handlers={"handler_a": always_fail},
+        store=store,
+        max_retries=0,
+    )
+    await runner.run_job(job_id="j1", handler=always_fail, handler_kwargs={})
+    assert attempts["n"] == 1
+    assert store.run_ends[0]["status"] == "failed"
 
 
 async def test_start_and_stop_lifecycle():

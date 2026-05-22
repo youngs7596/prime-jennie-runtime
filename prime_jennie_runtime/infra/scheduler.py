@@ -247,6 +247,12 @@ class SchedulerRunner:
         DB 변경 감지 주기. 기본 30초.
     timezone_name:
         CronTrigger 에 적용할 타임존. 기본 Asia/Seoul.
+    max_retries:
+        handler 실패 시 추가 재시도 횟수. 기본 1 (= 최초 1회 + 재시도 1회).
+        v2 Airflow 의 uniform ``retries`` 를 대체하는 스케줄러 레벨 방어망.
+        0 이면 재시도 없음.
+    retry_delay_sec:
+        재시도 사이 대기 시간(초). 기본 30초.
     """
 
     def __init__(
@@ -259,6 +265,8 @@ class SchedulerRunner:
         poll_interval_sec: float = 30.0,
         timezone_name: str = "Asia/Seoul",
         scheduler: AsyncIOScheduler | None = None,
+        max_retries: int = 1,
+        retry_delay_sec: float = 30.0,
     ) -> None:
         self._owner = owner
         self._handlers = handlers
@@ -266,6 +274,8 @@ class SchedulerRunner:
         self._redis = redis_client
         self._poll_interval = poll_interval_sec
         self._timezone = timezone_name
+        self._max_retries = max(0, max_retries)
+        self._retry_delay_sec = max(0.0, retry_delay_sec)
         self._scheduler = scheduler or AsyncIOScheduler(timezone=timezone_name)
         self._known: dict[str, tuple] = {}  # job_id → signature
         self._poll_task: asyncio.Task[None] | None = None
@@ -398,25 +408,58 @@ class SchedulerRunner:
         handler: Handler,
         handler_kwargs: dict[str, Any],
     ) -> None:
-        """job 1회 실행 + DB 상태 갱신. apscheduler 내부에서 호출되지만 테스트도 직접 호출."""
+        """job 1회 실행 + DB 상태 갱신. apscheduler 내부에서 호출되지만 테스트도 직접 호출.
+
+        handler 가 예외를 던지면 ``max_retries`` 회까지 재시도한다 (시도 사이
+        ``retry_delay_sec`` 대기). 외부 API 5xx/ConnectError 같은 transient 실패를
+        흡수하기 위한 v2 Airflow uniform retries 대체. 모든 시도가 실패하면
+        status='failed' 로 기록한다.
+        """
         started_at = datetime.now(UTC)
         t0 = time.monotonic()
         run_id = await self._store.record_run_start(job_id, started_at)
-        try:
-            await handler(**handler_kwargs)
-        except Exception as e:
-            duration_ms = int((time.monotonic() - t0) * 1000)
-            logger.exception("scheduled job failed: id=%s", job_id)
+
+        total_attempts = self._max_retries + 1
+        last_error: str | None = None
+        for attempt in range(1, total_attempts + 1):
+            try:
+                await handler(**handler_kwargs)
+                last_error = None
+                break
+            except Exception as e:  # noqa: BLE001
+                last_error = f"{type(e).__name__}: {e}"
+                if attempt < total_attempts:
+                    logger.warning(
+                        "scheduled job failed, retrying: id=%s attempt=%d/%d delay=%.1fs error=%s",
+                        job_id,
+                        attempt,
+                        total_attempts,
+                        self._retry_delay_sec,
+                        last_error,
+                    )
+                    if self._retry_delay_sec > 0:
+                        await asyncio.sleep(self._retry_delay_sec)
+                else:
+                    logger.exception(
+                        "scheduled job failed after %d attempt(s): id=%s",
+                        total_attempts,
+                        job_id,
+                    )
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        if last_error is not None:
+            error_msg = last_error
+            if total_attempts > 1:
+                error_msg = f"{last_error} (after {total_attempts} attempts)"
             await self._store.record_run_end(
                 job_id,
                 run_id,
                 status="failed",
-                error=f"{type(e).__name__}: {e}"[:500],
+                error=error_msg[:500],
                 duration_ms=duration_ms,
                 next_run_at=self._next_run_for(job_id),
             )
             return
-        duration_ms = int((time.monotonic() - t0) * 1000)
         await self._store.record_run_end(
             job_id,
             run_id,

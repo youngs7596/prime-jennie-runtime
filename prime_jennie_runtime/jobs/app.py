@@ -27,7 +27,11 @@ import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from prime_jennie_runtime.briefing.reporter import LLMCaller, build_chat_llm_caller
-from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
+from prime_jennie_runtime.infra.config import (
+    AppConfig,
+    TelegramConfig,
+    validate_kis_gateway_url,
+)
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 from prime_jennie_runtime.news_pipeline_global.pipeline import (
@@ -291,7 +295,10 @@ async def run() -> None:
         )
         stack.push_async_callback(pool.close)
 
-        kis_gateway_url = os.environ.get("KIS_GATEWAY_URL", cfg.kis.gateway_url).rstrip("/")
+        # KIS_GATEWAY_URL fail-fast — env 누락/localhost 면 production 에서 startup
+        # 중단. 미검증 fallback 으로 9 거래일간 ConnectError 가 누적된 사고
+        # (daily_asset_snapshot 2026-04-20~30) 재발 방지. fast_loop/app.py 와 동일 패턴.
+        kis_gateway_url = validate_kis_gateway_url(cfg.kis, strict=cfg.env == "production")
 
         engine = create_engine(cfg.postgres)
         stack.push_async_callback(engine.dispose)

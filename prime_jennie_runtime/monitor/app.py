@@ -34,6 +34,14 @@ def _poll_interval() -> float:
         return 30.0
 
 
+def _idle_poll_interval() -> float:
+    """장 시간 외 balance polling 주기 (초). 기본 300 — 평가금액이 안 변하므로 크게."""
+    try:
+        return float(os.getenv("MONITOR_IDLE_POLL_INTERVAL_SEC", "300"))
+    except ValueError:
+        return 300.0
+
+
 def create_app(config: AppConfig | None = None) -> FastAPI:
     """Monitor FastAPI 앱 팩토리."""
 
@@ -49,6 +57,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             redis_client=redis_client,
             gateway_url=_gateway_url(cfg),
             interval_sec=_poll_interval(),
+            idle_interval_sec=_idle_poll_interval(),
             notifier=notifier,
         )
         await poller.__aenter__()
@@ -91,6 +100,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "last_failure_ts": poller.last_failure_ts,
             "last_positions_count": poller.last_positions_count,
             "interval_sec": poller._interval,
+            "idle_interval_sec": poller._idle_interval,
+            "current_interval_sec": poller._current_interval(),
             "coordinator_watch": (
                 {
                     "last_tick_ts": watch.last_tick_ts,

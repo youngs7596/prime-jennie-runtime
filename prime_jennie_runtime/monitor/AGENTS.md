@@ -11,7 +11,7 @@ v2 `prime_jennie/services/monitor/` 포팅. **재작성이 아님** — v3 는 �
 | Watermark DB sync | `fast_loop` 포지션 tracker (포팅 완료) |
 
 즉 v3 monitor 는 **표면적으로는 축소된 observability agent**:
-- KIS Gateway `/balance` polling → Redis `monitoring:live_positions` 주기 갱신
+- KIS Gateway `/balance` polling → Redis `monitoring:live_positions` 주기 갱신 (장 시간 인식 — 장중 촘촘, 장 외 느슨)
 - `/health` + `/metrics` (Prometheus text format, Grafana scrape)
 - 모든 exit-rule 로직은 fast_loop 가 소유. monitor 는 snapshot 만.
 
@@ -27,5 +27,6 @@ monitor/
 ## 환경
 
 - `KIS_GATEWAY_URL` (default `http://kis-gateway:8080`)
-- `MONITOR_POLL_INTERVAL_SEC` (default 30)
+- `MONITOR_POLL_INTERVAL_SEC` (default 30) — 장중(정규장/동시호가) balance polling 주기
+- `MONITOR_IDLE_POLL_INTERVAL_SEC` (default 300) — 장 시간 외 polling 주기 (평가금액 불변)
 - `REDIS_*` 공통

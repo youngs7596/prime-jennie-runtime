@@ -4,6 +4,10 @@ v2 원본: `prime_jennie/services/monitor/app.py` `_publish_live_snapshot` + tic
 v3 는 fast_loop/tick_loop 이 실시간 매도 판정을 담당하므로, monitor 는 대시보드용
 스냅샷 + metrics 에 집중.
 
+polling 주기는 장 시간 인식 — 정규장/동시호가엔 ``interval_sec``(기본 30s), 그 외엔
+``idle_interval_sec``(기본 300s). 잔고의 보유수량·예수금은 체결 때만 바뀌지만
+평가금액·평가손익은 현재가에 연동돼 장중 계속 변하므로, 장중만 촘촘히 읽는다.
+
 Redis 키 (v2 와 동일):
 - `monitoring:live_positions` — JSON {positions: [...], updated_at: iso}
 - `monitoring:price_monitor`  — JSON {status, watching_count, updated_at}
@@ -30,17 +34,21 @@ import redis.asyncio as aioredis
 
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.fast_loop.schemas import GenericAlertNotification
+from prime_jennie_runtime.kis_gateway.market_hours import MarketCalendar
 
 logger = logging.getLogger(__name__)
 
 LIVE_POSITIONS_KEY = "monitoring:live_positions"
 MONITOR_STATUS_KEY = "monitoring:price_monitor"
 HEARTBEAT_KEY = "monitor:heartbeat"
-HEARTBEAT_TTL_SEC = 180  # poll interval(30s) 보다 충분히 큼 → consumer 가 stale 감지
+HEARTBEAT_TTL_SEC = 180  # 하한 — 실제 TTL 은 현재 polling 주기에 맞춰 늘어남
 
-# 알림 임계 (consecutive failures). 30s × 3 = 1.5분 — 시스템 자체 hiccup 은
+# 알림 임계 (consecutive failures). 장중 30s × 3 = 1.5분 — 시스템 자체 hiccup 은
 # 가볍게 흡수하면서 KIS Gateway 장애는 빠르게 알림.
 ALERT_FAILURE_THRESHOLD = 3
+
+# 장 시간 외 polling 주기 (초). 평가금액이 안 변하므로 크게 늘려 KIS 호출을 절약.
+IDLE_INTERVAL_SEC = 300.0
 
 
 class LivePositionsPoller:
@@ -53,12 +61,16 @@ class LivePositionsPoller:
     gateway_url:
         KIS Gateway base URL (예: `http://kis-gateway:8080`).
     interval_sec:
-        polling 주기.
+        장중(정규장/동시호가) polling 주기.
+    idle_interval_sec:
+        장 시간 외 polling 주기. 평가금액이 변하지 않아 크게 잡는다.
     client:
         httpx AsyncClient — 테스트에서 주입. None 이면 내부에서 생성.
     notifier:
         선택. 연속 실패 임계 도달 / 회복 시 GenericAlertNotification 발행.
         None 이면 알림 비활성 (로깅만).
+    calendar:
+        장 시간 판정용 MarketCalendar — 테스트에서 set_clock 주입. None 이면 생성.
     """
 
     def __init__(
@@ -67,13 +79,18 @@ class LivePositionsPoller:
         redis_client: aioredis.Redis,
         gateway_url: str,
         interval_sec: float = 30.0,
+        idle_interval_sec: float = IDLE_INTERVAL_SEC,
         client: httpx.AsyncClient | None = None,
         notifier: Notifier | None = None,
         alert_threshold: int = ALERT_FAILURE_THRESHOLD,
+        calendar: MarketCalendar | None = None,
     ) -> None:
         self._redis = redis_client
         self._gateway_url = gateway_url.rstrip("/")
         self._interval = interval_sec
+        # idle 주기는 최소 interval_sec 이상으로 강제 (잘못된 설정 방어).
+        self._idle_interval = max(interval_sec, idle_interval_sec)
+        self._calendar = calendar or MarketCalendar()
         self._client = client
         self._owned_client = client is None
         self._notifier = notifier
@@ -129,9 +146,23 @@ class LivePositionsPoller:
             except Exception:
                 logger.exception("live positions poll failed")
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
+                await asyncio.wait_for(self._stop.wait(), timeout=self._current_interval())
             except TimeoutError:
                 continue
+
+    def _current_interval(self) -> float:
+        """장중(정규장/동시호가/마감동시호가)이면 interval_sec, 그 외엔 idle_interval_sec.
+
+        잔고 응답의 보유수량·예수금은 체결 시에만 바뀌지만 평가금액·평가손익은
+        현재가에 연동돼 장중 계속 변한다 → 장중만 촘촘히 polling. 캘린더 오류 시엔
+        보수적으로 fast(interval_sec) 로 폴백한다.
+        """
+        try:
+            is_open, _ = self._calendar.is_market_open()
+        except Exception:
+            logger.debug("market hours check failed — fast interval 폴백", exc_info=True)
+            return self._interval
+        return self._interval if is_open else self._idle_interval
 
     # ------------------------------------------------------------------ one tick
 
@@ -224,8 +255,11 @@ class LivePositionsPoller:
             "reason": reason,
             "updated_at": datetime.now(UTC).isoformat(),
         }
+        # TTL 은 현재 polling 주기보다 충분히 길게 — 장 외 느린 주기에도 heartbeat 가
+        # 만료되지 않도록 (consumer 가 정상 동작을 stale 로 오판하지 않게).
+        ttl = max(HEARTBEAT_TTL_SEC, int(self._current_interval()) + 60)
         try:
-            await self._redis.setex(HEARTBEAT_KEY, HEARTBEAT_TTL_SEC, json.dumps(payload))
+            await self._redis.setex(HEARTBEAT_KEY, ttl, json.dumps(payload))
         except Exception:
             logger.debug("heartbeat write failed", exc_info=True)
 

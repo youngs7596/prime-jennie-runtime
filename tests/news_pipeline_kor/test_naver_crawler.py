@@ -10,8 +10,12 @@ import pytest
 import respx
 
 from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
+    BODY_MAX_CHARS,
+    N_NEWS_ARTICLE_BASE,
     NaverNewsCrawler,
+    _parse_article_body,
     _parse_news_page,
+    _redirect_target,
 )
 from prime_jennie_runtime.news_pipeline_kor.crawler import NewsCrawler
 
@@ -205,3 +209,112 @@ async def test_crawler_no_client_creates_and_closes_own():
         crawler = NaverNewsCrawler(max_pages=1, request_delay_s=0.0)
         articles = await crawler.crawl(["005930"])
     assert len(articles) >= 2
+
+
+# ---------- 기사 상세 본문 fetch ----------
+
+# n.news.naver.com 기사 페이지 핵심 마크업 (#dic_area 표준 컨테이너).
+_ARTICLE_HTML = """
+<html><head><meta charset="utf-8"></head><body>
+<div id="ct">
+  <article id="dic_area" class="go_trans _article_content">
+    삼성전자가 1분기 영업이익 7조원을 기록했다.
+    <script>sendTracking();</script>
+    <style>.ad{color:red}</style>
+    HBM 수요 폭발이 실적을 견인했다.
+  </article>
+</div>
+</body></html>
+""".encode()
+
+
+def test_redirect_target_builds_n_news_url():
+    src = (
+        "https://finance.naver.com/item/news_read.naver"
+        "?article_id=0003977888&office_id=023&code=005930&page=1&sm="
+    )
+    assert _redirect_target(src) == f"{N_NEWS_ARTICLE_BASE}/023/0003977888"
+
+
+def test_redirect_target_none_for_external_url():
+    assert _redirect_target("https://example.com/external") is None
+
+
+def test_redirect_target_none_when_query_missing():
+    # 목록 fallback URL (article_id/office_id 없음)
+    assert _redirect_target("https://finance.naver.com/item/news.naver?code=005930") is None
+
+
+def test_parse_article_body_extracts_text_without_scripts():
+    body = _parse_article_body(_ARTICLE_HTML)
+    assert "삼성전자가 1분기 영업이익 7조원을 기록했다." in body
+    assert "HBM 수요 폭발이 실적을 견인했다." in body
+    # script/style 내용은 제거
+    assert "sendTracking" not in body
+    assert "color:red" not in body
+
+
+def test_parse_article_body_empty_when_no_container():
+    assert _parse_article_body(b"<html><body>no article</body></html>") == ""
+
+
+def test_parse_article_body_truncates_to_max():
+    long_text = "가" * (BODY_MAX_CHARS + 500)
+    html = f'<article id="dic_area">{long_text}</article>'.encode()
+    assert len(_parse_article_body(html)) == BODY_MAX_CHARS
+
+
+@pytest.mark.asyncio
+async def test_fetch_body_returns_text_on_success():
+    async with respx.mock(base_url="https://n.news.naver.com") as mock:
+        mock.get("/mnews/article/023/0003977888").mock(
+            return_value=httpx.Response(200, content=_ARTICLE_HTML)
+        )
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client)
+        src = (
+            "https://finance.naver.com/item/news_read.naver"
+            "?article_id=0003977888&office_id=023&code=005930"
+        )
+        body = await crawler.fetch_body(src)
+        await client.aclose()
+
+    assert "삼성전자가 1분기 영업이익 7조원을 기록했다." in body
+
+
+@pytest.mark.asyncio
+async def test_fetch_body_graceful_on_http_error():
+    async with respx.mock(base_url="https://n.news.naver.com") as mock:
+        mock.get("/mnews/article/023/0003977888").mock(
+            return_value=httpx.Response(502, text="bad gateway")
+        )
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client)
+        src = "https://finance.naver.com/item/news_read.naver?article_id=0003977888&office_id=023"
+        body = await crawler.fetch_body(src)
+        await client.aclose()
+
+    assert body == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_body_graceful_on_connect_error():
+    async with respx.mock(base_url="https://n.news.naver.com") as mock:
+        mock.get("/mnews/article/023/0003977888").mock(side_effect=httpx.ConnectError("refused"))
+        client = httpx.AsyncClient()
+        crawler = NaverNewsCrawler(client=client)
+        src = "https://finance.naver.com/item/news_read.naver?article_id=0003977888&office_id=023"
+        body = await crawler.fetch_body(src)
+        await client.aclose()
+
+    assert body == ""
+
+
+@pytest.mark.asyncio
+async def test_fetch_body_skips_non_news_read_url():
+    """외부 URL 은 요청 없이 즉시 빈 본문 — respx route 미등록이라 호출 시 에러날 것."""
+    client = httpx.AsyncClient()
+    crawler = NaverNewsCrawler(client=client)
+    body = await crawler.fetch_body("https://example.com/external")
+    await client.aclose()
+    assert body == ""

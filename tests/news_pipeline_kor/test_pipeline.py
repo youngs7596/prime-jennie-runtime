@@ -23,6 +23,7 @@ from prime_jennie_runtime.news_pipeline_kor.models import NewsEvent
 from prime_jennie_runtime.news_pipeline_kor.stream import (
     EXTRACTOR_GROUP,
     NEWS_STREAM,
+    deserialize_article,
 )
 
 UNIVERSE = ["005930", "000660"]
@@ -63,6 +64,61 @@ async def test_collect_publishes_new_articles_to_stream():
     assert stats.crawled == 3
     assert stats.deduped == 3
     assert r.xlen(NEWS_STREAM) == 3
+
+
+@pytest.mark.asyncio
+async def test_collect_enriches_body_for_new_articles():
+    """dedup 직후 신규 기사에 crawler.fetch_body 로 상세 본문이 채워진다."""
+    pipe, crawler, _dedup, _repo = _pipeline()
+    r = _fake_redis()
+    art = make_dummy_article("005930", title="삼성전자 신고가")
+    crawler.add([art])
+    crawler.bodies = {art.source_url.unicode_string(): "삼성전자가 분기 최대 실적을 발표했다."}
+
+    stats = await pipe.collect_and_publish(UNIVERSE, r)
+    assert stats.deduped == 1
+
+    [(_id, data)] = r.xrange(NEWS_STREAM)
+    published = deserialize_article(data)
+    assert published.body == "삼성전자가 분기 최대 실적을 발표했다."
+
+
+@pytest.mark.asyncio
+async def test_collect_publishes_with_empty_body_when_fetch_yields_nothing():
+    """본문 fetch 가 빈 문자열을 줘도(실패 폴백) 기사는 정상 발행된다."""
+    pipe, crawler, _dedup, _repo = _pipeline()
+    r = _fake_redis()
+    art = make_dummy_article("005930", title="삼성 호조")
+    crawler.add([art])  # bodies 미등록 → fetch_body 가 "" 반환
+
+    stats = await pipe.collect_and_publish(UNIVERSE, r)
+    assert stats.deduped == 1
+    assert r.xlen(NEWS_STREAM) == 1
+
+    [(_id, data)] = r.xrange(NEWS_STREAM)
+    assert deserialize_article(data).body == ""
+
+
+@pytest.mark.asyncio
+async def test_collect_isolates_body_fetch_exception():
+    """본문 fetch 가 예외를 던져도 수집/발행이 멈추지 않는다."""
+
+    class _BodyBoom(StubCrawler):
+        async def fetch_body(self, source_url: str) -> str:
+            raise RuntimeError("body server down")
+
+    crawler = _BodyBoom()
+    crawler.add([make_dummy_article("005930", title="삼성 흑자")])
+    pipe = NewsPipeline(
+        crawler=crawler,
+        deduplicator=InMemoryDeduplicator(),
+        extractor=StubEventExtractor(),
+        event_repo=InMemoryEventRepo(),
+    )
+    r = _fake_redis()
+    stats = await pipe.collect_and_publish(UNIVERSE, r)
+    assert stats.deduped == 1
+    assert r.xlen(NEWS_STREAM) == 1
 
 
 @pytest.mark.asyncio

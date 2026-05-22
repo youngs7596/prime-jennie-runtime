@@ -25,6 +25,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -66,6 +67,16 @@ NAVER_NOISE_KEYWORDS: tuple[str, ...] = (
 )
 
 _DATE_FORMAT = "%Y.%m.%d %H:%M"
+
+# 기사 상세 본문 — 네이버 금융 ``news_read.naver`` 는 ``n.news.naver.com`` 으로 JS
+# 리다이렉트만 하므로, URL query 의 article_id/office_id 로 n.news 기사 URL 을 직접
+# 구성해 1 요청으로 본문을 가져온다.
+_NEWS_READ_PATH = "news_read.naver"
+N_NEWS_ARTICLE_BASE = "https://n.news.naver.com/mnews/article"
+# n.news 기사 본문 컨테이너 (네이버 뉴스 표준 마크업).
+_BODY_SELECTOR = "#dic_area"
+# 본문 저장 상한. extractor 는 400자 발췌만 쓰지만 news_articles.body 보존용 여유.
+BODY_MAX_CHARS = 2000
 
 
 @dataclass
@@ -128,6 +139,36 @@ class NaverNewsCrawler:
 
     def _is_noise(self, title: str) -> bool:
         return any(kw in title for kw in self.noise_keywords)
+
+    async def fetch_body(self, source_url: str) -> str:
+        """기사 상세 본문을 best-effort 로 반환. 실패 시 빈 문자열.
+
+        ``news_read.naver`` 가 아니거나 (외부 URL 등) 필수 query 가 없으면 요청 없이
+        빈 문자열. HTTP 오류·비200·파싱 실패도 모두 빈 본문 폴백 — 본문을 못 가져와도
+        뉴스 파이프라인은 헤드라인-only 로 정상 동작한다.
+        """
+        target = _redirect_target(source_url)
+        if target is None:
+            return ""
+
+        client, owns = self._ensure_client()
+        try:
+            resp = await client.get(
+                target,
+                headers={"User-Agent": NAVER_UA},
+                follow_redirects=True,
+            )
+        except httpx.HTTPError as e:
+            logger.warning("naver body fetch %s failed: %s", target, e)
+            return ""
+        finally:
+            if owns:
+                await client.aclose()
+
+        if resp.status_code != 200:
+            logger.warning("naver body fetch %s status=%d", target, resp.status_code)
+            return ""
+        return _parse_article_body(resp.content)
 
 
 # ---------------------------------------------------------------------
@@ -195,6 +236,42 @@ def _absolute_url(href: str) -> str:
     if href.startswith("/"):
         return f"https://finance.naver.com{href}"
     return f"https://finance.naver.com/{href}"
+
+
+def _redirect_target(source_url: str) -> str | None:
+    """``news_read.naver?article_id=A&office_id=O`` → n.news.naver.com 기사 URL.
+
+    news_read.naver 가 아니거나 (외부 기사 URL·목록 fallback URL 등) article_id/
+    office_id 가 없으면 None — 호출부가 본문 fetch 를 스킵한다.
+    """
+    try:
+        parsed = urlparse(source_url)
+    except ValueError:
+        return None
+    if _NEWS_READ_PATH not in parsed.path:
+        return None
+    qs = parse_qs(parsed.query)
+    article_id = (qs.get("article_id") or [""])[0].strip()
+    office_id = (qs.get("office_id") or [""])[0].strip()
+    if not article_id or not office_id:
+        return None
+    return f"{N_NEWS_ARTICLE_BASE}/{office_id}/{article_id}"
+
+
+def _parse_article_body(body: bytes) -> str:
+    """n.news.naver.com 기사 페이지 HTML → 본문 텍스트.
+
+    표준 본문 컨테이너(``#dic_area``)만 추출하고 script/style 은 제거. 컨테이너가
+    없으면 빈 문자열 (구조 변경·비기사 페이지). ``BODY_MAX_CHARS`` 로 truncate.
+    """
+    soup = BeautifulSoup(body, "html.parser")
+    container = soup.select_one(_BODY_SELECTOR)
+    if container is None:
+        return ""
+    for tag in container.select("script, style"):
+        tag.decompose()
+    text = _collapse_whitespace(container.get_text(" ", strip=True))
+    return text[:BODY_MAX_CHARS]
 
 
 def _parse_published_at(date_str: str) -> datetime:

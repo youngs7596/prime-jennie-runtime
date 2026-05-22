@@ -105,24 +105,45 @@ class NewsPipeline:
             if not articles:
                 continue
 
-            def _dedup_and_publish(
-                items: list[NewsArticle] = articles,
-            ) -> int:
-                new_items = [
-                    a for a in items if self.deduplicator.is_new(a.source_url.unicode_string())
-                ]
-                if not new_items:
-                    return 0
+            def _filter_new(items: list[NewsArticle] = articles) -> list[NewsArticle]:
+                return [a for a in items if self.deduplicator.is_new(a.source_url.unicode_string())]
+
+            new_items = await asyncio.to_thread(_filter_new)
+            if not new_items:
+                continue
+
+            # dedup 직후 신규 기사에 대해서만 상세 본문 fetch — 네이버가 재노출하는
+            # 중복 기사에 대한 재요청을 피한다. 본문 fetch 실패는 빈 body 폴백.
+            await self._enrich_bodies(new_items)
+
+            def _publish(items: list[NewsArticle] = new_items) -> int:
                 pipe = redis_client.pipeline()
-                for article in new_items:
+                for article in items:
                     pipe.xadd(NEWS_STREAM, serialize_article(article), maxlen=NEWS_STREAM_MAXLEN)
                 pipe.execute()
-                return len(new_items)
+                return len(items)
 
-            published = await asyncio.to_thread(_dedup_and_publish)
+            published = await asyncio.to_thread(_publish)
             stats.deduped += published
 
         return stats
+
+    async def _enrich_bodies(self, articles: list[NewsArticle]) -> None:
+        """신규 기사의 상세 본문을 crawler 로 채운다 (in-place). best-effort.
+
+        본문 fetch 실패가 파이프라인을 멈추면 안 되므로 기사별로 예외를 격리하고,
+        실패 시 ``body`` 는 빈 문자열로 남긴다 (헤드라인-only 폴백).
+        """
+        for article in articles:
+            if article.body:
+                continue
+            try:
+                body = await self.crawler.fetch_body(article.source_url.unicode_string())
+            except Exception as e:  # noqa: BLE001 — 본문 실패가 수집을 막지 않도록 격리
+                logger.warning("body fetch failed article=%s: %s", article.article_id, e)
+                continue
+            if body:
+                article.body = body
 
     # ------------------------------------------------------------------
     # Stage 2 — Extractor

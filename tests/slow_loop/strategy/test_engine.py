@@ -88,6 +88,7 @@ def _inputs(
     gate: str = "open",
     size_mult: float = 1.0,
     generated_at: datetime | None = None,
+    scout_run_id: str = "scout_20260416_0900",
 ) -> StrategyEngineInputs:
     return StrategyEngineInputs(
         macro_state=MacroStateSnapshot(
@@ -95,12 +96,27 @@ def _inputs(
             size_multiplier=size_mult,
             gate_run_id="macro_20260416_0800",
         ),
-        scout_run_id="scout_20260416_0900",
+        scout_run_id=scout_run_id,
         scout_code_hash="sha256:test",
         scout_hypothesis="테스트 가설",
         generated_at=generated_at or datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST),
         news_score=0.3,
     )
+
+
+class _StubSectorResolver:
+    """ticker → sector 문자열 stub. mapping 우선, 없으면 default."""
+
+    def __init__(
+        self, mapping: dict[str, str] | None = None, default: str | None = None
+    ) -> None:
+        self._mapping = mapping or {}
+        self._default = default
+        self.calls: list[str] = []
+
+    async def sector_of(self, ticker: str) -> str | None:
+        self.calls.append(ticker)
+        return self._mapping.get(ticker, self._default)
 
 
 # =====================================================================
@@ -696,3 +712,172 @@ async def test_thesis_spec_empty_conditions_persists():
     assert sheet.provenance.thesis_spec is not None
     assert sheet.provenance.thesis_spec.natural_language == "가설만 있음"
     assert sheet.provenance.thesis_spec.conditions == []
+
+
+# =====================================================================
+# selection 안전 게이트 — 최소 conviction floor (2026-05-22 step3)
+# v2 teardown: v3 가 잃은 v2 hard_floor 등가 게이트 복원.
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_conviction_below_floor_rejected():
+    """conviction≈0 후보는 conviction_below_min 으로 거부 — 실측 결함(0.0 시트 발행) 차단."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(conviction=0.0), _inputs())
+    assert sheet is None
+    assert reason == "conviction_below_min"
+
+
+@pytest.mark.asyncio
+async def test_conviction_at_default_floor_publishes():
+    """conviction == DEFAULT_MIN_CONVICTION 은 통과 (< 비교라 경계값 발행)."""
+    from prime_jennie_runtime.slow_loop.strategy.engine import DEFAULT_MIN_CONVICTION
+
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    sheet, reason = await engine.build_sheet_with_reason(
+        _candidate(conviction=DEFAULT_MIN_CONVICTION), _inputs()
+    )
+    assert sheet is not None
+    assert reason is None
+
+
+@pytest.mark.asyncio
+async def test_conviction_floor_custom_value():
+    """min_conviction 생성자 인자로 floor override 가능."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), min_conviction=0.3)
+    sheet_lo, reason_lo = await engine.build_sheet_with_reason(
+        _candidate(conviction=0.25), _inputs()
+    )
+    assert sheet_lo is None
+    assert reason_lo == "conviction_below_min"
+    sheet_hi, reason_hi = await engine.build_sheet_with_reason(
+        _candidate(conviction=0.35), _inputs()
+    )
+    assert sheet_hi is not None
+    assert reason_hi is None
+
+
+@pytest.mark.asyncio
+async def test_conviction_floor_checked_before_macro():
+    """conviction floor 는 tag 검증 직후 — macro 검사 전. 정상 conviction 은 영향 없음."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())
+    # 정상 conviction(0.7) 후보는 게이트 무영향
+    sheet, reason = await engine.build_sheet_with_reason(_candidate(conviction=0.7), _inputs())
+    assert sheet is not None
+    assert reason is None
+
+
+# =====================================================================
+# selection 안전 게이트 — 섹터 집중 cap (2026-05-22 step3)
+# v2 teardown: v3 가 잃은 v2 selection.py greedy 섹터 cap 복원.
+# 실측 결함: 단일 scout_run 후보 9개 중 금융 5개(56%) 쏠림.
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_sector_cap_blocks_fourth_in_same_sector():
+    """같은 섹터 4번째 후보는 sector_cap_exceeded (기본 cap=3)."""
+    resolver = _StubSectorResolver(default="금융")  # 모든 ticker 금융
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), sector_resolver=resolver)
+    inp = _inputs()
+    tickers = ["005930", "000660", "035720", "005380"]
+    results = [
+        await engine.build_sheet_with_reason(_candidate(ticker=tk), inp) for tk in tickers
+    ]
+    assert results[0][0] is not None
+    assert results[1][0] is not None
+    assert results[2][0] is not None  # 3개까지 발행
+    assert results[3][0] is None  # 4번째 거부
+    assert results[3][1] == "sector_cap_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_sector_cap_different_sectors_all_pass():
+    """서로 다른 섹터면 cap 무관 — 4종목 모두 발행."""
+    resolver = _StubSectorResolver(
+        mapping={
+            "005930": "반도체/IT",
+            "000660": "금융",
+            "035720": "바이오/헬스케어",
+            "005380": "자동차",
+        }
+    )
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), sector_resolver=resolver)
+    inp = _inputs()
+    for tk in ["005930", "000660", "035720", "005380"]:
+        sheet, reason = await engine.build_sheet_with_reason(_candidate(ticker=tk), inp)
+        assert sheet is not None, f"{tk} unexpectedly rejected: {reason}"
+
+
+@pytest.mark.asyncio
+async def test_sector_cap_resets_across_scout_runs():
+    """섹터 cap 은 scout_run 단위 — run_id 바뀌면 카운트 리셋."""
+    resolver = _StubSectorResolver(default="금융")
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), sector_resolver=resolver)
+    run_a = _inputs(scout_run_id="scout_run_A")
+    # run A: 3개 발행 후 4번째 거부
+    for tk in ["005930", "000660", "035720"]:
+        sheet, _ = await engine.build_sheet_with_reason(_candidate(ticker=tk), run_a)
+        assert sheet is not None
+    blocked, reason = await engine.build_sheet_with_reason(_candidate(ticker="005380"), run_a)
+    assert blocked is None and reason == "sector_cap_exceeded"
+    # run B: 카운트 리셋 → 다시 발행 가능
+    run_b = _inputs(scout_run_id="scout_run_B")
+    sheet_b, reason_b = await engine.build_sheet_with_reason(_candidate(ticker="005380"), run_b)
+    assert sheet_b is not None
+    assert reason_b is None
+
+
+@pytest.mark.asyncio
+async def test_sector_cap_disabled_with_null_resolver():
+    """기본 NullSectorResolver → sector=None → cap 미적용 (legacy 동작 보존)."""
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle())  # resolver 미주입
+    inp = _inputs()
+    for tk in ["005930", "000660", "035720", "005380", "051910"]:
+        sheet, reason = await engine.build_sheet_with_reason(_candidate(ticker=tk), inp)
+        assert sheet is not None, f"{tk} rejected: {reason}"
+
+
+@pytest.mark.asyncio
+async def test_sector_cap_custom_value():
+    """sector_cap 생성자 인자로 cap override — cap=1 이면 2번째부터 거부."""
+    resolver = _StubSectorResolver(default="금융")
+    engine = StrategyEngine(
+        load_policy(), NoOpRiskThrottle(), sector_resolver=resolver, sector_cap=1
+    )
+    inp = _inputs()
+    first, _ = await engine.build_sheet_with_reason(_candidate(ticker="005930"), inp)
+    assert first is not None
+    second, reason = await engine.build_sheet_with_reason(_candidate(ticker="000660"), inp)
+    assert second is None
+    assert reason == "sector_cap_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_sector_cap_rejected_candidate_does_not_consume_slot():
+    """거부된 후보(deprecated_tag)는 섹터 cap 슬롯을 소비하지 않는다."""
+    resolver = _StubSectorResolver(default="금융")
+    engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), sector_resolver=resolver)
+    inp = _inputs()
+    # deprecated tag 후보 2건 — 거부되지만 cap 카운트 미증가
+    for tk in ["005930", "000660"]:
+        sheet, reason = await engine.build_sheet_with_reason(
+            _candidate(ticker=tk, tag="RSI_REBOUND"), inp
+        )
+        assert sheet is None and reason == "deprecated_tag"
+    # 정상 후보 3건 모두 발행 가능해야 (앞의 거부가 슬롯 미소비)
+    for tk in ["035720", "005380", "051910"]:
+        sheet, reason = await engine.build_sheet_with_reason(_candidate(ticker=tk), inp)
+        assert sheet is not None, f"{tk} rejected: {reason}"
+
+
+def test_sector_resolver_is_protocol():
+    """SectorResolver 는 Protocol — duck typing."""
+    from prime_jennie_runtime.slow_loop.strategy.engine import (
+        NullSectorResolver,
+        SectorResolver,
+    )
+
+    assert isinstance(_StubSectorResolver(), SectorResolver)
+    assert isinstance(NullSectorResolver(), SectorResolver)

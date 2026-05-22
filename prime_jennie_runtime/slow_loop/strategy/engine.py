@@ -24,6 +24,7 @@ price_above 자동 부착 (2026-05-11):
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -54,6 +55,25 @@ logger = logging.getLogger(__name__)
 # +10bps (1.001) — scout price_hint 위 호가 살짝 돌파 확인 임계. v2 buy-scanner
 # 의 "직전 봉 high + 0.1%" 휴리스틱과 동등. 운영 데이터 누적 후 조정 검토.
 PRICE_ABOVE_BREAKOUT_MULT: float = 1.001
+
+
+# =====================================================================
+# Selection 안전 게이트 (2026-05-22 step3 — v2 결정론 게이트 복원)
+# =====================================================================
+# v2 teardown 평가 §2: v3 는 v2 의 (a) 최소 conviction floor (b) 섹터 집중 cap
+# 두 결정론 게이트를 모두 잃었다. 라이브 데이터로 결함 실측 — conviction 0.000
+# 후보가 실매매 시트로 발행, 단일 scout_run 후보 9개 중 금융 5개(56%) 쏠림.
+# 아래 두 기본값은 env 로 override 가능하며 재설계가 아니라 v2 등가 복원이다.
+
+# 최소 conviction floor — Scout 생성 코드가 conviction≈0 으로 낸 degenerate 후보
+# 차단. v2 hard_floor(buyer/executor.py) 등가. 게이트 목적은 degenerate 차단이지
+# selectivity 튜닝이 아니므로 기본값을 의도적으로 낮게 둔다 (하위 ~1% tail 만 제거).
+DEFAULT_MIN_CONVICTION: float = float(os.environ.get("SELECTION_MIN_CONVICTION", "0.05"))
+
+# 섹터 집중 cap — 한 scout_run 내 동일 SectorGroup 최대 시트 수.
+# v2 selection.py DEFAULT_CAP=3 / RiskConfig.max_sector_stocks=3 등가. v2 는 매 run
+# 마다 fresh watchlist 에 cap 을 걸었으므로 run 단위 cap 이 v2 의 실제 동작과 일치.
+DEFAULT_SECTOR_CAP: int = int(os.environ.get("SELECTION_SECTOR_CAP", "3"))
 
 
 # exit rules 권장 순서 (POSITION_SHEET_SPEC §5.3)
@@ -333,6 +353,68 @@ class PgActiveSheetChecker:
 
 
 # =====================================================================
+# 섹터 조회 Protocol — 섹터 집중 cap 용 (2026-05-22 step3)
+# =====================================================================
+
+
+@runtime_checkable
+class SectorResolver(Protocol):
+    """ticker → SectorGroup 문자열 조회.
+
+    `NullSectorResolver` 가 default — 모든 ticker 에 None 을 반환해 섹터 cap 을
+    비활성화한다 (legacy 동작 보존). `PgSectorResolver` (stock_masters 기반) 가
+    실 구현. ActiveSheetChecker 와 동일한 fail-open 패턴.
+    """
+
+    async def sector_of(self, ticker: str) -> str | None: ...
+
+
+class NullSectorResolver:
+    """항상 None 반환 — 섹터 cap 비활성. fallback / 테스트용."""
+
+    async def sector_of(self, ticker: str) -> str | None:
+        return None
+
+
+class PgSectorResolver:
+    """stock_masters.sector_group 기반 — 운영 구현체.
+
+    sector_group 은 주간 job(update_naver_sectors)으로만 갱신되는 준정적 데이터라
+    프로세스 기동 후 1회 전수 로드해 캐시한다. DB 장애 시 빈 캐시 → 모든 ticker
+    None → 섹터 cap 자연 비활성 (fail-open, 매매 path 보호 — PgActiveSheetChecker
+    와 동일 정책).
+    """
+
+    def __init__(self, engine) -> None:
+        self._engine = engine
+        self._cache: dict[str, str] | None = None
+
+    async def _ensure_loaded(self) -> None:
+        if self._cache is not None:
+            return
+        from sqlalchemy import text
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(
+                    text(
+                        "SELECT stock_code, sector_group FROM stock_masters "
+                        "WHERE sector_group IS NOT NULL"
+                    )
+                )
+                self._cache = {row[0]: row[1] for row in result.fetchall()}
+            logger.info("PgSectorResolver loaded %d ticker→sector entries", len(self._cache))
+        except Exception:
+            logger.exception("PgSectorResolver load failed — sector cap disabled (fail-open)")
+            self._cache = {}
+
+    async def sector_of(self, ticker: str) -> str | None:
+        await self._ensure_loaded()
+        assert self._cache is not None
+        return self._cache.get(ticker)
+
+
+# =====================================================================
 # Strategy Engine
 # =====================================================================
 
@@ -358,11 +440,24 @@ class StrategyEngine:
         risk_throttle: RiskThrottleSnapshot,
         active_checker: ActiveSheetChecker | None = None,
         generated_by: str = "prime-jennie-runtime@v3.0.1",
+        sector_resolver: SectorResolver | None = None,
+        sector_cap: int | None = None,
+        min_conviction: float | None = None,
     ):
         self._policy = policy
         self._risk = risk_throttle
         self._active_checker = active_checker or NullActiveSheetChecker()
         self._generated_by = generated_by
+        # --- selection 안전 게이트 (2026-05-22 step3) ---
+        self._sector_resolver = sector_resolver or NullSectorResolver()
+        self._sector_cap = sector_cap if sector_cap is not None else DEFAULT_SECTOR_CAP
+        self._min_conviction = (
+            min_conviction if min_conviction is not None else DEFAULT_MIN_CONVICTION
+        )
+        # 섹터 cap 은 scout_run 단위 — pipeline 이 한 run 의 candidates 를 conviction
+        # 내림차순으로 연속 처리한다는 전제 하에 run_id 가 바뀌면 카운트 리셋.
+        self._sector_run_id: str | None = None
+        self._sector_counts: dict[str, int] = {}
 
     async def build_sheet(
         self,
@@ -385,10 +480,16 @@ class StrategyEngine:
         """build_sheet 의 상세 버전 — (sheet, rejection_reason) 반환.
 
         rejection_reason 은 screening_candidates.rejection_reason 컬럼에 직접
-        저장되는 코드: deprecated_tag | unknown_tag | no_policy | macro_closed |
-        duplicate_today | size_below_min. 시트가 성공적으로 생성되면 None.
+        저장되는 코드: deprecated_tag | unknown_tag | no_policy | conviction_below_min |
+        macro_closed | duplicate_today | recent_stoploss_cooldown | today_exit_cooldown |
+        sector_cap_exceeded | size_below_min. 시트가 성공적으로 생성되면 None.
         """
         tag = candidate.strategy_tag
+
+        # 0. scout_run 이 바뀌면 섹터 cap 카운트 리셋 (run 단위 cap — v2 watchlist 등가).
+        if inputs.scout_run_id != self._sector_run_id:
+            self._sector_run_id = inputs.scout_run_id
+            self._sector_counts = {}
 
         # 1. strategy_tag 유효성
         if tag in DEPRECATED_STRATEGY_TAGS:
@@ -400,6 +501,18 @@ class StrategyEngine:
         if not self._policy.has(tag):
             logger.info("sheet_rejected: no policy ticker=%s tag=%s", candidate.ticker, tag)
             return None, "no_policy"
+
+        # 1b. 최소 conviction floor — Scout 코드가 conviction≈0 으로 낸 degenerate
+        # 후보 차단 (v2 hard_floor 등가, 2026-05-22 step3). selectivity 튜닝이 아니라
+        # degenerate 차단 — 기본값은 의도적으로 낮다 (DEFAULT_MIN_CONVICTION).
+        if candidate.conviction < self._min_conviction:
+            logger.info(
+                "sheet_rejected: conviction below floor ticker=%s conv=%.3f floor=%.3f",
+                candidate.ticker,
+                candidate.conviction,
+                self._min_conviction,
+            )
+            return None, "conviction_below_min"
 
         # 2. Macro gate == "closed"면 발행 안 함
         if inputs.macro_state.gate == "closed":
@@ -439,6 +552,22 @@ class StrategyEngine:
                 candidate.ticker,
             )
             return None, "today_exit_cooldown"
+
+        # 3d. 섹터 집중 cap — 같은 scout_run 내 동일 SectorGroup 시트 수 제한
+        # (v2 selection.py greedy 섹터 cap 복원, 2026-05-22 step3). candidates 가
+        # conviction 내림차순으로 도착하므로 — v2 greedy 와 동일하게 — 섹터별 상위
+        # conviction 후보가 cap 슬롯을 차지한다. sector=None (resolver 미해결) 이면
+        # cap 미적용 (fail-open). 카운트는 발행 성공 시에만 증가.
+        sector = await self._sector_resolver.sector_of(candidate.ticker)
+        if sector is not None and self._sector_counts.get(sector, 0) >= self._sector_cap:
+            logger.info(
+                "sheet_rejected: sector_cap ticker=%s sector=%s count=%d cap=%d",
+                candidate.ticker,
+                sector,
+                self._sector_counts.get(sector, 0),
+                self._sector_cap,
+            )
+            return None, "sector_cap_exceeded"
 
         # 4. size 계산
         entry = self._policy.get(tag)
@@ -539,6 +668,10 @@ class StrategyEngine:
             exit=exit_section,
             provenance=provenance,
         )
+        # 섹터 cap 카운트 증가 — 발행 성공 후에만 (거부된 후보는 슬롯 미소비).
+        if sector is not None:
+            self._sector_counts[sector] = self._sector_counts.get(sector, 0) + 1
+
         logger.info(
             "sheet_published: ticker=%s tag=%s final_pct=%.4f sheet_id=%s",
             candidate.ticker,
@@ -581,6 +714,9 @@ def _entry_valid_until(generated_at: datetime) -> datetime:
 __all__ = [
     "ActiveSheetChecker",
     "NullActiveSheetChecker",
+    "NullSectorResolver",
+    "PgSectorResolver",
+    "SectorResolver",
     "StrategyEngine",
     "StrategyEngineInputs",
 ]

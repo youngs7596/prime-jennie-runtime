@@ -284,14 +284,24 @@ def _build_slow_loop_components(
     risk_throttle = RedisRiskThrottleSnapshot(redis_client=redis_client)
     # audit B2 dead code 복구 — db_engine 있으면 실제 enforcement.
     # 미주입 시 NullActiveSheetChecker 로 fallback (legacy 동작).
+    # 섹터 cap resolver (2026-05-22 step3) 도 동일 패턴 — db_engine 있으면 stock_masters
+    # 기반 PgSectorResolver, 없으면 None → NullSectorResolver fallback (cap 비활성).
     if db_engine is not None:
-        from prime_jennie_runtime.slow_loop.strategy.engine import PgActiveSheetChecker
+        from prime_jennie_runtime.slow_loop.strategy.engine import (
+            PgActiveSheetChecker,
+            PgSectorResolver,
+        )
 
         active_checker = PgActiveSheetChecker(db_engine)
+        sector_resolver = PgSectorResolver(db_engine)
     else:
         active_checker = None  # StrategyEngine 이 NullActiveSheetChecker fallback
+        sector_resolver = None  # StrategyEngine 이 NullSectorResolver fallback
     engine = StrategyEngine(
-        policy=policy, risk_throttle=risk_throttle, active_checker=active_checker
+        policy=policy,
+        risk_throttle=risk_throttle,
+        active_checker=active_checker,
+        sector_resolver=sector_resolver,
     )
     publisher = PositionSheetPublisher(client=redis_client, db_engine=db_engine)
     state_store = MacroStateStore(client=redis_client)

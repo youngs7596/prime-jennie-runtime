@@ -1,12 +1,35 @@
 # SCOUT_CODE_GENERATION
 
+> ## ⚠️ 폐기 (Deprecated) — 2026-05-22
+>
+> 본 문서는 v3 의 **1차 Scout 아키텍처** (LLM 에게 Python 스크리닝 코드를 생성시키는 방식) 명세입니다.
+> 2026-05-22 에 이 접근은 폐기됐고, v2 의 결정론 quant 스코어러로 복원됐습니다.
+>
+> 폐기 사유:
+> - 2026-05-15 같은 거래일 -5% 손절 종목 재매수 사고 → 신뢰 회복 안 됨
+> - v3 본격 가동(2026-05-06) 이후 실현 순손실 약 -1,377만원 (132건, 승률 27%)
+> - 비결정성을 코드 생성 단계에서마저 제거하기로 결정
+>
+> 현재 Scout 코드 (결정론 7팩터 quant): [`prime_jennie_runtime/slow_loop/scout/`](../prime_jennie_runtime/slow_loop/scout/)
+> - `deterministic_scout.py` — 오케스트레이터 (`run_deterministic_scout`)
+> - `quant.py` — 7팩터 스코어러 (v2 포팅)
+> - `enrichment.py` — universe 적재
+> - `selection.py` — MA 평활 + 히스테리시스
+>
+> 폐기 결정 기록: [`.ai/decisions/2026-05-22-selection-architecture-decision.md`](../.ai/decisions/2026-05-22-selection-architecture-decision.md)
+> 라이브에 남아있던 LLM 코드 생성 잔재 파일들 (`role.py`, `prompts.py`, `code_loop.py`, `code_hasher.py`, `screening_stub.py`) 은 dead-path 로 미사용 — 향후 정리 예정.
+>
+> 본 문서는 **역사 자료**로만 보존됩니다. 현재 아키텍처는 README.md §"Scout 선정 아키텍처" 참조.
+>
+> ---
+
 > **문서 목적**: Scout 에이전트가 스크리닝 Python 코드를 생성하는 전 과정의 명세. 프롬프트, 입출력, 샌드박스 계약, 실패 처리, 품질 평가까지.
 >
 > **선행 문서**: `prime_jennie_v3_phase0_design.md` §4.2, `POSITION_SHEET_SPEC.md` §6
 >
 > **작성자**: 민지 × 영석
 > **작성일**: 2026-04-16
-> **버전**: 0.2
+> **버전**: 0.2 (2026-05-22 deprecated)
 
 ---
 

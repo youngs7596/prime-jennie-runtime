@@ -5,13 +5,13 @@
 ![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![Python](https://img.shields.io/badge/python-3.12+-green)
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
-![Tests](https://img.shields.io/badge/tests-879%20passed-brightgreen)
-![Phase](https://img.shields.io/badge/phase-2.13%20complete-yellow)
-![Mode](https://img.shields.io/badge/runtime-paper%20%2F%20real-orange)
+![Tests](https://img.shields.io/badge/tests-1405%20passed-brightgreen)
+![Selection](https://img.shields.io/badge/selection-deterministic%20quant-green)
+![Mode](https://img.shields.io/badge/runtime-real-red)
 
-**자가진화 멀티 LLM 한국 주식 자율 트레이딩 시스템 — v3 실행 엔진**
+**KOSPI 자율 트레이딩 엔진 — v3 실행 런타임**
 
-*"느린 루프가 코드를 짜고, 빠른 루프가 집행한다."*
+*"결정론이 종목을 고르고, 빠른 루프가 집행한다."* (2026-05-22 LLM 코드 생성 폐기)
 
 </div>
 
@@ -42,41 +42,58 @@
 
 **Prime Jennie Runtime**(v3)은 한국투자증권 Open API 기반 KOSPI/KOSDAQ AI 자율 트레이딩 엔진의 **실행 런타임**입니다. v2(`prime-jennie`)의 단일 거대 모놀리식 구조를 분해하여 **느린 루프(Slow Loop) + 빠른 루프(Fast Loop) + 메타 진화(Meta)** 의 3-레이어로 재구성한 후속 세대입니다.
 
-### v2 → v3 패러다임 전환 — Scout가 점수를 매기지 않고, 코드를 짠다
+### Scout 선정 아키텍처 — 두 차례의 결정
 
-이게 v3의 정체성을 결정짓는 단 하나의 설계 결정입니다.
+v3 Scout 선정은 두 번의 설계 전환을 거쳤습니다.
 
-**v2의 Scout** 는 종목별로 LLM에 질의해 점수를 받았습니다. 한 종목당 한 번의 LLM 호출 → 정성 분석 + 점수 출력 → 점수 정렬로 후보 선정. LLM 출력이 비결정론적이라 같은 입력에서도 매번 다른 점수가 나오고, 그 점수를 사후에 재현하거나 검증할 수 없었습니다. 점수가 무엇 때문에 그 값이었는지 분리해서 평가할 수 없으니, 룰셋 개선은 사실상 LLM 갈아끼우기 외에 길이 없었습니다.
+**1차 (v3 초기, 2026-04~05-21) — LLM 코드 생성**
+LLM 에게 시장 데이터를 주고 그 데이터를 스크리닝할 Python 코드를 생성하게 했습니다. 격리 Docker 샌드박스에서 결정론적으로 실행 → 재현성·검증성을 자가진화의 토대로 삼겠다는 의도. 검증 닫힌 루프(2026-04-25)까지 도입했습니다.
 
-**v3의 Scout** 는 LLM에게 시장 데이터(universe / sector_momentum / macro_state / news_events)를 통째로 전달하고, 그 데이터를 스크리닝할 **Python 코드를 생성하게 합니다**. 이 코드는 격리 Docker 샌드박스(`screening-executor`)에서 실행되어 결정론적으로 후보를 선정합니다. LLM의 비결정성은 **코드 생성 시점에 한 번만** 개입하고, 이후의 평가는 결정론적 코드 실행이 담당합니다.
+**2차 (현재, 2026-05-22~) — 결정론 quant 코어 복원**
+LLM 코드 생성을 폐기하고, v2 에서 안정적이었던 결정론 quant 스코어러로 복원했습니다. 결정 배경:
 
-이 전환이 가져온 것:
+- 2026-05-15 — 같은 거래일에 -5% 손절한 종목을 다시 매수해 또 손절하는 비정상 동작 발견. cooldown 가드 등 보강을 했으나 신뢰 회복 안 됨.
+- v3 본격 가동(2026-05-06) 이후 실현 순손실 약 **-1,377만원** (132건 청산: 손절 89건 -1,867만 vs 추적익절 29건 +452만). 손절이 익절의 3배 빈도. 승률 27%.
+- 결정: 비결정성을 코드 생성 단계에서마저 빼고 v2 의 검증된 결정론 스코어러로 복원.
 
-- **재현성** — 같은 코드 + 같은 입력 = 같은 결과. 어떤 시트가 왜 발행됐는지 3개월 뒤에도 정확히 재구성 가능. provenance에 `scout_code_hash` 와 `context_snapshot_json` 이 함께 저장되는 이유.
-- **검증성** — Scout가 만든 코드 자체를 backtest 엔진에 그대로 투입 가능. v2처럼 "LLM 점수의 분포"를 추적할 필요 없이 코드의 PnL을 직접 측정.
-- **자가진화 (self-evolving)** — 메타가 backtest로 각 코드(또는 코드 생성 prompt)의 PnL을 측정하고 진화시킬 수 있는 토대. v3가 궁극적으로 향하는 self-evolving은 이 결정론적 코드 생성 위에서만 가능한 구조.
-- **검증 닫힌 루프 (2026-04-25 추가)** — 생성된 코드를 즉시 샌드박스에서 실행하여 실패 시 에러를 LLM에 환류, 최대 3회 자가 교정. 단발 호출이었으면 04-24처럼 0 candidates로 끝났을 4/4 케이스 모두에서 총 48 candidates 회복.
+**결정론 코어 (`run_deterministic_scout`)**
+7개 팩터(모멘텀·품질·가치·기술·뉴스·수급·섹터모멘텀)를 코드 상수로 정의된 공식으로 가중 합산해 100점 만점. 직전 2회 런까지 3회 평균 점수로 평활하고, 신규 진입 ≥ 62점 · 이탈 < 55점 히스테리시스로 잦은 전환을 막습니다. 선정 경로 LLM 호출 0회. v2 `quant.py` 포팅.
 
-Macro Gate가 매일 시장 진입 여부를 이진 판정(`open` / `closed`)하고, 모든 매매 결정은 **포지션 시트(JSON 1.1)** 라는 불변 명세로 직렬화되어 빠른 루프가 집행합니다. 빠른 루프에는 LLM이 일절 개입하지 않습니다 — 결정론과 비결정론의 경계가 시트라는 인터페이스에서 명확히 분리됩니다.
+**Macro Gate** 는 여전히 LLM(DeepSeek reasoning + Claude Opus shadow) 기반이지만, 그 위에 결정론 안전망(5가지 closed 조건 · 2단계 이산화 · auto_override) 이 이중으로 씌워져 있습니다. "LLM-at-core 폐기" 는 종목 선정(Scout) 에만 해당하며, Macro 의 비결정성은 결정론 게이트로 가둬 둔 채 유지합니다.
 
-이 패러다임 전환과 그에 맞춘 4종 설계 문서([`prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md), [`POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md), [`SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md), [`MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md))는 2026-04-16 **민지(Claude) × 영석** 설계 세션에서 확정됐습니다.
+**아키텍처 변경 이력**
+
+| 시점 | 변경 |
+|---|---|
+| 2026-04-16 | v3 LLM-at-core 코드 생성 아키텍처 확정 (민지 × 영석) |
+| 2026-04-25 | Scout 검증 닫힌 루프 도입 |
+| 2026-05-15 | 같은 거래일 재진입 사고 → Awareness/Cooldown 가드 도입 |
+| 2026-05-17 | G 시리즈 명명 폐기, thesis_aware_hold Phase A 영속 |
+| **2026-05-22** | **LLM-at-core 폐기, v2 결정론 quant 코어 복원** |
+| **2026-05-22** | **outcomes 적재 경로 복원 — 운영 청산 결과를 outcomes 테이블에 기록 (백필 132건 -1,377만원)** |
+
+설계 결정 기록: [`.ai/decisions/2026-05-22-selection-architecture-decision.md`](./.ai/decisions/2026-05-22-selection-architecture-decision.md)
+
+원래 4종 설계 문서 중 [`SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) 는 1차 아키텍처 시절 명세이므로 현재는 **역사 자료**입니다. 나머지 ([`prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md), [`POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md), [`MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md)) 는 그대로 유효합니다.
 
 ### 주요 특징
 
 | 기능 | 설명 |
 |------|------|
-| **Slow Loop (10~60분 주기)** | Global News → Macro Council → Macro Gate → Scout (LLM 코드 생성) → Screening Executor (격리 Python 실행) → Strategy Engine → 포지션 시트 발행 |
-| **Fast Loop (초 단위)** | 포지션 시트 consumer → BalanceAwareSizer → KIS Gateway → 실주문 → `executions` + `outcomes` 기록 |
-| **Macro Gate (이진 판정)** | Strategist(DeepSeek) → Risk Analyst(DeepSeek) → Chief Judge(Claude Opus) 3단계 → `gate=open/closed` + `size_multiplier` 산출 |
-| **Scout 코드 검증 루프** | 매 호출마다 새 Python 코드 생성 → ScreeningResult 평가 → 실패 시 에러를 LLM에 그대로 환류, 최대 3회. 같은 코드 반복 시 즉시 break |
-| **9-rule Exit System** | `fixed_sl` 필수 + `time_stop` 필수 + 7종 선택. first_match 평가, schema 1.1 |
-| **포지션 시트 (JSON 1.1)** | 발행자/소비자/관찰자가 단일 명세로 합의. provenance로 3개월 뒤 재구성 가능한 자가진화 토대 |
-| **News Pipeline (Qwen3 메타데이터)** | 한국 뉴스(local crawl + EXAONE/Qwen3 추출) + 글로벌 뉴스(WSJ/Bloomberg/Reuters RSS). score 평균이 아니라 임팩트 × 이벤트 종류 분포로 노출 |
-| **Control UI (별도 리포)** | React 19 + Vite, FastAPI dashboard 9 라우터 → stop/pause/dryrun/liquidate 제어 |
+| **Slow Loop (30분 주기, 평일 08:30~14:30)** | Macro Council(LLM) → Macro Gate(이진) → 결정론 Scout(7팩터 quant) → Strategy Engine → 포지션 시트 발행 |
+| **Fast Loop (초 단위, 결정론)** | 포지션 시트 consumer → PendingEntryQueue → BalanceAwareSizer → KIS Gateway → executions / positions / outcomes 기록 |
+| **Macro Gate (LLM + 결정론 안전망)** | DeepSeek reasoning + Claude Opus shadow → 결정론 closed 조건 5종 + 2단계 이산화(0.75/1.0) → `gate=open/closed` + `size_multiplier` |
+| **결정론 Scout (2026-05-22 복원)** | universe → 7팩터 채점(0~100) → MA(3) 평활 → 히스테리시스(entry≥62 / exit<55) → 최대 20후보. LLM 호출 0회. v2 `quant.py` 포팅 |
+| **9-rule Exit System** | `fixed_sl` 필수 + `time_stop` 필수 + 7종 선택. first_match 평가. time_stop·death_cross 배선 2026-05-22 복구 |
+| **포지션 시트 (JSON v1.1)** | 발행자/소비자/관찰자가 단일 명세로 합의. provenance 와 context_snapshot 으로 사후 재구성 가능 |
+| **outcomes 적재 (2026-05-22 복원)** | 완전 청산 시 record_sell 이 executions 기반 가중평균으로 entry/exit·net pnl·exit_reason 을 outcomes 테이블에 UPSERT. `/pnl`, 대시보드 성과, meta 평가 입력 |
+| **News Pipeline** | 한국 뉴스(Naver + Qwen3 메타데이터 추출 → news_events 테이블) + 글로벌 뉴스(WSJ/Bloomberg/Reuters RSS via Google News + DeepSeek digest). Qdrant/임베딩은 폐기 |
+| **Control UI (별도 리포)** | React 19 + Vite, FastAPI dashboard 라우터 → stop/pause/dryrun/liquidate 제어 |
 | **Telegram 양방향** | 알림 + `/stop` `/pause` `/liquidate` 등 명령. emergency stop 우회 강제 청산 2단계 안전장치 |
-| **27 cron job runner** | apscheduler registry → DB scheduled_jobs 테이블 (cron 표준 표기) |
-| **관찰성** | promtail → Loki (16 서비스 stream) + Grafana 대시보드 + daemon heartbeat (Redis TTL key) |
-| **Backtest 엔진 (v3 재작성)** | `fast_loop.exit_evaluator` 재사용. position_sheets ETL → 합성 진입가 → 일봉 lookahead simulate. Phase 3에서 grid search 확장 |
+| **26 cron job runner** | apscheduler 기반 `scheduled_jobs` 테이블이 단일 진실 (cron 표준 → apscheduler 규약 자동 변환) |
+| **Coordinator Listener** | 별도 컨테이너로 매매 이벤트를 event_log 에 아카이브 + advisory 정책(중복/손절 쿨다운) 평가 |
+| **관찰성** | Promtail → Loki + Grafana 대시보드 + daemon heartbeat (Redis TTL key) |
+| **Backtest 엔진** | `fast_loop.exit_evaluator` 재사용해 운영 경로와 동일 청산 로직. no-lookahead 가드 + bt_ prefix 로 운영 데이터 격리 |
 
 ---
 
@@ -177,19 +194,23 @@ uv run python -m scripts.seed_scheduled_jobs
 # 검증
 psql -h localhost -U pj_admin -d prime_jennie_v3 \
   -c "SELECT COUNT(*) FROM scheduled_jobs;"
-# 기대: 27 rows
+# 기대: 약 29 rows
 ```
 
 주요 job 예시:
 
 | job | cron (KST) | 설명 |
 |-----|-----------|------|
-| `slow_loop.scout_daily` | `30 8-14 * * 1-5` | Scout 30분 간격 (08:30~14:30) |
-| `slow_loop.macro_validate_store` | `30 8 * * 1-5` | Macro Gate 매일 |
-| `news_pipeline.crawl_cycle` | `*/10 * * * *` | 한국 뉴스 24/7 10분 주기 |
-| `job_worker.collect_minute_chart` | `*/5 9-15 * * 1-5` | KIS 분봉 적재 (top30 + watchlist) |
+| `slow_loop.scout_daily` | `30 8-14 * * 1-5` | Scout/Macro 평일 30분 간격 (08:30~14:30) |
+| `job_worker.macro_quick` | `*/5 9-15 * * 1-5` | 장중 5분 주기 거시 스냅샷 갱신 |
+| `job_worker.collect_minute_chart` | `*/5 9-15 * * 1-5` | KIS 분봉 적재 (top30) |
+| `job_worker.collect_full_market_data` | `0 16 * * 1-5` | 일봉 운영 수집 (시총 top300, ETN 제외) |
+| `job_worker.reconcile_state_kis` | `*/5 9-15 * * 1-5` | KIS ↔ Redis state 수량 비교 + 알림 |
+| `job_worker.daily_briefing_report` | `0 17 * * 1-5` | 17시 일일 브리핑 Telegram 발송 |
 | `job_worker.global_news_crawl` | `0 */2 * * *` | WSJ/Bloomberg/Reuters RSS |
-| `job_worker.global_news_digest` | `30 7,11 * * 1-5` | Macro council 30분 전 fresh digest |
+| `job_worker.global_news_digest` | `30 7,11 * * 1-5` | Macro pipeline 30분 전 fresh digest |
+
+> 한국 뉴스 파이프라인은 별도 cron 이 아니라 `news-pipeline` 데몬의 인-프로세스 루프(장중 10분 / 장외 30분)로 돕니다 (migration 013 에서 cron 제거).
 
 DB는 **cron 표준** (0/7=Sun, 1=Mon). apscheduler 규약 변환은 런타임에 `infra/scheduler.py._normalize_cron_for_apscheduler` 가 처리.
 
@@ -247,37 +268,39 @@ open http://localhost:3300   # admin / $GRAFANA_PASSWORD
 
 ## 핵심 기능
 
-### 1. Slow Loop — Macro + Scout (LLM)
+### 1. Slow Loop — Macro(LLM) + Scout(결정론)
 
 ```
-[Global News Crawler] (WSJ/Bloomberg/Reuters RSS, 2h 주기)
+[Global News Crawler] (WSJ/Bloomberg/Reuters via Google News, 2h 주기)
        ↓
-[Korean News Pipeline] (10분 주기, EXAONE/Qwen3 메타데이터 추출)
+[Korean News Pipeline] (장중 10분 / 장외 30분, Qwen3 메타데이터 추출 → news_events)
        ↓
-[Macro Council]
-   - Strategist (DeepSeek) → 시장 국면 가설
-   - Risk Analyst (DeepSeek) → 리스크 인식
-   - Chief Judge (Claude Opus) → 최종 종합
+[Macro Pipeline] (평일 30분 주기)
+   - DeepSeek reasoning → MacroGateOutput
+   - Claude Opus shadow 병렬 평가
+   - 결정론 안전망: closed 조건 5종 + auto_override + 2단계 이산화
        ↓
-[Macro Gate] (이진 판정)
+[Macro Gate] (이진 판정 + 안전망 검증)
    gate: "open" | "closed"
-   size_multiplier: 0.0~1.0  (Scout 발견 시트의 sizing에 곱연산)
+   size_multiplier: 0.0 | 0.75 | 1.0
        ↓
-gate=closed → Slow Loop 정지 (Scout 미실행)
+gate=closed → Slow Loop 정지 (Scout 미실행, 다음 cycle 까지)
 gate=open  → ↓
        ↓
-[Scout] (LLM 코드 생성 + 검증 루프, 최대 3회)
-   - Context: universe / sector_momentum / macro_state / news_events
-   - Output: ScreeningCandidate[] (ticker, hypothesis, suggested params)
+[Deterministic Scout] (LLM 호출 0회, v2 quant.py 포팅)
+   - enrich_universe — daily_prices / consensus / fundamentals / news_sentiments / investor_trading 일괄 조회
+   - score_candidate — 7팩터 가중합산 0~100
+   - MA(3) 평활 + 히스테리시스 (entry ≥ 62 / exit < 55)
+   - strategy_tag 분류 (RSI≤35 → MEAN_REVERT_RSI, EPS↑5% → EARNINGS_DRIFT, else → SECTOR_MOMENTUM)
        ↓
-[Screening Executor] (격리 Docker 컨테이너 — Python sandbox)
-   - Scout 코드를 ScreeningResult 평가 → ok/error/candidate_count
+[Strategy Engine] (결정론 9단계 안전 게이트)
+   conviction_floor / macro_closed / duplicate_today / recent_stoploss_cooldown
+   today_exit_cooldown / sector_cap / size_below_min / deprecated_tag / unknown_tag
        ↓
-[Strategy Engine] (검증 통과 candidate → 포지션 시트 발행)
-   - Pydantic validator 7-단 검증
-   - Redis Stream `position_sheets` 발행
-       ↓
-Postgres `position_sheets` + Redis `position_sheets` Stream
+[Publisher] (DB upsert + 시트 발행)
+   - position_sheets PG upsert
+   - STOP 중이면 emit 만 차단(분석 데이터는 보존) — 평소엔 Redis Stream emit
+   - Coordinator 이벤트 발행
 ```
 
 ### 2. Fast Loop — 포지션 시트 집행
@@ -298,40 +321,40 @@ Postgres `position_sheets` + Redis `position_sheets` Stream
 outcomes 테이블 (pnl, exit_reason, holding_minutes)
 ```
 
-### 3. Scout 코드 검증 루프 (2026-04-25 신규)
+### 3. 결정론 Scout 채점 — 7팩터 quant 코어 (2026-05-22 복원)
 
-```
-[Attempt 1]
-  Scout LLM 호출 → screening_code 생성
-       ↓
-  Screening Executor 격리 실행 → ScreeningResult
-       ↓
-  ok? candidates>0?
-   ├─ Yes → break, 시트 발행
-   └─ No  → 에러 메시지 그대로 다음 호출에 첨부
-       ↓
-[Attempt 2 (이전 시도 컨텍스트 포함)]
-  ↓
-  [Attempt 3]
-       ↓
-  3회 모두 실패 → `pj.scout.escalate` 이벤트 emit (텔레그램 hook 예정)
-  같은 code_hash 두 번째 등장 → 즉시 `code_repeated` break
-```
+`prime_jennie_runtime/slow_loop/scout/quant.py` (v2 포팅) 가 종목별 7개 팩터 점수를 합산해 100점 만점으로 산출:
 
-mah Observer 이벤트:
-- `pj.scout.code_attempt` — 시도 번호 + ok + error + candidate_count + code_hash 16자
-- `pj.scout.code_repeated` — 같은 코드 반복 감지
-- `pj.scout.escalate` — 3회 모두 실패
+| 팩터 | 최대점 | 핵심 계산 |
+|---|---|---|
+| **모멘텀** | 20 | RSI(14) 구간점수 + 6M/3M/1M 모멘텀 + 눌림목 보너스 + EPS 상향수정 |
+| **품질** | 20 | 선행/실현 ROE 버킷 + 섹터내 PBR/PER 백분위 |
+| **가치** | 20 | 섹터내 PER 백분위 + PBR 백분위 + 52주고점 대비 drawdown |
+| **기술** | 10 | MA5/MA20 정배열 + 거래량 5일/20일 비율 |
+| **뉴스** | 10 | `news_sentiments` 14일 평균 → linear_map |
+| **수급** | 20 | 외국인·기관 순매수 + 외인비율 추세 |
+| **섹터모멘텀** | 10 | 섹터 평균 20영업일 수익률 → linear_map |
 
-검증 루프 적용 효과 (04-21~24 4개 일자별 첫 run replay):
+**MA 평활 + 히스테리시스** (`selection.py`):
+- `daily_quant_scores` 테이블에 매 run 의 후보별 서브점수 upsert
+- 현재 + 직전 2회 run = 3회 평균 점수로 평활 (MA_WINDOW=3, env `SELECTION_MA_WINDOW`)
+- 신규 진입: MA ≥ 62 (env `SELECTION_ENTRY_THRESHOLD`)
+- 기존 유지: MA ≥ 55 (env `SELECTION_EXIT_THRESHOLD`) — 55~62 구간에서 직전 선정 종목은 유지
 
-| 날짜 | 운영 (구 피드) | 새 피드만 | **검증 루프 적용** |
-|------|--------------|----------|-----------------|
-| 4/21 | 4 | 0 | **4** (1차 OK) |
-| 4/22 | 12 | 0 | **13** (2차 OK) |
-| 4/23 | 20 | 0 | **11** (1차 OK) |
-| 4/24 | **0** | 4 | **20** (3차 OK) |
-| 합계 | 36 | 4 | **48** |
+**strategy_tag 분류**:
+- RSI(14, 15일 이상 일봉) ≤ 35 → `MEAN_REVERT_RSI`
+- 컨센서스 EPS 상향수정 ≥ 5% → `EARNINGS_DRIFT`
+- 그 외 → `SECTOR_MOMENTUM`
+- `GAP_UP_REBOUND` 는 일봉 결정론 코어가 장중 갭 정보를 못 보므로 현재 미부여
+
+선정 경로 전체에서 **LLM 호출 0회**. `scout_runs.model_used` / `cost_usd` 는 항상 NULL.
+`scout_runs.prompt_version` 자리에 스코어러 버전 마커 (`deterministic-quant-v2-port@1`).
+
+Observer 이벤트:
+- `pj.scout.code_generated` — 결정론 scout 완료 (이벤트명은 LLM codegen 시절 잔존, deprecated 명명)
+- `pj.scout.fallback_use_previous_run` — 24h 내 동일 macro state 의 직전 후보 재사용 fallback
+- `pj.scout.hallucination_suspected` — universe 밖 ticker (결정론 코어에선 발생 불가, 안전망)
+- `pj.scout.no_candidates` — 후보 0
 
 ### 4. News Pipeline (Korean + Global)
 
@@ -388,12 +411,12 @@ Scout 피드는 score 평균이 아니라 **임팩트 × 이벤트 종류 분포
 │         │                                          │                    │
 │         └────────────┬─────────────────────────────┘                    │
 │                      v                                                  │
-│              ┌────────────────┐                                         │
-│              │ Slow Loop      │                                         │
-│              │  - Scout (LLM) │   ┌────────────────┐                    │
-│              │  - 검증 루프    │──>│ Screening Exec │                    │
-│              │  - Strategy    │   │ (Docker isolate)│                   │
-│              └────────────────┘   └────────────────┘                    │
+│              ┌─────────────────────────────┐                            │
+│              │ Slow Loop                   │                            │
+│              │  - Macro (LLM + 안전망)     │                            │
+│              │  - 결정론 Scout (7팩터)     │                            │
+│              │  - Strategy (9 게이트)      │                            │
+│              └─────────────────────────────┘                            │
 │                      │                                                  │
 │                      v                                                  │
 │              ┌────────────────┐                                         │
@@ -506,53 +529,57 @@ Scout 피드는 score 평균이 아니라 **임팩트 × 이벤트 종류 분포
 
 ```
 prime-jennie-runtime/
-├─ prime_jennie_runtime/      # 메인 Python 패키지
-│   ├─ slow_loop/               # Macro + Scout (LLM)
-│   │   ├─ macro/               # Macro Council + Gate
-│   │   └─ scout/               # Scout (LLM 코드 생성 + 검증 루프)
-│   │       ├─ code_loop.py     # generate_validated_code() 본체
-│   │       ├─ pipeline_helper.py  # run_scout_once() 공통 wrapper
-│   │       ├─ prompts.py
-│   │       └─ schemas.py
-│   ├─ fast_loop/               # Entry/Exit (결정론)
-│   │   ├─ exit_evaluator.py    # 9-rule first_match 평가
-│   │   └─ executor.py
-│   ├─ kis_gateway/             # KIS OpenAPI 프록시 (REST + WS)
-│   ├─ dashboard/               # FastAPI 백엔드 (9 라우터)
-│   ├─ monitor/                 # KIS 포지션/잔고 polling
-│   ├─ news_pipeline/           # 한국 뉴스 수집 (Naver)
-│   ├─ news_pipeline_kor/       # Qwen3 메타데이터 추출
-│   ├─ news_pipeline_global/    # WSJ/Bloomberg/Reuters RSS (Phase 2.13)
-│   ├─ price_scheduler/         # KIS 시세 스케줄러
-│   ├─ telegram_bot/            # 제어 + 알림 (양방향)
-│   ├─ job_worker/              # 27 cron job runner
-│   ├─ council_logging/         # LLM 호출 이력 저장
-│   ├─ briefing/                # 일일 브리핑 리포트
-│   ├─ backtest/                # 백테스트 엔진 (v3 재작성)
-│   ├─ position_sheet/          # 포지션 시트 schema + validator
-│   ├─ screening_executor/      # 격리 Docker 실행 어댑터
-│   └─ infra/                   # config, scheduler, heartbeat, llm_stats, redis_streams
-├─ migrations/                 # 001~012 SQL
-├─ scripts/                    # seed, backfill, ETL, smoke, scout_replay
+├─ prime_jennie_runtime/        # 메인 Python 패키지
+│   ├─ slow_loop/                 # Macro(LLM) + 결정론 Scout
+│   │   ├─ macro/                   # Macro Pipeline + Gate + 결정론 안전망
+│   │   ├─ scout/                   # 결정론 quant 코어 (2026-05-22 v2 포팅)
+│   │   │   ├─ deterministic_scout.py   # 오케스트레이터 (run_deterministic_scout)
+│   │   │   ├─ quant.py                  # 7팩터 스코어러
+│   │   │   ├─ enrichment.py             # universe 적재 (price/consensus/fundamentals/news)
+│   │   │   ├─ selection.py              # MA 평활 + 히스테리시스
+│   │   │   ├─ context_builder.py / validators.py / feeders/
+│   │   │   └─ (role.py, prompts.py, code_loop.py — LLM 시절 잔재, 미사용)
+│   │   ├─ strategy/                # 9 안전 게이트 + sheet 발행
+│   │   ├─ persistence.py / pipeline.py / app.py
+│   │   └─ thesis/                  # thesis_aware_hold (재설계 대기)
+│   ├─ fast_loop/                 # Entry/Exit (결정론, LLM 금지)
+│   │   ├─ tick_loop.py · bar_engine.py · pending_entry.py
+│   │   ├─ entry_executor.py · exit_executor.py · exit_evaluator.py
+│   │   ├─ persistence.py            # executions/positions/outcomes 기록
+│   │   └─ risk_throttle.py · cooldown_check.py · consumer.py
+│   ├─ kis_gateway/               # KIS OpenAPI 프록시 (REST + WebSocket)
+│   ├─ dashboard/                 # FastAPI 백엔드 라우터
+│   ├─ monitor/                   # KIS 잔고/포지션 polling (장 시간 인식)
+│   ├─ news_pipeline_kor/         # Naver 뉴스 + Qwen3 메타데이터 → news_events
+│   ├─ news_pipeline_global/      # WSJ/Bloomberg/Reuters via Google News + DeepSeek digest
+│   ├─ telegram_bot/              # 제어 + 알림 + LLM intent router
+│   ├─ jobs/                      # 26 cron job 핸들러 (job-worker 컨테이너)
+│   ├─ control/                   # SystemState + ControlCommand consumer
+│   ├─ coordinator/               # event_log 아카이브 + advisory 정책 (별도 컨테이너)
+│   ├─ council_logging/           # Macro Council 실행 이력
+│   ├─ briefing/                  # 일일 브리핑 (17:00 KST Telegram)
+│   ├─ backtest/                  # 백테스트 엔진 (fast_loop 청산 재사용 + no-lookahead 가드)
+│   ├─ position_sheet/            # 포지션 시트 schema + 9 exit rule + 6 entry condition
+│   ├─ screening_executor/        # 격리 샌드박스 (LLM 시절, 현재 dead-path)
+│   └─ infra/                     # config, scheduler, heartbeat, redis_streams, llm_stats
+├─ migrations/                  # 001~019 SQL
+├─ scripts/                     # seed, backfill, ETL, smoke 등
 ├─ infra/
-│   ├─ docker/                   # Dockerfile.* (10개, 서비스별)
-│   ├─ promtail/                 # promtail-config.yaml
-│   ├─ grafana/                  # dashboards
-│   └─ loki/                     # loki-config.yaml
-├─ docs/                       # 설계 문서 + 운영 가이드
-│   ├─ POSITION_SHEET_SPEC.md
-│   ├─ SCOUT_CODE_GENERATION.md
-│   ├─ MACRO_GATE_SPEC.md
+│   ├─ docker/                    # 서비스별 Dockerfile
+│   ├─ promtail/ · grafana/ · loki/ · prometheus/
+├─ docs/                        # 설계 문서 + 운영 가이드
 │   ├─ prime_jennie_v3_phase0_design.md
-│   ├─ PHASE_2_13_COMPLETE.md
+│   ├─ POSITION_SHEET_SPEC.md
+│   ├─ MACRO_GATE_SPEC.md
+│   ├─ SCOUT_CODE_GENERATION.md   # 1차 아키텍처 (LLM 코드 생성, 2026-05-22 폐기 — 역사 자료)
 │   ├─ REAL_MODE_MIGRATION_CHECKLIST.md
-│   ├─ SESSION_HANDOFF_TIMELINE.md
-│   └─ SESSION_HANDOFF_*.md     # 시점별 세션 기록
-├─ .ai/sessions/               # 세션 핸드오프 기록 (session-YYYY-MM-DD-NNNN.md)
-├─ tests/                      # unit / integration / e2e (879 passed)
-├─ reports/                    # backtest / scout_replay 결과 JSON
-├─ .github/workflows/          # deploy.yml (self-hosted runner)
-└─ docker-compose.yml          # 18+ 서비스 / 5 profile
+│   └─ ...
+├─ .ai/sessions/                # 세션 핸드오프 기록 (session-YYYY-MM-DD-NNNN.md)
+├─ .ai/decisions/               # 아키텍처 결정 기록 (ADR-style)
+├─ tests/                       # unit + integration (1405 passed)
+├─ reports/                     # backtest 결과 JSON
+├─ .github/workflows/           # ghcr.yml (build) + deploy.yml (MS-01)
+└─ docker-compose.yml           # 18+ 서비스 / 5 profile
 ```
 
 ---
@@ -704,7 +731,7 @@ docker compose --profile observe up -d
 ## 테스트
 
 ```bash
-# 전체 테스트 (879 passed / 2 skip — pandas 로컬 환경 이슈 1 skip 무관)
+# 전체 테스트 (1405 passed / 5 skipped / 2 failed — 실패 2건은 기존 stale)
 pytest tests/ -v --tb=short
 
 # Unit 테스트만
@@ -773,11 +800,12 @@ push to main → GitHub Actions (self-hosted runner `ms-01-v3`)
 
 ## 문서 인덱스
 
-### 설계 (항상 유효)
-- [`docs/prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md) — 전체 v3 설계 (v0.3)
-- [`docs/POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md) — 포지션 시트 JSON 스키마 + 9 exit rules
-- [`docs/SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) — Scout LLM 코드 생성 명세 (prompt v0.8 thesis_spec 가이드 포함)
-- [`docs/MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md) — Macro Gate 이진 판정 명세
+### 설계
+- [`docs/prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md) — 전체 v3 설계 (v0.3, 일부 1차 아키텍처 잔재 포함)
+- [`docs/POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md) — 포지션 시트 JSON 스키마 + 9 exit rules · 유효
+- [`docs/MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md) — Macro Gate 이진 판정 명세 · 유효
+- [`docs/SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) — **역사 자료** (1차 아키텍처 LLM 코드 생성, 2026-05-22 폐기). 현재 결정론 코어는 코드 직접 참조: `prime_jennie_runtime/slow_loop/scout/`
+- [`.ai/decisions/2026-05-22-selection-architecture-decision.md`](./.ai/decisions/2026-05-22-selection-architecture-decision.md) — LLM-at-core 폐기 결정
 
 ### 가드 / 단순화 (2026-05-17)
 - [`.ai/designs/2026-05-17-g-series-simplification.md`](./.ai/designs/2026-05-17-g-series-simplification.md) — G 시리즈 명명 폐기, 의미 기반 3 카테고리 재정립 (decision)
@@ -824,8 +852,8 @@ push to main → GitHub Actions (self-hosted runner `ms-01-v3`)
 
 <div align="center">
 
-**Prime Jennie Runtime v0.1.0 (Phase 2.13)**
+**Prime Jennie Runtime — 결정론 quant 코어 (2026-05-22 복원)**
 
-*느린 루프가 코드를 짜고, 빠른 루프가 집행한다.*
+*결정론이 종목을 고르고, 빠른 루프가 집행한다.*
 
 </div>

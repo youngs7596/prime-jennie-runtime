@@ -1,6 +1,21 @@
 # `screening_executor/` — 격리 샌드박스 코드 실행
 
-Track D 소유. Scout가 생성한 Python 코드를 안전하게 실행.
+> ## ⚠️ 본선 파이프라인 dead-path (2026-05-22~)
+>
+> 2026-05-22 결정론 Scout 코어 복원으로 LLM 코드 생성 경로가 폐기됐고, 이 모듈은 본선 (`run_slow_loop`) 에서 **호출되지 않습니다**.
+>
+> - `SlowLoopComponents.screening` 필드는 여전히 주입되지만 파이프라인 본선이 `comp.screening.invoke()` 를 부르지 않음
+> - `ScreeningInvoker` Protocol 정의 자체는 유지 (`screening_stub.py`)
+> - `executor.py` / `adapter.py` / AST 화이트리스트는 `scripts/scout_replay.py` 와 일부 테스트에서만 참조
+> - compose 서비스 `screening-executor` 는 build-only 프로파일, 런타임 미사용
+>
+> 완전 제거는 향후 정리 후보. 그 동안은 LLM codegen 시절 회고 재현(historical replay) 용도로만 잔존.
+>
+> 현재 Scout 코드: [`../slow_loop/scout/`](../slow_loop/scout/) (결정론 7팩터 quant, LLM 호출 0회).
+>
+> ---
+
+Track D 소유. Scout 가 생성한 Python 코드를 안전하게 실행 (1차 아키텍처 시절).
 
 ## 격리 수준
 

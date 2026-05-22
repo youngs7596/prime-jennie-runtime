@@ -89,10 +89,14 @@ async def _collect_trades(conn, today: date) -> list[dict]:
     """오늘 체결된 매매 내역.
 
     매도 건은 같은 sheet 의 buy 평균가 대비 pnl 을 executions 만으로 계산.
-    `outcomes` 테이블은 production 적재 path 가 없어 항상 비어있음 — 5-15 이후
-    `scout_outcomes_v1` view 와 동일 로직 (executions 기반) 으로 통일.
+    `scout_outcomes_v1` view 와 동일 로직(executions 기반)으로 통일.
     exit_reason 은 `executions.metadata_json->>'exit_reason'` 에서 직접 추출.
     stock_name 은 stock_masters LEFT JOIN — 없으면 ticker fallback.
+
+    참고: 2026-05-22 부터 `outcomes` 테이블도 운영 청산 path 에서 채워짐
+    (`fast_loop/persistence.py::record_sell` fully_closed=True 분기). 본 함수는
+    "오늘 체결" 즉시성을 우선해 executions 직접 조회를 유지 — outcomes 는
+    완전 청산 후에 기록되므로 한 sheet 가 부분 매도 단계에 있으면 누락된다.
     """
     day_start = datetime.combine(today, datetime.min.time())
     day_end = day_start + timedelta(days=1)

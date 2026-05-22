@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,6 +13,7 @@ from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.infra.redis_streams import STREAM_NOTIFICATIONS
+from prime_jennie_runtime.position_sheet.schema import KST, PositionSheet
 
 from .fakes import FakeKisClient
 
@@ -329,3 +330,119 @@ async def test_exit_dryrun_skips_kis(fake_redis):
     assert kis.sell_calls == []  # KIS 호출 0
     # dryrun 도 notification 은 발행 (사용자 가시성)
     assert await fake_redis.xlen(STREAM_NOTIFICATIONS) == 1
+
+
+class _CapturingRecorder:
+    """record_sell 호출 인자를 캡처하는 페이크 recorder."""
+
+    def __init__(self) -> None:
+        self.sell_calls: list[dict] = []
+
+    async def record_buy(self, sheet, *, filled_qty, filled_price, executed_at):
+        return None
+
+    async def record_sell(
+        self,
+        sheet,
+        *,
+        filled_qty,
+        filled_price,
+        executed_at,
+        reason,
+        fully_closed=False,
+    ):
+        self.sell_calls.append(
+            {
+                "sheet_id": sheet.sheet_id,
+                "filled_qty": filled_qty,
+                "reason": reason,
+                "fully_closed": fully_closed,
+            }
+        )
+
+
+def _exit_sheet() -> PositionSheet:
+    """_state() 의 sheet_id 와 일치하는 PositionSheet — sheet_fetcher 반환용."""
+    now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)
+    return PositionSheet(
+        sheet_id="ps_20260416_005930_a3f2",
+        generated_at=now,
+        valid_until=now + timedelta(hours=6),
+        ticker="005930",
+        strategy_tag="SECTOR_MOMENTUM",
+        size={
+            "base_pct": 0.05,
+            "macro_multiplier": 1.0,
+            "risk_multiplier": 1.0,
+            "final_pct": 0.05,
+            "max_notional_krw": 5_000_000,
+        },
+        entry={"trigger": "market", "valid_until": now + timedelta(hours=1)},
+        exit={
+            "rules": [
+                {"type": "fixed_sl", "pct": 0.05},
+                {"type": "time_stop", "mode": "eod"},
+            ]
+        },
+        provenance={
+            "scout_run_id": "scout_X",
+            "scout_code_hash": "sha256:x",
+            "scout_hypothesis": "test",
+            "macro_state_snapshot": {
+                "gate": "open",
+                "size_multiplier": 1.0,
+                "gate_run_id": "macro_X",
+            },
+            "strategy_policy_version": "v3.0.1",
+            "generated_by": "test",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_exit_full_close_records_sell_fully_closed_true(fake_redis):
+    """전량 청산 시 record_sell 이 fully_closed=True 로 호출 — outcomes 기록 트리거."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=66500.0)
+    recorder = _CapturingRecorder()
+    sheet = _exit_sheet()
+
+    async def fetcher(sheet_id: str):
+        return [sheet] if sheet_id == sheet.sheet_id else []
+
+    executor = ExitExecutor(kis, tracker, notifier, recorder=recorder, sheet_fetcher=fetcher)
+    state = _state()
+    await tracker.register(state)
+
+    decision = ExitDecision(should_close=True, reason="fixed_sl", portion=1.0)
+    outcome = await executor.execute(state, decision)
+
+    assert outcome.fully_closed is True
+    assert len(recorder.sell_calls) == 1
+    assert recorder.sell_calls[0]["fully_closed"] is True
+    assert recorder.sell_calls[0]["reason"] == "fixed_sl"
+
+
+@pytest.mark.asyncio
+async def test_exit_scale_out_records_sell_fully_closed_false(fake_redis):
+    """부분 청산(scale_out) 시 record_sell 이 fully_closed=False — outcomes 미기록."""
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisClient(fill_price=72500.0)
+    recorder = _CapturingRecorder()
+    sheet = _exit_sheet()
+
+    async def fetcher(sheet_id: str):
+        return [sheet] if sheet_id == sheet.sheet_id else []
+
+    executor = ExitExecutor(kis, tracker, notifier, recorder=recorder, sheet_fetcher=fetcher)
+    state = _state()  # quantity 10
+    await tracker.register(state)
+
+    decision = ExitDecision(should_close=True, reason="scale_out", portion=0.25)
+    outcome = await executor.execute(state, decision)
+
+    assert outcome.fully_closed is False
+    assert len(recorder.sell_calls) == 1
+    assert recorder.sell_calls[0]["fully_closed"] is False

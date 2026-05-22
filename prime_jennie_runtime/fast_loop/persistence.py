@@ -22,14 +22,97 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 import asyncpg
 
 from prime_jennie_runtime.position_sheet.schema import PositionSheet
 
 logger = logging.getLogger(__name__)
+
+# 거래비용 (실증, 뱅키스 기준) — outcomes 의 net pnl 계산용.
+# 매수: 위탁수수료. 매도: 위탁수수료 + 거래세·농특세 0.20%.
+_BUY_FEE_RATE = 0.000140527
+_SELL_FEE_RATE = 0.000140527 + 0.0020
+
+
+@dataclass(frozen=True)
+class OutcomeRow:
+    """sheet 한 건의 매매 결과 — ``outcomes`` 테이블 1행에 대응."""
+
+    entry_price: float
+    exit_price: float
+    holding_period_s: int
+    pnl_krw: float
+    pnl_pct: float
+    exit_reason: str | None
+    closed_at: datetime
+    gross_pnl_krw: float
+    fees_krw: float
+    matched_qty: int
+
+
+def _extract_exit_reason(meta: Any) -> str | None:
+    """executions.metadata_json 에서 exit_reason 키를 꺼낸다.
+
+    asyncpg 는 jsonb 를 기본적으로 str 로 돌려주므로 str/dict 둘 다 수용.
+    """
+    if meta is None:
+        return None
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(meta, Mapping):
+        value = meta.get("exit_reason")
+        return str(value) if value is not None else None
+    return None
+
+
+def compute_outcome(exec_rows: Iterable[Mapping[str, Any]]) -> OutcomeRow | None:
+    """한 sheet 의 executions 행들로부터 ``outcomes`` 행을 계산.
+
+    ``exec_rows`` 는 side / price / qty / executed_at / metadata_json 키를 갖는
+    매핑들 (asyncpg.Record 호환). 매수 또는 매도가 하나도 없으면 ``None``.
+
+    entry/exit_price 는 수량 가중평균, pnl 은 거래비용 차감 후 net.
+    """
+    buys = [r for r in exec_rows if r["side"] == "buy"]
+    sells = [r for r in exec_rows if r["side"] == "sell"]
+    if not buys or not sells:
+        return None
+    buy_qty = sum(int(r["qty"]) for r in buys)
+    sell_qty = sum(int(r["qty"]) for r in sells)
+    if buy_qty <= 0 or sell_qty <= 0:
+        return None
+    entry_price = sum(float(r["price"]) * int(r["qty"]) for r in buys) / buy_qty
+    exit_price = sum(float(r["price"]) * int(r["qty"]) for r in sells) / sell_qty
+    matched_qty = min(buy_qty, sell_qty)
+    gross = (exit_price - entry_price) * matched_qty
+    fees = entry_price * matched_qty * _BUY_FEE_RATE + exit_price * matched_qty * _SELL_FEE_RATE
+    pnl_krw = gross - fees
+    entry_notional = entry_price * matched_qty
+    pnl_pct = (pnl_krw / entry_notional * 100.0) if entry_notional > 0 else 0.0
+    opened_at = min(r["executed_at"] for r in buys)
+    last_sell = max(sells, key=lambda r: r["executed_at"])
+    closed_at = last_sell["executed_at"]
+    holding_period_s = max(0, int((closed_at - opened_at).total_seconds()))
+    return OutcomeRow(
+        entry_price=entry_price,
+        exit_price=exit_price,
+        holding_period_s=holding_period_s,
+        pnl_krw=pnl_krw,
+        pnl_pct=pnl_pct,
+        exit_reason=_extract_exit_reason(last_sell.get("metadata_json")),
+        closed_at=closed_at,
+        gross_pnl_krw=gross,
+        fees_krw=fees,
+        matched_qty=matched_qty,
+    )
 
 
 class TradeRecorder(Protocol):
@@ -50,6 +133,7 @@ class TradeRecorder(Protocol):
         filled_price: float,
         executed_at: datetime,
         reason: str,
+        fully_closed: bool = False,
     ) -> None: ...
 
 
@@ -74,6 +158,7 @@ class NoopTradeRecorder:
         filled_price: float,
         executed_at: datetime,
         reason: str,
+        fully_closed: bool = False,
     ) -> None:
         return None
 
@@ -135,6 +220,7 @@ class PostgresTradeRecorder:
         filled_price: float,
         executed_at: datetime,
         reason: str,
+        fully_closed: bool = False,
     ) -> None:
         if filled_qty <= 0:
             return
@@ -163,6 +249,75 @@ class PostgresTradeRecorder:
             logger.exception(
                 "record_sell persist failed sheet=%s — execution will be missing in PG",
                 sheet.sheet_id,
+            )
+            return
+
+        # 완전 청산이면 매매 결과를 outcomes 에 기록 (별도 트랜잭션 — best-effort).
+        # executions 가 이미 커밋된 뒤라 같은 sheet 의 전 체결을 다시 읽어 집계한다.
+        # 실패해도 executions/positions 기록은 보존된다.
+        if fully_closed:
+            await self._record_outcome(sheet.sheet_id)
+
+    async def _record_outcome(self, sheet_id: str) -> None:
+        """완전 청산 sheet 의 결과를 ``outcomes`` 에 UPSERT.
+
+        같은 sheet 의 executions 전 행을 읽어 ``compute_outcome`` 으로 집계.
+        매수/매도 행이 부족하면 (entry 데이터 결락 등) skip.
+        """
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                rows = await conn.fetch(
+                    """
+                    SELECT side, price, qty, executed_at, metadata_json
+                    FROM executions
+                    WHERE sheet_id = $1
+                    ORDER BY executed_at
+                    """,
+                    sheet_id,
+                )
+                outcome = compute_outcome(rows)
+                if outcome is None:
+                    logger.warning(
+                        "record_outcome: sheet=%s — buy/sell 체결 부족, outcomes skip",
+                        sheet_id,
+                    )
+                    return
+                meta = {
+                    "source": "fast_loop_recorder",
+                    "gross_pnl_krw": round(outcome.gross_pnl_krw, 2),
+                    "fees_krw": round(outcome.fees_krw, 2),
+                    "matched_qty": outcome.matched_qty,
+                }
+                await conn.execute(
+                    """
+                    INSERT INTO outcomes
+                        (sheet_id, entry_price, exit_price, holding_period_s,
+                         pnl_krw, pnl_pct, exit_reason, closed_at, metadata_json)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    ON CONFLICT (sheet_id) DO UPDATE SET
+                        entry_price = EXCLUDED.entry_price,
+                        exit_price = EXCLUDED.exit_price,
+                        holding_period_s = EXCLUDED.holding_period_s,
+                        pnl_krw = EXCLUDED.pnl_krw,
+                        pnl_pct = EXCLUDED.pnl_pct,
+                        exit_reason = EXCLUDED.exit_reason,
+                        closed_at = EXCLUDED.closed_at,
+                        metadata_json = EXCLUDED.metadata_json
+                    """,
+                    sheet_id,
+                    outcome.entry_price,
+                    outcome.exit_price,
+                    outcome.holding_period_s,
+                    outcome.pnl_krw,
+                    outcome.pnl_pct,
+                    outcome.exit_reason,
+                    outcome.closed_at,
+                    json.dumps(meta, ensure_ascii=False, default=str),
+                )
+        except Exception:
+            logger.exception(
+                "record_outcome persist failed sheet=%s — outcome will be missing in PG",
+                sheet_id,
             )
 
     # ── 내부 ──
@@ -291,4 +446,6 @@ __all__ = [
     "PostgresTradeRecorder",
     "StockNameResolver",
     "PostgresStockNameResolver",
+    "OutcomeRow",
+    "compute_outcome",
 ]

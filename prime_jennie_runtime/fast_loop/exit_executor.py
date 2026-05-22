@@ -299,7 +299,8 @@ class ExitExecutor:
         else:
             await self._tracker.persist(state.sheet_id)
 
-        # PG persist — executions INSERT + positions UPDATE/DELETE
+        # PG persist — executions INSERT + positions UPDATE/DELETE.
+        # 완전 청산이면 record_sell 이 outcomes 도 함께 기록한다.
         if self._sheet_fetcher is not None:
             sheets = await self._sheet_fetcher(state.sheet_id)
             if sheets:
@@ -309,6 +310,7 @@ class ExitExecutor:
                     filled_price=filled_price,
                     executed_at=now,
                     reason=decision.reason,
+                    fully_closed=fully_closed,
                 )
 
         pnl_amount, pnl_pct = self._compute_pnl(state.entry_price, filled_price, filled_qty)

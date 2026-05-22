@@ -1,7 +1,7 @@
 """Slow loop 결과를 Postgres 에 기록.
 
 - macro_runs: `council_logging.save_council_run` 재사용 (단일-step macro_gate 도 지원)
-- scout_runs: 단순 INSERT (code_text + 메타)
+- scout_runs: 단순 INSERT (결정론 스코어러 — LLM 메타 없음)
 
 DB 미구성 (engine=None) 인 경우 no-op 으로 동작하여 테스트/smoke 가 깨지지 않는다.
 """
@@ -273,57 +273,43 @@ async def persist_scout_run(
     scout_run_id: str,
     generated_at: datetime,
     scout_out: ScoutOutput,
-    scout_step_result: Any,
     candidates_count: int | None = None,
-    prompt_chars: int | None = None,
-    prompt_version: str | None = None,
+    scorer_version: str | None = None,
     context_snapshot: dict[str, Any] | None = None,
-    shadow_result: dict[str, Any] | None = None,
-    redis_client: Any = None,
 ) -> None:
-    """Scout 결과 1건을 scout_runs 에 upsert.
+    """결정론 scout run 1건을 scout_runs 에 upsert.
 
-    context_snapshot 은 Scout 코드 실행 입력(news_events, sector_momentum,
-    macro_size_multiplier, universe_hash 등)의 생성 시점 스냅샷이다. 백테스트
-    재현 시 같은 코드 × 같은 입력을 복원하는 primary key — migration 012 의
-    scout_runs.context_snapshot_json 컬럼.
+    2026-05-22 Phase 1 이후 scout 는 LLM 을 호출하지 않는다 (v2 결정론 quant 코어).
+    따라서 ``model_used`` / ``cost_usd`` 컬럼은 항상 NULL 이고, LLM 사용량 통계
+    (``record_llm_call``) 도 적재하지 않는다 — scout 는 더 이상 LLM 서비스가 아니다.
+    ``code_hash`` / ``code_text`` 는 스키마 NOT NULL 제약을 만족시키는 스코어러
+    버전 마커를 담는다 (생성된 Python 코드가 아님). ``prompt_version`` 컬럼에는
+    스코어러 버전 문자열(``scorer_version``)을 기록한다.
+
+    context_snapshot 은 결정론 선정 입력(universe_hash, sector_momentum,
+    macro_gate/size 등)의 생성 시점 스냅샷이다 — 백테스트 재현용. migration 012
+    의 scout_runs.context_snapshot_json 컬럼.
     """
-    meta = _role_metadata(scout_step_result)
-    model_name = meta.get("model") or meta.get("model_used") or _tier_model("strong")
+    if engine is None:
+        return
     code_text = scout_out.screening_code
     code_hash = hashlib.sha256(code_text.encode("utf-8")).hexdigest()
-    out_chars = len(code_text) + len(scout_out.hypothesis or "")
-    cost = _resolve_cost(meta, model_name, prompt_chars, out_chars)
-    if engine is None:
-        if redis_client is not None:
-            in_tok, out_tok = _usage_tokens(meta, prompt_chars, out_chars)
-            await record_llm_call(
-                redis_client,
-                service="scout",
-                input_tokens=in_tok,
-                output_tokens=out_tok,
-                cost_usd=cost,
-                timestamp=generated_at,
-            )
-        return
     metadata_json = {
         "hypothesis": scout_out.hypothesis,
         "factor_weights": scout_out.factor_weights,
         "strategy_tags_used": scout_out.strategy_tags_used,
         "fallback_strategy": scout_out.fallback_strategy,
         "estimated_runtime_seconds": scout_out.estimated_runtime_seconds,
-        "duration_ms": _role_duration_ms(scout_step_result),
     }
+    # model_used / cost_usd 는 INSERT 컬럼 목록에서 제외 → 항상 NULL (결정론, LLM 0회).
     sql = text(
         """
         INSERT INTO scout_runs (
             scout_run_id, generated_at, code_hash, code_text, hypothesis,
-            candidates_count, model_used, prompt_version, cost_usd, metadata_json,
-            context_snapshot_json
+            candidates_count, prompt_version, metadata_json, context_snapshot_json
         ) VALUES (
             :id, :at, :hash, :code, :hyp,
-            :cnt, :model, :pv, :cost, CAST(:meta AS JSONB),
-            CAST(:ctx AS JSONB)
+            :cnt, :ver, CAST(:meta AS JSONB), CAST(:ctx AS JSONB)
         )
         ON CONFLICT (scout_run_id) DO UPDATE SET
             generated_at = EXCLUDED.generated_at,
@@ -331,14 +317,11 @@ async def persist_scout_run(
             code_text = EXCLUDED.code_text,
             hypothesis = EXCLUDED.hypothesis,
             candidates_count = EXCLUDED.candidates_count,
-            model_used = EXCLUDED.model_used,
             prompt_version = EXCLUDED.prompt_version,
-            cost_usd = EXCLUDED.cost_usd,
             metadata_json = EXCLUDED.metadata_json,
             context_snapshot_json = EXCLUDED.context_snapshot_json
         """
     )
-    resolved_prompt_version = prompt_version or meta.get("prompt_version") or "v1"
     params = {
         "id": scout_run_id,
         "at": generated_at,
@@ -346,9 +329,7 @@ async def persist_scout_run(
         "code": code_text,
         "hyp": scout_out.hypothesis,
         "cnt": candidates_count,
-        "model": model_name,
-        "pv": resolved_prompt_version,
-        "cost": cost,
+        "ver": scorer_version,
         "meta": json.dumps(metadata_json, ensure_ascii=False, default=str),
         "ctx": json.dumps(context_snapshot or {}, ensure_ascii=False, default=str),
     }
@@ -357,54 +338,6 @@ async def persist_scout_run(
             await conn.execute(sql, params)
     except Exception:
         logger.exception("persist_scout_run failed: id=%s", scout_run_id)
-        return
-
-    # Shadow result merge into metadata_json.shadow (macro 와 동일 패턴)
-    if shadow_result is not None:
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(
-                    text(
-                        "UPDATE scout_runs SET metadata_json = "
-                        "COALESCE(metadata_json, '{}'::jsonb) || CAST(:shadow AS JSONB) "
-                        "WHERE scout_run_id = :id"
-                    ),
-                    {
-                        "id": scout_run_id,
-                        "shadow": json.dumps(
-                            {"shadow": shadow_result}, ensure_ascii=False, default=str
-                        ),
-                    },
-                )
-        except Exception:
-            logger.exception("persist_scout_run shadow merge failed: id=%s", scout_run_id)
-
-    if redis_client is not None:
-        in_tok, out_tok = _usage_tokens(meta, prompt_chars, out_chars)
-        await record_llm_call(
-            redis_client,
-            service="scout",
-            input_tokens=in_tok,
-            output_tokens=out_tok,
-            cost_usd=cost,
-            timestamp=generated_at,
-        )
-        # Shadow llm_stats 누적 (macro_shadow 와 대칭)
-        if shadow_result is not None and "error" not in shadow_result:
-            shadow_cost = shadow_result.get("cost_usd_estimated")
-            shadow_in = shadow_result.get("tokens_in")
-            shadow_out = shadow_result.get("tokens_out")
-            if not isinstance(shadow_in, int) or not isinstance(shadow_out, int):
-                # Shadow pipeline 은 별도 usage metadata 를 payload 에 싣지 않아 primary 기준 추정.
-                shadow_in, shadow_out = in_tok, out_tok
-            await record_llm_call(
-                redis_client,
-                service="scout_shadow",
-                input_tokens=shadow_in,
-                output_tokens=shadow_out,
-                cost_usd=shadow_cost,
-                timestamp=generated_at,
-            )
 
 
 async def persist_screening_candidates(

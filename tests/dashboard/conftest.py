@@ -79,7 +79,8 @@ _SCHEMA_STATEMENTS = [
         metadata_json TEXT DEFAULT '{}'
     )
     """,
-    # scout_runs
+    # scout_runs (+ migration 012 context_snapshot_json). model_used / cost_usd 는
+    # 스키마에 남아 있으나 결정론 scout (2026-05-22 Phase 1) 는 쓰지 않아 항상 NULL.
     """
     CREATE TABLE IF NOT EXISTS scout_runs (
         scout_run_id TEXT PRIMARY KEY,
@@ -91,7 +92,8 @@ _SCHEMA_STATEMENTS = [
         model_used TEXT,
         prompt_version TEXT,
         cost_usd NUMERIC,
-        metadata_json TEXT DEFAULT '{}'
+        metadata_json TEXT DEFAULT '{}',
+        context_snapshot_json TEXT DEFAULT '{}'
     )
     """,
     # screening_candidates (migration 012) — raw 후보 전수

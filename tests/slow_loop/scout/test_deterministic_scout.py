@@ -166,9 +166,7 @@ class TestPercentileRank:
 
 class TestEffectivePer:
     def test_forward_per_preferred(self):
-        cand = _candidate(
-            ft=FinancialTrend(per=20.0), consensus=ConsensusInfo(forward_per=12.0)
-        )
+        cand = _candidate(ft=FinancialTrend(per=20.0), consensus=ConsensusInfo(forward_per=12.0))
         assert _effective_per(cand) == 12.0
 
     def test_trailing_per_fallback(self):
@@ -220,9 +218,7 @@ def _scout_ctx(universe: list[str]) -> ScoutContext:
             up_count=400,
             down_count=400,
         ),
-        macro_state=MacroStateForScout(
-            gate="open", size_multiplier=1.0, gate_run_id="macro_test"
-        ),
+        macro_state=MacroStateForScout(gate="open", size_multiplier=1.0, gate_run_id="macro_test"),
         news_events={},
         sector_momentum={},
         strategy_tags_available=["SECTOR_MOMENTUM"],
@@ -241,7 +237,6 @@ async def test_run_deterministic_scout_no_engine_returns_empty():
     )
     assert result.result.ok is True
     assert result.result.candidates == []
-    assert result.scout_step_result is None
     assert result.scout_out.expected_candidates == 0
 
 

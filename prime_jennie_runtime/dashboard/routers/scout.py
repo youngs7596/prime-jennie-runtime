@@ -1,10 +1,15 @@
-"""Scout API — Scout run 이력 조회.
+"""Scout API — 결정론 quant scout run 이력 조회.
 
 v3 `scout_runs` 테이블 (migrations/001) 을 대상으로 한다.
 
+2026-05-22 Phase 1 이후 scout 는 LLM codegen 을 폐기하고 v2 결정론 quant 코어로
+교체됐다 — 선정 경로 LLM 호출 0회. 따라서 응답 스키마도 결정론 모델을 따른다:
+생성 코드(code_text)·모델명(model_used)·LLM 비용(cost_usd) 같은 codegen 개념은
+노출하지 않고, 스코어러 버전·팩터 가중치·입력 context 스냅샷을 노출한다.
+
 엔드포인트:
-- GET /scout/runs                        — 최근 runs 요약 (code_text 제외, 용량 큼)
-- GET /scout/runs/{id}                   — 단일 run 상세 (code_text 포함)
+- GET /scout/runs                        — 최근 runs 요약
+- GET /scout/runs/{id}                   — 단일 run 상세 (팩터 가중치 + context)
 - GET /scout/runs/{id}/candidates        — raw 후보 전수 (screening_candidates, rank 순)
 - GET /scout/dates                       — scout_runs 가 있는 날짜 목록
 - GET /scout/latest                      — 최신 run 요약 (control-ui Overview 대응)
@@ -26,23 +31,22 @@ router = APIRouter(prefix="/scout", tags=["scout"])
 
 
 class ScoutRunSummary(BaseModel):
-    """code_text 제외 — 목록/Overview 용."""
+    """결정론 quant scout run 요약 — 목록/Overview 용."""
 
     scout_run_id: str
     generated_at: datetime
-    code_hash: str
-    hypothesis: str | None = None
+    scorer_version: str | None = None  # 결정론 스코어러 버전 (예: deterministic-quant-v2-port@1)
+    summary: str | None = None  # run 요약 문장 (universe→채점→선정)
     candidates_count: int | None = None
-    model_used: str | None = None
-    prompt_version: str | None = None
-    cost_usd: float | None = None
-    metadata: dict[str, Any] = {}
+    strategy_tags: list[str] = []  # 선정 후보가 사용한 strategy_tag 집합
+    runtime_seconds: float | None = None  # 스코어러 실행 소요 (초)
 
 
 class ScoutRunDetail(ScoutRunSummary):
-    """단일 조회 — code_text 포함."""
+    """단일 run 상세 — 팩터 가중치 + 입력 context 스냅샷."""
 
-    code_text: str
+    factor_weights: dict[str, float] = {}  # quant 7팩터 가중치
+    context: dict[str, Any] = {}  # context_snapshot_json (universe_size, macro_gate 등)
 
 
 class ScreeningCandidateRow(BaseModel):
@@ -78,24 +82,33 @@ def _as_dict(v: Any) -> Any:
 
 
 def _row_to_summary(row: Any) -> ScoutRunSummary:
+    """scout_runs row → 요약. 스코어러 버전은 prompt_version 컬럼, 팩터/태그/소요는
+    metadata_json 에서 추출한다.
+    """
+    meta = _as_dict(row["metadata_json"]) or {}
     return ScoutRunSummary(
         scout_run_id=row["scout_run_id"],
         generated_at=row["generated_at"],
-        code_hash=row["code_hash"],
-        hypothesis=row["hypothesis"],
+        scorer_version=row["prompt_version"],
+        summary=row["hypothesis"],
         candidates_count=row["candidates_count"],
-        model_used=row["model_used"],
-        prompt_version=row["prompt_version"],
-        cost_usd=float(row["cost_usd"]) if row["cost_usd"] is not None else None,
-        metadata=_as_dict(row["metadata_json"]) or {},
+        strategy_tags=meta.get("strategy_tags_used") or [],
+        runtime_seconds=meta.get("estimated_runtime_seconds"),
     )
 
 
 def _row_to_detail(row: Any) -> ScoutRunDetail:
+    meta = _as_dict(row["metadata_json"]) or {}
     return ScoutRunDetail(
         **_row_to_summary(row).model_dump(),
-        code_text=row["code_text"],
+        factor_weights=meta.get("factor_weights") or {},
+        context=_as_dict(row["context_snapshot_json"]) or {},
     )
+
+
+_SUMMARY_COLS = (
+    "scout_run_id, generated_at, prompt_version, hypothesis, candidates_count, metadata_json"
+)
 
 
 @router.get("/runs", response_model=list[ScoutRunSummary])
@@ -103,13 +116,9 @@ async def list_runs(
     limit: int = 20,
     session: AsyncSession = Depends(get_session),
 ) -> list[ScoutRunSummary]:
-    """최근 scout run limit 개 (code_text 제외)."""
+    """최근 scout run limit 개."""
     result = await session.execute(
-        text(
-            "SELECT scout_run_id, generated_at, code_hash, hypothesis, candidates_count, "
-            "model_used, prompt_version, cost_usd, metadata_json "
-            "FROM scout_runs ORDER BY generated_at DESC LIMIT :limit"
-        ),
+        text(f"SELECT {_SUMMARY_COLS} FROM scout_runs ORDER BY generated_at DESC LIMIT :limit"),
         {"limit": max(1, min(limit, 200))},
     )
     return [_row_to_summary(r) for r in result.mappings().all()]
@@ -137,9 +146,9 @@ async def list_candidates(
 ) -> list[ScreeningCandidateRow]:
     """특정 scout_run 의 raw 후보 전수 (rank 순).
 
-    0건이면 빈 리스트 — 404 를 내지 않는다. "run 은 있지만 screen() 이 빈
-    리스트를 반환" 과 "run 자체가 없음" 을 UI 단에서 구분하려면 상위 `/runs/{id}`
-    를 먼저 조회해야 한다.
+    0건이면 빈 리스트 — 404 를 내지 않는다. "run 은 있지만 결정론 스코어러가
+    후보 0 을 선정" 과 "run 자체가 없음" 을 UI 단에서 구분하려면 상위
+    `/runs/{id}` 를 먼저 조회해야 한다.
     """
     result = await session.execute(
         text(
@@ -196,8 +205,7 @@ async def get_latest(
         day = datetime.fromisoformat(target_date).replace(tzinfo=UTC)
         result = await session.execute(
             text(
-                "SELECT scout_run_id, generated_at, code_hash, hypothesis, candidates_count, "
-                "model_used, prompt_version, cost_usd, metadata_json FROM scout_runs "
+                f"SELECT {_SUMMARY_COLS} FROM scout_runs "
                 "WHERE generated_at >= :start AND generated_at < :end "
                 "ORDER BY generated_at DESC LIMIT 1"
             ),
@@ -205,11 +213,7 @@ async def get_latest(
         )
     else:
         result = await session.execute(
-            text(
-                "SELECT scout_run_id, generated_at, code_hash, hypothesis, candidates_count, "
-                "model_used, prompt_version, cost_usd, metadata_json FROM scout_runs "
-                "ORDER BY generated_at DESC LIMIT 1"
-            )
+            text(f"SELECT {_SUMMARY_COLS} FROM scout_runs ORDER BY generated_at DESC LIMIT 1")
         )
     row = result.mappings().one_or_none()
     if row is None:

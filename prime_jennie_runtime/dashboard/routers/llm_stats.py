@@ -24,11 +24,11 @@ from ..deps import get_redis
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
-# 추적 대상 서비스 목록. shadow 2종은 historical 데이터 보존 위해 list 에 유지
-# (record_llm_call 은 SHADOW_ENABLED=0 이면 호출 안 됨 — 신규 누적 0).
+# 추적 대상 LLM 서비스 목록. 2026-05-22 Phase 1 에서 scout 는 결정론 quant 코어로
+# 전환돼 LLM 을 호출하지 않으므로 scout / scout_shadow 는 제외한다. macro_shadow 는
+# historical 데이터 보존 위해 유지 (record_llm_call 은 SHADOW_ENABLED=0 이면 호출
+# 안 됨 — 신규 누적 0).
 _SERVICES = [
-    "scout",
-    "scout_shadow",
     "macro",
     "macro_shadow",
     "news_analysis",
@@ -37,10 +37,10 @@ _SERVICES = [
 ]
 
 # 기능별 LLM 매핑. tier 는 참고용, 실제 model/provider 는 각 서비스가 쓰는 env 에서 해석.
-# 2026-04-22 swap: Scout/Macro primary = DeepSeek (Opus 비용 부담 복귀), shadow 종료.
+# 2026-05-22: scout 는 결정론 quant 코어로 전환 — LLM 매핑에서 제외.
 # News extractor 는 Qwen3-30B-A3B MoE (2026-04-21 EXAONE 4.0-32B 에서 교체).
 # - news_analysis: vLLM Qwen3 (VLLM_LLM_MODEL)
-# - scout / macro: DeepSeek chat (DEEPSEEK_MODEL)
+# - macro: DeepSeek chat (DEEPSEEK_MODEL)
 # - briefing: DeepSeek chat (DEEPSEEK_MODEL) — 2026-04-24 Opus 에서 전환
 _FEATURE_MAP = [
     {
@@ -48,12 +48,6 @@ _FEATURE_MAP = [
         "name": "뉴스 메타데이터 추출",
         "tier": "fast",
         "frequency": "실시간 (배치, */10min)",
-    },
-    {
-        "service": "scout",
-        "name": "Scout 종목 분석",
-        "tier": "strong",
-        "frequency": "평일 08:30~14:30 매시 30분 (7회/일)",
     },
     {
         "service": "macro",
@@ -80,14 +74,6 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
             "jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq",
         )
         return model, "vLLM (Qwen3)"
-    if service == "scout":
-        # 2026-04-22 swap: Scout primary = DeepSeek chat (Opus 비용 부담으로 복귀).
-        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-        return model, "DeepSeek"
-    if service == "scout_shadow":
-        # Scout shadow = Claude Opus 4.7 (회귀 검증용 병렬 축적, 1~2주 후 종료).
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
-        return model, "Anthropic"
     if service == "macro":
         # 2026-04-22 swap: Macro primary = DeepSeek chat (4일 shadow 비교 결과 Gate 100% 일치).
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")

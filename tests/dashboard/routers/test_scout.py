@@ -1,7 +1,8 @@
-"""Scout 라우터 happy path — scout_runs 조회."""
+"""Scout 라우터 happy path — 결정론 quant scout_runs 조회."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from httpx import ASGITransport, AsyncClient
@@ -9,17 +10,39 @@ from sqlalchemy import text
 
 
 async def _seed(session_factory) -> None:
+    """결정론 scout run 1건 — code_hash/code_text 는 스코어러 버전 마커, LLM 메타 없음."""
     now = datetime.now(UTC)
+    meta = {
+        "factor_weights": {"momentum": 0.25, "quality": 0.20, "value": 0.15},
+        "strategy_tags_used": ["SECTOR_MOMENTUM", "MEAN_REVERT_RSI"],
+        "fallback_strategy": "skip_today",
+        "estimated_runtime_seconds": 4.2,
+    }
+    ctx = {
+        "universe_size": 300,
+        "macro_gate": "open",
+        "macro_size_multiplier": 1.0,
+        "scorer_version": "deterministic-quant-v2-port@1",
+    }
     async with session_factory() as session:
         await session.execute(
             text(
                 "INSERT INTO scout_runs "
                 "(scout_run_id, generated_at, code_hash, code_text, hypothesis, "
-                "candidates_count, model_used, prompt_version, cost_usd, metadata_json) "
-                "VALUES ('scout_20260418_0830', :g, 'abc123', 'def screen(df): return df.head(5)', "
-                "'장세 조정 이후 저점 매수', 5, 'deepseek-chat', 'v1', 0.002, '{}')"
+                "candidates_count, prompt_version, metadata_json, context_snapshot_json) "
+                "VALUES (:id, :g, :hash, :code, :hyp, :cnt, :ver, :meta, :ctx)"
             ),
-            {"g": now},
+            {
+                "id": "scout_20260418_0830",
+                "g": now,
+                "hash": "stable_marker_hash",
+                "code": "# deterministic-quant-v2-port@1\n",
+                "hyp": "결정론 quant v2 포팅: universe 300 → 채점 280 → 선정 12",
+                "cnt": 12,
+                "ver": "deterministic-quant-v2-port@1",
+                "meta": json.dumps(meta),
+                "ctx": json.dumps(ctx),
+            },
         )
         await session.commit()
 
@@ -31,22 +54,30 @@ async def test_latest_and_runs_and_detail(app, session_factory):
         assert latest.status_code == 200, latest.text
         body = latest.json()
         assert body["scout_run_id"] == "scout_20260418_0830"
-        assert body["hypothesis"] == "장세 조정 이후 저점 매수"
-        assert body["candidates_count"] == 5
-        assert "code_text" not in body  # summary 에는 code 제외
+        assert body["summary"].startswith("결정론 quant")
+        assert body["candidates_count"] == 12
+        assert body["scorer_version"] == "deterministic-quant-v2-port@1"
+        assert body["strategy_tags"] == ["SECTOR_MOMENTUM", "MEAN_REVERT_RSI"]
+        assert body["runtime_seconds"] == 4.2
+        # LLM codegen 개념 제거 — 요약에 노출되지 않아야 함
+        assert "code_text" not in body
+        assert "model_used" not in body
+        assert "factor_weights" not in body  # 상세 전용
 
         runs = await client.get("/api/scout/runs?limit=5")
         assert runs.status_code == 200
         data = runs.json()
         assert len(data) == 1
-        assert data[0]["model_used"] == "deepseek-chat"
+        assert data[0]["scorer_version"] == "deterministic-quant-v2-port@1"
         assert "code_text" not in data[0]
 
         detail = await client.get("/api/scout/runs/scout_20260418_0830")
         assert detail.status_code == 200
         det = detail.json()
-        assert det["code_text"].startswith("def screen")
-        assert det["cost_usd"] == 0.002
+        assert det["summary"].startswith("결정론 quant")
+        assert det["factor_weights"]["momentum"] == 0.25
+        assert det["context"]["macro_gate"] == "open"
+        assert "code_text" not in det
 
 
 async def test_latest_empty(app):

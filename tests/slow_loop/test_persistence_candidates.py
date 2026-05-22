@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any
 
-import fakeredis.aioredis
 import pytest
 
 from prime_jennie_runtime.slow_loop.persistence import (
@@ -105,7 +104,6 @@ async def test_persist_scout_run_serializes_context_snapshot():
         scout_run_id="scout_20260420_0830",
         generated_at=datetime(2026, 4, 20, 8, 30),
         scout_out=_scout_out(),
-        scout_step_result=None,
         context_snapshot=ctx_snap,
     )
     assert len(conn.executed) == 1
@@ -121,53 +119,45 @@ async def test_persist_scout_run_serializes_context_snapshot():
 
 
 @pytest.mark.asyncio
-async def test_persist_scout_run_records_llm_stats_to_redis():
-    """engine + redis_client 모두 주어지면 scout service 키에 누적."""
+async def test_persist_scout_run_writes_no_llm_columns():
+    """결정론 scout — model_used / cost_usd 는 INSERT 에서 제외 (항상 NULL).
+
+    scout 는 2026-05-22 Phase 1 이후 LLM 을 호출하지 않으므로 LLM 메타 컬럼을
+    쓰지 않는다. prompt_version 컬럼에는 스코어러 버전이 들어간다.
+    """
     conn = _FakeConn()
     engine = _FakeEngine(conn)
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    kst = timezone(timedelta(hours=9))
-
     await persist_scout_run(
         engine,
-        scout_run_id="scout_20260420_0830",
-        generated_at=datetime(2026, 4, 20, 8, 30, tzinfo=kst),
+        scout_run_id="scout_20260525_0830",
+        generated_at=datetime(2026, 5, 25, 8, 30),
         scout_out=_scout_out(),
-        scout_step_result=None,
-        prompt_chars=2000,
-        redis_client=redis,
+        scorer_version="deterministic-quant-v2-port@1",
     )
-
-    data = await redis.hgetall("llm:stats:2026-04-20:scout")
-    assert data["calls"] == "1"
-    assert int(data["tokens_in"]) == 1000  # 2000 chars // 2
-    assert int(data["tokens_out"]) >= 1
+    sql, params = conn.executed[0]
+    assert "model_used" not in sql
+    assert "cost_usd" not in sql
+    assert params["ver"] == "deterministic-quant-v2-port@1"
+    assert "model" not in params
+    assert "cost" not in params
 
 
 @pytest.mark.asyncio
-async def test_persist_scout_run_records_stats_even_when_engine_none():
-    """DB 미구성 smoke 환경에서도 Redis 통계는 누적되어야 함."""
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    kst = timezone(timedelta(hours=9))
-
+async def test_persist_scout_run_engine_none_is_noop():
+    """DB 미구성 smoke 환경 — 예외 없이 no-op (LLM 통계도 적재하지 않음)."""
     await persist_scout_run(
         None,
         scout_run_id="scout_x",
-        generated_at=datetime(2026, 4, 20, 8, 30, tzinfo=kst),
+        generated_at=datetime(2026, 5, 25, 8, 30),
         scout_out=_scout_out(),
-        scout_step_result=None,
-        prompt_chars=1000,
-        redis_client=redis,
+        scorer_version="deterministic-quant-v2-port@1",
     )
-
-    data = await redis.hgetall("llm:stats:2026-04-20:scout")
-    assert data["calls"] == "1"
 
 
 @pytest.mark.asyncio
 async def test_persist_scout_run_candidates_count_uses_actual_value():
-    """candidates_count 가 주어지면 그 값을 그대로 저장 — LLM 예측치(expected_candidates)
-    로 대체되지 않아야 한다.
+    """candidates_count 가 주어지면 그 값을 그대로 저장 — expected_candidates 로
+    대체되지 않아야 한다.
     """
     conn = _FakeConn()
     engine = _FakeEngine(conn)
@@ -177,7 +167,6 @@ async def test_persist_scout_run_candidates_count_uses_actual_value():
         scout_run_id="scout_x",
         generated_at=datetime(2026, 4, 27, 8, 30),
         scout_out=scout_out,
-        scout_step_result=None,
         candidates_count=7,
     )
     _, params = conn.executed[0]
@@ -203,7 +192,6 @@ async def test_persist_scout_run_candidates_count_none_stores_null():
         scout_run_id="scout_x",
         generated_at=datetime(2026, 4, 27, 8, 30),
         scout_out=scout_out,
-        scout_step_result=None,
     )
     _, params = conn.executed[0]
     assert params["cnt"] is None
@@ -218,7 +206,6 @@ async def test_persist_scout_run_empty_context_defaults_to_empty_dict():
         scout_run_id="scout_20260420_0830",
         generated_at=datetime(2026, 4, 20, 8, 30),
         scout_out=_scout_out(),
-        scout_step_result=None,
     )
     _, params = conn.executed[0]
     assert json.loads(params["ctx"]) == {}

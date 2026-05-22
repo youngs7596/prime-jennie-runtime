@@ -10,8 +10,7 @@ v2 `scout/app.py::run_pipeline` 의 Phase 1~6 (LLM Phase 4 제외) 을 한 함�
 결정론 스코어러가 소비할 뿐이다 (v2 와 동일 구조).
 
 LLM codegen(`code_loop.generate_validated_code`) 의 라이브 대체물. 반환은
-`DeterministicScoutResult` — pipeline 이 기존 `ValidatedScoutResult` 와 동일하게
-`.scout_out` / `.scout_step_result` / `.result.candidates` 로 소비.
+`DeterministicScoutResult` — pipeline 이 `.scout_out` / `.result.candidates` 로 소비.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -47,15 +45,14 @@ SECTOR_PCTILE_MIN_SAMPLES = 5  # 섹터 내 5종목 미만이면 백분위 미�
 
 @dataclass
 class DeterministicScoutResult:
-    """`run_deterministic_scout` 산출 — pipeline 이 ValidatedScoutResult 와 동형 소비.
+    """`run_deterministic_scout` 산출 — pipeline 이 `.scout_out` / `.result` 로 소비.
 
-    scout_step_result 는 None (LLM PipelineStepResult 없음). persist_scout_run 의
-    `_role_metadata(None)` 은 빈 dict 로 안전 처리됨.
+    LLM PipelineStepResult 가 없다 (결정론 — codegen 은퇴). scout_out 은 합성
+    ScoutOutput, result 는 ScreeningResult.
     """
 
     scout_out: ScoutOutput
     result: ScreeningResult
-    scout_step_result: Any = None
 
 
 # =====================================================================
@@ -124,9 +121,7 @@ def _compute_sector_pctiles(enriched: dict[str, EnrichedCandidate]) -> None:
             if eper is not None:
                 candidate.sector_per_pctile = _percentile_rank(eper, sorted_per[group])
 
-    logger.info(
-        "sector pctiles: PBR %d sectors, PER %d sectors", len(sorted_pbr), len(sorted_per)
-    )
+    logger.info("sector pctiles: PBR %d sectors, PER %d sectors", len(sorted_pbr), len(sorted_per))
 
 
 # =====================================================================
@@ -446,9 +441,7 @@ async def run_deterministic_scout(
     )
     return DeterministicScoutResult(
         scout_out=scout_out,
-        result=ScreeningResult(
-            ok=True, candidates=candidates, exec_time_ms=int(elapsed * 1000)
-        ),
+        result=ScreeningResult(ok=True, candidates=candidates, exec_time_ms=int(elapsed * 1000)),
     )
 
 

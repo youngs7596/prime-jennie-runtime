@@ -518,7 +518,6 @@ async def run_slow_loop(
         scout_run_id=scout_run_id,
     )
     scout_out: ScoutOutput = validated_scout.scout_out
-    scout_step_result = validated_scout.scout_step_result  # 결정론 — None (LLM step 없음)
     raw_candidates: list[ScreeningCandidate] = list(validated_scout.result.candidates)
 
     await observer.emit(
@@ -547,20 +546,16 @@ async def run_slow_loop(
     }
 
     # --- 3. DB 기록 ---
-    # 결정론 스코어러는 LLM cost 0 — scout_step_result=None, prompt_chars=0,
-    # shadow_result=None. prompt_version 자리에 스코어러 버전을 기록한다.
+    # 결정론 스코어러는 LLM 호출 0회 — model_used/cost_usd 는 NULL, LLM 사용량
+    # 통계도 미적재. prompt_version 컬럼에는 스코어러 버전(SCORER_VERSION)을 기록.
     await persist_scout_run(
         comp.db_engine,
         scout_run_id=scout_run_id,
         generated_at=as_of_dt,
         scout_out=scout_out,
-        scout_step_result=scout_step_result,
         candidates_count=len(raw_candidates),
-        prompt_chars=0,
-        prompt_version=SCORER_VERSION,
+        scorer_version=SCORER_VERSION,
         context_snapshot=scout_context_snapshot,
-        shadow_result=None,
-        redis_client=comp.redis_client,
     )
 
     # raw 후보 전수를 screening_candidates 에 기록. persist_scout_run 후에 호출
@@ -719,8 +714,7 @@ async def run_slow_loop(
             emit_to_fast_loop, control_reason = False, "control_paused"
     if not emit_to_fast_loop:
         logger.warning(
-            "slow_loop: control %s — 시트 build + DB 영속은 유지, fast_loop "
-            "stream emit 만 skip",
+            "slow_loop: control %s — 시트 build + DB 영속은 유지, fast_loop stream emit 만 skip",
             control_reason,
         )
         await observer.emit(

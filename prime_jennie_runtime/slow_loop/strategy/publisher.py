@@ -68,13 +68,20 @@ class PositionSheetPublisher:
         """Coordinator hook 등 redis client 재사용 (별도 wiring 회피)."""
         return self._client
 
-    async def publish(self, sheet: PositionSheet) -> str:
+    async def publish(self, sheet: PositionSheet, *, emit_stream: bool = True) -> str:
         """DB upsert → stream 발행. 예외는 DLQ 로 후송.
 
         DB 실패는 치명적 (후행 `update_candidate_promotion` 의 FK 위반).
         stream 실패는 DLQ 로 guard.
+
+        ``emit_stream=False`` 면 ``position_sheets`` 테이블 upsert 만 수행하고
+        Redis stream(`v3:position_sheets`) 발행은 건너뛴다 — control STOP/PAUSE
+        중 분석·DB 영속은 유지하되 fast_loop 핸드오프만 차단하는 용도.
+        이 경우 빈 문자열을 반환한다.
         """
         await self._persist_sheet(sheet)
+        if not emit_stream:
+            return ""
         try:
             return await self._publisher.publish(sheet)
         except Exception as e:

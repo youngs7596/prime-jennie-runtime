@@ -122,3 +122,47 @@ async def test_publish_without_db_engine_is_noop(fake_redis):
     assert msg_id
     length = await fake_redis.xlen(STREAM_POSITION_SHEETS)
     assert length == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_emit_stream_false_persists_but_skips_stream(fake_redis):
+    """emit_stream=False → position_sheets DB upsert 는 수행, stream emit 만 skip.
+
+    control STOP/PAUSE 중 slow_loop 가 쓰는 경로 — 분석·DB영속은 유지하되
+    fast_loop 핸드오프(v3:position_sheets stream)만 차단한다.
+    """
+    executed: list[dict] = []
+
+    class _FakeConn:
+        async def execute(self, stmt, params):
+            executed.append({"stmt": str(stmt), "params": params})
+
+    class _FakeBegin:
+        async def __aenter__(self):
+            return _FakeConn()
+
+        async def __aexit__(self, *exc):
+            return None
+
+    class _FakeEngine:
+        def begin(self):
+            return _FakeBegin()
+
+    publisher = PositionSheetPublisher(fake_redis, db_engine=_FakeEngine())
+    msg_id = await publisher.publish(_valid_sheet(), emit_stream=False)
+
+    # stream 발행 skip — 빈 문자열 반환, stream 길이 0
+    assert msg_id == ""
+    assert await fake_redis.xlen(STREAM_POSITION_SHEETS) == 0
+    # DB 영속은 그대로 수행
+    assert len(executed) == 1
+    assert "INSERT INTO position_sheets" in executed[0]["stmt"]
+
+
+@pytest.mark.asyncio
+async def test_publish_emit_stream_true_is_default(fake_redis):
+    """emit_stream 기본값 True — 명시 안 하면 기존대로 stream 발행."""
+    publisher = PositionSheetPublisher(fake_redis, db_engine=None)
+    msg_id = await publisher.publish(_valid_sheet())
+    assert msg_id
+    assert await fake_redis.xlen(STREAM_POSITION_SHEETS) == 1

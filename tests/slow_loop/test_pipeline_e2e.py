@@ -306,13 +306,19 @@ async def test_zero_candidates_skipped(fake_redis):
 
 
 # =====================================================================
-# 5. control.state — STOP/PAUSE 시 sheet 발행 차단
+# 5. control.state — STOP/PAUSE 시 fast_loop stream emit 만 차단
+#    (게이트가 publish 직전으로 이동 — Macro/Scout 분석·DB영속은 정상 수행)
 # =====================================================================
 
 
 @pytest.mark.asyncio
-async def test_control_stopped_blocks_publishing(fake_redis):
-    """SystemState.stopped == True → Macro/Scout LLM 호출 모두 skip + 시트 0개."""
+async def test_control_stopped_runs_analysis_but_skips_stream_emit(fake_redis):
+    """SystemState.stopped → Macro/Scout 분석은 수행, fast_loop stream emit 만 skip.
+
+    게이트가 run_slow_loop 최상단에서 publish 직전으로 이동한 결과:
+    STOP 중에도 macro/scout 가 돌아 관측·백테스트 데이터가 남고, fast_loop
+    핸드오프(v3:position_sheets stream)만 차단된다 → 진입 0.
+    """
     from prime_jennie_runtime.control.state import SystemState
     from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS
     from prime_jennie_runtime.telegram_bot.control import STATE_KEY_STOP
@@ -335,20 +341,24 @@ async def test_control_stopped_blocks_publishing(fake_redis):
         scout_run_id="scout_20260416_0830",
     )
     assert result.skipped_reason == "control_stopped"
+    # fast_loop 핸드오프 차단 — stream 에 0건, 진입 0
     assert result.sheets_published == []
-    # Macro/Scout 둘 다 skip — 시트도 발행 X
     assert await fake_redis.xlen(STREAM_POSITION_SHEETS) == 0
 
     names = {e.name for e in observer.events}
-    assert "pj.slow_loop.skipped_control" in names
-    # Macro/Scout LLM 도 호출 전 — code_generated 이벤트 없음
-    assert "pj.scout.code_generated" not in names
+    # Macro/Scout 분석은 STOP 중에도 수행됨 (게이트가 더 이상 최상단이 아님)
+    assert "pj.scout.code_generated" in names
+    assert "pj.slow_loop.publish_blocked_control" in names
+    # 시트는 build + DB 영속까지 됐으나 stream emit 은 skip
+    assert "pj.strategy.sheet_persisted_no_emit" in names
+    assert "pj.strategy.sheet_published" not in names
 
 
 @pytest.mark.asyncio
-async def test_control_paused_blocks_publishing(fake_redis):
-    """SystemState.paused (pause_reason 있음) → skip."""
+async def test_control_paused_runs_analysis_but_skips_stream_emit(fake_redis):
+    """SystemState.paused → STOP 과 동일하게 분석은 수행, stream emit 만 skip."""
     from prime_jennie_runtime.control.state import SystemState
+    from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS
     from prime_jennie_runtime.telegram_bot.control import STATE_KEY_PAUSE
 
     observer = CollectingObserver()
@@ -370,6 +380,10 @@ async def test_control_paused_blocks_publishing(fake_redis):
     )
     assert result.skipped_reason == "control_paused"
     assert result.sheets_published == []
+    assert await fake_redis.xlen(STREAM_POSITION_SHEETS) == 0
+    names = {e.name for e in observer.events}
+    assert "pj.scout.code_generated" in names
+    assert "pj.slow_loop.publish_blocked_control" in names
 
 
 @pytest.mark.asyncio

@@ -314,41 +314,13 @@ async def run_slow_loop(
     """
     observer = comp.observer
 
-    # --- 0. control.state 게이트 ---
-    # /pause /stop 같은 긴급 제어가 활성이면 Macro/Scout LLM 호출 + 시트 발행 모두
-    # skip. fast_loop entry_executor 가 이미 진입을 차단하지만, 새 시트 발행 자체를
-    # 막지 않으면 사용자가 STOP 후에도 자꾸 sheet 가 쌓여 confusing. 따라서 사용자
-    # 의도(긴급 제어)를 우선해 가장 앞단에서 막는다.
-    if comp.system_state is not None:
-        sys_snap = await comp.system_state.snapshot()
-        if sys_snap.stopped:
-            logger.warning(
-                "slow_loop skipped: SystemState.stopped — sheet 발행 + LLM 호출 모두 차단"
-            )
-            await observer.emit(
-                pj_event(
-                    "pj.slow_loop.skipped_control",
-                    role="slow_loop",
-                    ok=True,
-                    reason="stopped",
-                )
-            )
-            return SlowLoopResult(skipped_reason="control_stopped")
-        if sys_snap.paused:
-            logger.warning(
-                "slow_loop skipped: SystemState.paused (reason=%s) — sheet 발행 + LLM 호출 차단",
-                sys_snap.pause_reason,
-            )
-            await observer.emit(
-                pj_event(
-                    "pj.slow_loop.skipped_control",
-                    role="slow_loop",
-                    ok=True,
-                    reason="paused",
-                    pause_reason=sys_snap.pause_reason,
-                )
-            )
-            return SlowLoopResult(skipped_reason="control_paused")
+    # --- 0. control.state 게이트는 시트 발행 직전(섹션 5)으로 이동 ---
+    # STOP/PAUSE 여도 Macro/Scout 분석 + DB 영속(macro_runs/scout_runs/
+    # screening_candidates/position_sheets)은 정상 수행하고, fast_loop 핸드오프
+    # (Redis stream emit)만 차단한다. 이유: STOP 구간에도 관측·백테스트 데이터가
+    # 남아야 한다 (게이트를 최상단에 두면 STOP 동안 분석 데이터가 전부 0 이 됨).
+    # 진입 차단의 최종 안전망은 fast_loop entry path 가 control.state 를 독립
+    # 확인하는 것 (defense-in-depth).
 
     # --- 0.5. Risk Throttle 스냅샷 갱신 ---
     # fast_loop risk_updater 가 Redis 에 적재한 최신 level 을 engine 이 시트 발행 시
@@ -887,6 +859,35 @@ async def run_slow_loop(
         news_score=None,  # Phase 2: scout_ctx.news_events에서 per-ticker로
     )
 
+    # control.state 게이트 (섹션 0 에서 이리로 이동) — STOP/PAUSE 면 시트를
+    # build + position_sheets DB 영속까지는 수행하되 fast_loop 핸드오프
+    # (Redis stream emit)만 차단한다. Macro/Scout 분석·영속은 위에서 이미 끝나
+    # macro_runs/scout_runs/screening_candidates 가 STOP 중에도 남는다.
+    # fast_loop entry path 가 control.state 를 독립 확인하므로 만에 하나 stream
+    # 으로 샜더라도 진입은 0 (defense-in-depth).
+    emit_to_fast_loop = True
+    control_reason: str | None = None
+    if comp.system_state is not None:
+        sys_snap = await comp.system_state.snapshot()
+        if sys_snap.stopped:
+            emit_to_fast_loop, control_reason = False, "control_stopped"
+        elif sys_snap.paused:
+            emit_to_fast_loop, control_reason = False, "control_paused"
+    if not emit_to_fast_loop:
+        logger.warning(
+            "slow_loop: control %s — 시트 build + DB 영속은 유지, fast_loop "
+            "stream emit 만 skip",
+            control_reason,
+        )
+        await observer.emit(
+            pj_event(
+                "pj.slow_loop.publish_blocked_control",
+                role="slow_loop",
+                ok=True,
+                reason=control_reason,
+            )
+        )
+
     published: list[str] = []
     rejected: list[str] = []
     for cand in validation.candidates:
@@ -942,7 +943,7 @@ async def run_slow_loop(
             continue
 
         try:
-            await comp.publisher.publish(sheet)
+            await comp.publisher.publish(sheet, emit_stream=emit_to_fast_loop)
         except Exception as pub_exc:  # noqa: BLE001
             logger.exception("publisher.publish failed for %s", sheet.sheet_id)
             rejected.append(cand.ticker)
@@ -967,13 +968,30 @@ async def run_slow_loop(
             )
             continue
 
-        published.append(sheet.sheet_id)
+        # 시트는 position_sheets 에 영속됨 — emit 여부와 무관하게 promotion FK 기록.
         await update_candidate_promotion(
             comp.db_engine,
             scout_run_id=scout_run_id,
             ticker=cand.ticker,
             sheet_id=sheet.sheet_id,
         )
+
+        if not emit_to_fast_loop:
+            # control STOP/PAUSE — 시트는 DB 에 영속됐으나 fast_loop 로 stream
+            # emit 하지 않는다. 관측/백테스트 데이터로만 남는다 (진입 0).
+            await observer.emit(
+                pj_event(
+                    "pj.strategy.sheet_persisted_no_emit",
+                    role="strategy",
+                    ok=True,
+                    ticker=cand.ticker,
+                    sheet_id=sheet.sheet_id,
+                    reason=control_reason,
+                )
+            )
+            continue
+
+        published.append(sheet.sheet_id)
         await observer.emit(
             pj_event(
                 "pj.strategy.sheet_published",
@@ -1022,6 +1040,9 @@ async def run_slow_loop(
         validation=validation,
         sheets_published=published,
         sheets_rejected=rejected,
+        # control STOP/PAUSE 면 사유를 남긴다 — 시트는 영속됐으나 stream emit 은
+        # skip 됐음을 호출부(slow_loop/app.py 로그)가 인지하도록.
+        skipped_reason=control_reason,
     )
 
 

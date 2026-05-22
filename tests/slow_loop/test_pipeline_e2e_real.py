@@ -59,6 +59,17 @@ from prime_jennie_runtime.slow_loop.strategy.risk_throttle import NoOpRiskThrott
 
 from ._stubs import StubChatModel
 
+# 2026-05-22 Phase 1 (a): 결정론 선정 코어 포팅으로 매 실행 LLM codegen + subprocess
+# 샌드박스가 라이브 pipeline 경로에서 은퇴했다 (.ai/decisions/2026-05-22-selection-
+# architecture-decision.md). 이 모듈은 run_slow_loop 가 ScreeningToolAdapter
+# subprocess 로 Scout 코드를 exec 하는 것을 검증하므로 — 그 경로 자체가 사라져 —
+# 전부 skip 한다. screening_executor 샌드박스의 직접 단위테스트는 별도로 유효하다.
+# 삭제 여부는 team-lead 결정 (산출물 보고에 플래그됨).
+pytestmark = pytest.mark.skip(
+    reason="run_slow_loop 가 LLM codegen + subprocess 샌드박스를 더 이상 쓰지 않음 "
+    "(Phase 1 a 결정론 선정 포팅). 모듈 삭제/재작성은 team-lead 결정 대기."
+)
+
 # Scout 코드: context.universe 와 context.news_events 를 읽고 positive_events 가
 # 있는 ticker 를 후보로 만든다. 실 subprocess 에서 exec 되어야 통과.
 REAL_SCREEN_CODE = """

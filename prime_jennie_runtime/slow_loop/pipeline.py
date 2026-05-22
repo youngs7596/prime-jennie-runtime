@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
@@ -261,6 +260,9 @@ class SlowLoopComponents:
     shadow_orchestrator: Any = None  # Orchestrator | None — Macro 를 DeepSeek 로 shadow 평가
     redis_client: Any = None  # aioredis.Redis | None — LLM stats 누적용 (llm:stats:{date}:{svc})
     system_state: SystemState | None = None  # control.state:* 읽기. None 이면 STOP/PAUSE 미체크.
+    # scout 단계 주입점 — None 이면 deterministic_scout.run_deterministic_scout 사용.
+    # 테스트가 canned 후보를 주입할 때 fake runner 를 넣는다 (engine/checker 와 동일 패턴).
+    scout_runner: Any = None
 
 
 def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
@@ -498,134 +500,26 @@ async def run_slow_loop(
         trigger_reason=scout_trigger,
     )
 
-    # market_data 와 screening_context 를 검증 루프 호출 전에 미리 준비
-    # (검증 루프 안에서 sandbox 실행 시 필요)
-    market_data_records: list[dict] = []
-    if comp.db_engine is not None and scout_ctx.universe:
-        from .scout.market_data_loader import load_market_data_records
-
-        market_data_records = await load_market_data_records(
-            comp.db_engine,
-            universe=scout_ctx.universe,
-            as_of=as_of_date,
-            lookback_days=int(os.environ.get("SCOUT_MARKET_DATA_LOOKBACK_DAYS", "60")),
-        )
-
-    screening_context = {
-        "as_of": as_of_date.isoformat(),
-        "universe": scout_ctx.universe,
-        "news_events": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_events.items()},
-        "sector_momentum": scout_ctx.sector_momentum,
-        "macro_size_multiplier": post.output.size_multiplier,
-        "market_data_records": market_data_records,
-        # Forward 컨센서스 — 현재 EmptyConsensusFeeder 라 None 값만 들어옴.
-        # Scout 코드는 missing 으로 취급. 후속 작업에서 RealConsensusFeeder 가 채움.
-        "consensus_data": {
-            t: e.model_dump(mode="json") for t, e in scout_ctx.consensus_data.items()
-        },
-        # audit B1 fix (2026-05-15) — 거래 이력 노출. Scout 코드가 candidates 에서
-        # 제외 + LLM prompt 도 동일 정보 인지. enforcement 는 fast_loop cooldown
-        # 가드 (cooldown_check.py) 가 2nd layer.
-        "today_entries": list(scout_ctx.today_entries),
-        "recent_stop_loss_tickers": list(scout_ctx.recent_stop_loss_tickers),
-    }
-
-    async def _primary_scout_validated():
-        """Scout LLM ↔ sandbox 검증 닫힌 루프 (최대 3회)."""
-        from .scout.code_loop import generate_validated_code
-
-        return await generate_validated_code(
-            orch=comp.orchestrator,
-            scout_ctx=scout_ctx,
-            screening=comp.screening,
-            screening_context=screening_context,
-            observer=observer,
-            scout_run_id=scout_run_id,
-        )
-
-    async def _shadow_scout():
-        """Scout shadow — DeepSeek chat 으로 같은 pipeline 을 병렬 평가.
-
-        Macro shadow 와 동일 패턴. 실패해도 primary 결정을 방해하지 않고 None 반환.
-        duration_ms + metadata (usage) 를 payload 에 실어 cost 추정에 활용.
-        """
-        if comp.shadow_orchestrator is None:
-            return None
-        import time as _t
-
-        t0 = _t.monotonic()
-        try:
-            res = await _run_pipeline_with_retry(
-                comp.shadow_orchestrator,
-                _scout_pipeline(scout_ctx),
-                observer,
-                role_name="scout_shadow",
-                user_request="daily scout run (shadow)",
-            )
-            shadow_meta: dict[str, Any] = {}
-            try:
-                step = res.state["scout"]
-                if step.outputs:
-                    shadow_meta = dict(step.outputs[0].metadata or {})
-            except Exception:
-                shadow_meta = {}
-            return {
-                "result": res,
-                "duration_ms": int((_t.monotonic() - t0) * 1000),
-                "metadata": shadow_meta,
-            }
-        except Exception as e:
-            logger.warning("scout shadow failed: %s", e)
-            return {"error": f"{type(e).__name__}: {e}"}
-
-    validated_scout, scout_shadow_payload = await asyncio.gather(
-        _primary_scout_validated(), _shadow_scout(), return_exceptions=False
-    )
-    scout_out: ScoutOutput = validated_scout.scout_out
-    scout_step_result = validated_scout.scout_step_result
-    if scout_step_result is None:
-        # scout LLM 호출 자체가 한 번도 성공 못함
-        await observer.emit(pj_event("pj.scout.output_missing", role="scout", ok=False))
-        return SlowLoopResult(macro_post=post, skipped_reason="scout_output_missing")
-
-    # DB 기록 (engine=None 이면 no-op). candidates_count 는 screening 코드를
-    # sandbox 실행해 얻은 실제 후보 수 (raw_candidates) 로 채운다 — LLM 예측치
-    # (scout_out.expected_candidates) 는 모니터링 정확도를 떨어뜨려 사용 금지.
-    from .scout.prompts import SCOUT_PROMPT_VERSION, SCOUT_SYSTEM_PROMPT
-    from .scout.prompts import build_user_prompt as _build_scout_user
-
-    scout_prompt_chars = len(SCOUT_SYSTEM_PROMPT) + len(_build_scout_user(scout_ctx))
-
-    # context snapshot — 백테스트 재현용. Scout 코드 입력을 그대로 pickle-friendly
-    # 형태로 scout_runs.context_snapshot_json 에 저장. universe 는 해시와 size 만
-    # 남기고 full list 는 universe_hash 가 일치하는 외부 테이블(stock_masters 등)
-    # 에서 복원 — full list 는 크고 변동 주기가 길어 매 run 중복 저장할 가치 낮음.
+    # --- 2b. Scout phase — 결정론 quant 스코어러 (2026-05-22 Phase 1 a) ---
+    # 매 실행 LLM codegen(code_loop) 은퇴. v2 결정론 선정 코어(quant.py 7팩터 +
+    # MA 평활 + 히스테리시스)의 포팅본을 호출한다 — 선정 경로 LLM 호출 0회.
+    # scout shadow(Opus codegen) 도 함께 은퇴 — codegen 이 없으면 비교 대상 무의미.
+    # 결정 기록: .ai/decisions/2026-05-22-selection-architecture-decision.md
     import hashlib as _hashlib
 
-    _universe_raw = ",".join(sorted(scout_ctx.universe))
-    scout_context_snapshot = {
-        "as_of": as_of_date.isoformat(),
-        "trigger_reason": scout_trigger,
-        "universe_size": len(scout_ctx.universe),
-        "universe_hash": _hashlib.sha256(_universe_raw.encode("utf-8")).hexdigest(),
-        "news_events": {t: e.model_dump(mode="json") for t, e in scout_ctx.news_events.items()},
-        "sector_momentum": dict(scout_ctx.sector_momentum),
-        "macro_size_multiplier": float(post.output.size_multiplier),
-        "macro_gate": post.output.gate,
-        "macro_run_id": macro_run_id,
-    }
+    from .scout.deterministic_scout import SCORER_VERSION, run_deterministic_scout
 
-    # Shadow ScoutOutput 추출 (screening 실행에 shadow code 가 필요)
-    shadow_scout_out: ScoutOutput | None = None
-    if scout_shadow_payload is not None and "error" not in scout_shadow_payload:
-        try:
-            shadow_res = scout_shadow_payload["result"]
-            shadow_scout_out = shadow_res.state["scout"].payload_as(ScoutOutput)
-        except Exception:
-            logger.exception("scout shadow result extract failed")
-
-    # persist_scout_run 은 screening 결과까지 포함한 shadow_result 를 원하므로
-    # screening 실행 블록 이후에 호출. 아래 섹션 3 뒤로 이동.
+    _scout_runner = comp.scout_runner or run_deterministic_scout
+    validated_scout = await _scout_runner(
+        db_engine=comp.db_engine,
+        scout_ctx=scout_ctx,
+        as_of=as_of_date,
+        as_of_dt=as_of_dt,
+        scout_run_id=scout_run_id,
+    )
+    scout_out: ScoutOutput = validated_scout.scout_out
+    scout_step_result = validated_scout.scout_step_result  # 결정론 — None (LLM step 없음)
+    raw_candidates: list[ScreeningCandidate] = list(validated_scout.result.candidates)
 
     await observer.emit(
         pj_event(
@@ -637,71 +531,24 @@ async def run_slow_loop(
         )
     )
 
-    # --- 3. Screening 결과 (검증 루프에서 이미 sandbox 실행 완료) ---
-    # primary candidates 는 검증 루프가 누적한 마지막 시도의 결과 그대로.
-    # shadow 는 별도 1회 실행 (shadow 는 검증 없이 비교 전용).
-    raw_candidates: list[ScreeningCandidate] = list(validated_scout.result.candidates)
+    # context snapshot — 백테스트 재현용 (scout_runs.context_snapshot_json).
+    # universe 는 해시 + size 만 (full list 는 universe_hash 일치하는 외부 테이블 복원).
+    _universe_raw = ",".join(sorted(scout_ctx.universe))
+    scout_context_snapshot = {
+        "as_of": as_of_date.isoformat(),
+        "trigger_reason": scout_trigger,
+        "universe_size": len(scout_ctx.universe),
+        "universe_hash": _hashlib.sha256(_universe_raw.encode("utf-8")).hexdigest(),
+        "sector_momentum": dict(scout_ctx.sector_momentum),
+        "macro_size_multiplier": float(post.output.size_multiplier),
+        "macro_gate": post.output.gate,
+        "macro_run_id": macro_run_id,
+        "scorer_version": SCORER_VERSION,
+    }
 
-    async def _shadow_screen() -> list[ScreeningCandidate]:
-        """Shadow scout 가 생성한 Python 코드를 격리 실행해 후보 추출.
-
-        primary 와 **동일 screening_context** 로 병렬 실행하므로 공정 비교 가능.
-        shadow 가 없거나 코드가 비어있으면 빈 리스트. 실행 실패는 swallow 후 빈 리스트.
-        shadow 후보는 screening_candidates 테이블에 기록하지 않고 metadata.shadow.candidates
-        JSON 으로만 보존 — FK 복잡도 회피 + primary 와 비교 전용이라는 의미 명확.
-        """
-        if shadow_scout_out is None or not shadow_scout_out.screening_code:
-            return []
-        try:
-            return await comp.screening.invoke(shadow_scout_out.screening_code, screening_context)
-        except Exception:
-            logger.exception("shadow screening failed")
-            return []
-
-    shadow_raw_candidates = await _shadow_screen()
-
-    # Scout shadow 결과 구성 — DeepSeek 의 hypothesis + code + candidates 까지 포함
-    scout_shadow_for_db: dict[str, Any] | None = None
-    if shadow_scout_out is not None:
-        try:
-            from .persistence import _resolve_cost, _tier_model
-
-            shadow_model_name = _tier_model("shadow_strong")  # DeepSeek chat
-            shadow_meta = (
-                (scout_shadow_payload.get("metadata") or {})
-                if scout_shadow_payload is not None
-                else {}
-            )
-            shadow_out_chars = len(shadow_scout_out.screening_code or "") + len(
-                shadow_scout_out.hypothesis or ""
-            )
-            shadow_cost_est = _resolve_cost(
-                shadow_meta, shadow_model_name, scout_prompt_chars, shadow_out_chars
-            )
-            scout_shadow_for_db = {
-                "model_used": shadow_model_name,
-                "hypothesis": shadow_scout_out.hypothesis,
-                "code_hash": _hashlib.sha256(
-                    (shadow_scout_out.screening_code or "").encode("utf-8")
-                ).hexdigest(),
-                "code_text": shadow_scout_out.screening_code,
-                "expected_candidates": shadow_scout_out.expected_candidates,
-                "strategy_tags_used": list(shadow_scout_out.strategy_tags_used or []),
-                "latency_ms": (
-                    scout_shadow_payload.get("duration_ms")
-                    if scout_shadow_payload is not None
-                    else None
-                ),
-                "cost_usd_estimated": shadow_cost_est,
-                # Shadow candidates — primary 와 동일 context 로 실행된 raw 후보 전수.
-                # 20개 HARD CAP 적용됨 (executor.py). DB 에 JSON 으로 저장.
-                "candidates": [c.model_dump(mode="json") for c in shadow_raw_candidates],
-            }
-        except Exception:
-            logger.exception("scout shadow payload build failed")
-    elif scout_shadow_payload and "error" in scout_shadow_payload:
-        scout_shadow_for_db = {"error": scout_shadow_payload["error"]}
-
+    # --- 3. DB 기록 ---
+    # 결정론 스코어러는 LLM cost 0 — scout_step_result=None, prompt_chars=0,
+    # shadow_result=None. prompt_version 자리에 스코어러 버전을 기록한다.
     await persist_scout_run(
         comp.db_engine,
         scout_run_id=scout_run_id,
@@ -709,18 +556,15 @@ async def run_slow_loop(
         scout_out=scout_out,
         scout_step_result=scout_step_result,
         candidates_count=len(raw_candidates),
-        prompt_chars=scout_prompt_chars,
-        prompt_version=SCOUT_PROMPT_VERSION,
+        prompt_chars=0,
+        prompt_version=SCORER_VERSION,
         context_snapshot=scout_context_snapshot,
-        shadow_result=scout_shadow_for_db,
+        shadow_result=None,
         redis_client=comp.redis_client,
     )
 
-    # raw 후보 전수를 screening_candidates 에 기록 (백테스트 재현용).
-    # persist_scout_run 후에 호출 — screening_candidates.scout_run_id 가 scout_runs
-    # 를 참조하는 FK 제약이 있어 순서가 중요함.
-    # 이후 validation / engine 결정에 따라 promoted_to_sheet_id 또는
-    # rejection_reason 이 채워진다.
+    # raw 후보 전수를 screening_candidates 에 기록. persist_scout_run 후에 호출
+    # — screening_candidates.scout_run_id → scout_runs FK 제약 (순서 중요).
     await persist_screening_candidates(
         comp.db_engine,
         scout_run_id=scout_run_id,

@@ -24,6 +24,7 @@ from minyoung_mah import (
 
 from prime_jennie_runtime.infra.redis_streams import STREAM_POSITION_SHEETS
 from prime_jennie_runtime.position_sheet.schema import KST
+from prime_jennie_runtime.screening_executor.schemas import ScreeningResult
 from prime_jennie_runtime.slow_loop.macro.context_builder import MacroContextBuilder
 from prime_jennie_runtime.slow_loop.macro.feeders.stub import (
     StubKorMacroNewsFeeder,
@@ -35,6 +36,7 @@ from prime_jennie_runtime.slow_loop.macro.schemas import MacroGateOutput
 from prime_jennie_runtime.slow_loop.macro.state_store import MacroStateStore
 from prime_jennie_runtime.slow_loop.pipeline import SlowLoopComponents, run_slow_loop
 from prime_jennie_runtime.slow_loop.scout.context_builder import ScoutContextBuilder
+from prime_jennie_runtime.slow_loop.scout.deterministic_scout import DeterministicScoutResult
 from prime_jennie_runtime.slow_loop.scout.feeders.stub import (
     StubMarketSummaryFeeder,
     StubNewsEventFeeder,
@@ -86,6 +88,23 @@ def _default_macro_output(gate: str = "open", size: float = 0.75) -> MacroGateOu
     )
 
 
+def _fake_scout_runner(candidates: list[ScreeningCandidate]):
+    """결정론 scout(run_deterministic_scout) 자리에 끼우는 fake — canned 후보 반환.
+
+    포팅(2026-05-22 Phase 1 a) 후 pipeline 은 comp.scout_runner 를 호출한다. E2E 는
+    DB 의존 enrichment 대신 이 fake 로 후보를 주입 (run_deterministic_scout 와 동일
+    kwargs 시그니처). 후보 검증·시트 발행 등 하류 로직은 그대로 검증된다.
+    """
+
+    async def _runner(*, db_engine, scout_ctx, as_of, as_of_dt, scout_run_id):
+        return DeterministicScoutResult(
+            scout_out=_default_scout_output(),
+            result=ScreeningResult(ok=True, candidates=list(candidates)),
+        )
+
+    return _runner
+
+
 def _make_components(
     fake_redis,
     observer,
@@ -124,6 +143,9 @@ def _make_components(
         if screening_candidates is None
         else ScreeningToolAdapterStub(candidates=screening_candidates)
     )
+    # 결정론 scout 포팅(2026-05-22) 후 pipeline 은 comp.scout_runner 를 호출한다.
+    # screening adapter 의 고정 후보를 그대로 돌려주는 fake runner 를 주입.
+    scout_runner = _fake_scout_runner(screening.candidates)
 
     engine = StrategyEngine(load_policy(), risk_throttle or NoOpRiskThrottle())
     publisher = PositionSheetPublisher(fake_redis)
@@ -139,6 +161,7 @@ def _make_components(
         state_store=state_store,
         observer=observer,
         system_state=system_state,
+        scout_runner=scout_runner,
     )
 
 

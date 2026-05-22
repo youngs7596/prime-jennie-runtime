@@ -43,16 +43,22 @@ async def collect_full_market_data(
 ) -> dict:
     """v2 `/jobs/collect-full-market-data` 포팅.
 
-    1) stock_masters 활성 + 시총 desc 상위 N (default 300)
+    1) stock_masters 활성 + 시총 desc 상위 N (ETN 제외, default 300)
     2) 각 종목 gateway `/api/market/daily-prices` POST → daily_prices upsert
     3) ~18 req/s 페이싱 (v2 와 동일)
 
-    Returns: {"target": N, "upserted": N, "failed": N}
+    Returns: {"target": N, "upserted": N, "failed": N, "empty": N}
     """
     async with pool.acquire() as conn:
+        # ETN 제외 — CD금리/레버리지 ETN 은 market_cap 상위를 점유하지만 KIS 일봉
+        # endpoint 가 HTTP 200 + 빈 리스트를 줘 top_n 슬롯만 낭비한다 (2026-05-22
+        # 발견: top300 중 131개가 ETN). ETF 는 일봉이 정상 수집되므로 유지.
+        # stock_masters 에 instrument-type 컬럼이 없어 종목명 기반 필터 — 정식
+        # 해법은 type 컬럼 추가.
         rows = await conn.fetch(
             "SELECT stock_code FROM stock_masters "
             "WHERE is_active = TRUE AND market_cap IS NOT NULL "
+            "AND stock_name NOT ILIKE '%ETN%' "
             "ORDER BY market_cap DESC LIMIT $1",
             top_n,
         )
@@ -66,6 +72,7 @@ async def collect_full_market_data(
         repo = PostgresPriceRepo(conn=conn)
         upserted = 0
         failed = 0
+        empty = 0  # HTTP 200 인데 일봉 0건 — 예외가 아니라 failed 에 안 잡힘
         last_request = 0.0
         loop = asyncio.get_running_loop()
 
@@ -82,6 +89,8 @@ async def collect_full_market_data(
                 )
                 resp.raise_for_status()
                 items = [DailyPrice.model_validate(x) for x in resp.json()]
+                if not items:
+                    empty += 1
                 upserted += await repo.upsert_daily(items)
             except Exception as e:
                 failed += 1
@@ -89,20 +98,22 @@ async def collect_full_market_data(
 
             if (i + 1) % _PROGRESS_EVERY == 0:
                 logger.info(
-                    "collect_full_market_data: progress %d/%d upserted=%d failed=%d",
+                    "collect_full_market_data: progress %d/%d upserted=%d failed=%d empty=%d",
                     i + 1,
                     len(targets),
                     upserted,
                     failed,
+                    empty,
                 )
 
     logger.info(
-        "collect_full_market_data: target=%d upserted=%d failed=%d",
+        "collect_full_market_data: target=%d upserted=%d failed=%d empty=%d",
         len(targets),
         upserted,
         failed,
+        empty,
     )
-    return {"target": len(targets), "upserted": upserted, "failed": failed}
+    return {"target": len(targets), "upserted": upserted, "failed": failed, "empty": empty}
 
 
 __all__ = ["collect_full_market_data"]

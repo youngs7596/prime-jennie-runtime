@@ -18,9 +18,11 @@ class _FakeConn:
     def __init__(self, codes: list[str]) -> None:
         self.codes = codes
         self.executemany_calls: list[tuple[str, list[tuple]]] = []
+        self.master_query: str | None = None
 
     async def fetch(self, sql: str, *args: object) -> list[dict]:
         if "FROM stock_masters" in sql:
+            self.master_query = sql
             return [{"stock_code": c} for c in self.codes]
         return []
 
@@ -77,7 +79,11 @@ async def test_collect_full_market_data_upserts_for_all_targets():
     assert result["target"] == 3
     assert result["upserted"] == 15  # 3 종목 × 5 봉
     assert result["failed"] == 0
+    assert result["empty"] == 0
     assert len(conn.executemany_calls) == 3
+    # universe SELECT 는 ETN 을 제외해야 한다 (2026-05-22 fix)
+    assert conn.master_query is not None
+    assert "NOT ILIKE '%ETN%'" in conn.master_query
 
 
 @pytest.mark.asyncio
@@ -88,7 +94,7 @@ async def test_collect_full_market_data_handles_empty_universe():
     async with httpx.AsyncClient() as client:
         result = await collect_full_market_data(pool, client, GATEWAY, top_n=300)
 
-    assert result == {"target": 0, "upserted": 0, "failed": 0}
+    assert result == {"target": 0, "upserted": 0, "failed": 0, "empty": 0}
 
 
 @pytest.mark.asyncio
@@ -111,3 +117,24 @@ async def test_collect_full_market_data_continues_on_failure():
 
     assert result["failed"] == 1
     assert result["upserted"] == 2
+
+
+@pytest.mark.asyncio
+async def test_collect_full_market_data_counts_empty_responses():
+    """HTTP 200 + 빈 리스트 응답은 failed 가 아니라 empty 로 집계된다.
+
+    ETN 처럼 KIS 일봉 endpoint 가 에러 없이 빈 결과를 주는 종목 — failed=0 이
+    실태를 가리지 않도록 별도 카운트.
+    """
+    conn = _FakeConn(["A", "B"])
+    pool = _FakePool(conn)
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post(url__regex=_DAILY_RE).respond(200, json=[])
+        async with httpx.AsyncClient() as client:
+            result = await collect_full_market_data(pool, client, GATEWAY, top_n=2)
+
+    assert result["target"] == 2
+    assert result["failed"] == 0
+    assert result["empty"] == 2
+    assert result["upserted"] == 0

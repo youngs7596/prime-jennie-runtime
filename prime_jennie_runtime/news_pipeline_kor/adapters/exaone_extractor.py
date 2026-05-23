@@ -47,7 +47,7 @@ _PROMPT_TEMPLATE = """다음 한국 주식 뉴스에서 메타데이터를 JSON 
 
 종목코드: {ticker}
 헤드라인: {title}
-본문(발췌): {body_excerpt}
+본문: {body}
 
 ## event_type (아래 설명 참고, 가장 구체적인 것 선택. other 는 정말 맞는 게 없을 때만)
 - earnings: 실적 발표 (매출/영업익/순익/어닝서프라이즈/분기 실적)
@@ -147,7 +147,6 @@ class LiteLLMEventExtractor:
     model: str = DEFAULT_MODEL
     api_base: str | None = None
     completion_fn: CompletionFn | None = None
-    body_excerpt_chars: int = 400
     model_name_override: str | None = None
     temperature: float = 0.1
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -156,7 +155,7 @@ class LiteLLMEventExtractor:
         prompt = _PROMPT_TEMPLATE.format(
             ticker=article.ticker,
             title=article.title,
-            body_excerpt=article.body[: self.body_excerpt_chars] or "(본문 없음)",
+            body=article.body or "(본문 없음)",
             impact_levels="/".join(_VALID_IMPACT),
             sentiments="/".join(_VALID_SENTIMENT),
             horizons="/".join(_VALID_HORIZONS),

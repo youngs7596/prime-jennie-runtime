@@ -35,8 +35,11 @@ jobs:
           LOCAL_BEFORE=$(git rev-parse HEAD)
           echo "Before: $(git log --oneline -1)"
 
-          if ! git diff --quiet || ! git diff --cached --quiet; then
-            echo "==> Stashing local changes"
+          # git diff 는 tracked changes 만 본다 — untracked 파일이 있으면 누락.
+          # git pull --ff-only 가 untracked 와 충돌하면 실패하므로 untracked 포함
+          # 전체 변경(`git status --porcelain`)을 stash 대상으로 본다.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "==> Stashing local changes (incl. untracked)"
             git stash push -u -m "ci-auto-stash-${GITHUB_RUN_ID}"
           fi
 

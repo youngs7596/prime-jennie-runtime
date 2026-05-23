@@ -54,23 +54,53 @@ PROMPT_TEMPLATE = """다음 한국 주식 뉴스의 진짜 주제가 어떤 한�
 본문: {body}
 
 ## 작업
-이 기사가 **직접 다루는** 한국 상장사를 0~5개 식별. 단순 언급이 아니라 "기사의 주제"
-인 회사만. 시장 일반 동향 / 환율 / 지수 / 다른 나라 회사 (엔비디아·테슬라 등) 가
-주제이고 한국 상장사가 주제가 아니면 빈 배열.
+이 기사가 **직접 다루는** 한국 상장사 0~5개. 단순 언급이 아니라 "기사 주제" 인 회사만.
 
-## 출력 (JSON object only — 다른 텍스트 금지)
+## 절대 ticker 부여 금지 케이스 (tickers=[] + is_market_general=true)
+- 코스피/코스닥/지수 일반 동향 (예: "코스피 600p 반등", "외국인 매도", "8000선 도전")
+- 환율/금리/유가 시황 (예: "달러 1350원", "WTI 80달러")
+- 시장 분류 일반 뉴스 (예: "대구 상장법인 1분기 영업이익", "은행권 전체 동향")
+- 해외 회사 단독 주제 (엔비디아·테슬라·애플 등 — 한국 상장사 영향 명시 안 됐으면)
+- 정책·규제 일반 (예: "공정위 과징금", "정부 ETF 규제")
+
+## ticker 부여 조건
+- 기사 제목 또는 본문에 회사의 정식명/약어/별칭이 명시적 등장
+- 그 회사의 사건이 기사 핵심 주제 (CEO 인사, 실적, M&A, 신제품, 수주, 소송 등)
+
+## hallucination 금지 — 가공의 회사명 금지
+- 존재하지 않는 종목명 만들지 마세요 (예: "삼성제삼", "대구상장법인")
+- 약어가 애매하면 부여 안 함이 안전 (예: "삼성"만으론 삼성전자/삼성물산/삼성SDI 등 불명)
+- 본문에 풀명이 나오면 disambiguate. 풀명 없으면 tickers=[]
+
+## 출력 (JSON object only)
 {{
   "tickers": ["삼성물산", "..."],
   "ticker_rationales": {{
-    "삼성물산": "본 기사는 삼성물산의 압구정4구역 시공권 획득이 주제"
+    "삼성물산": "삼성물산의 압구정4구역 시공권 획득이 주제"
   }},
   "is_market_general": false,
   "confidence": 0.9
 }}
 
-- tickers: 한국 상장사 정식 이름 (한글). 영문 약자 (LG, SK 등) 가 일반적 표기면 그대로
-- is_market_general: tickers 가 비어있고 일반 시장/지수/환율 뉴스이면 true
+- tickers: 한국 상장사 정식 이름 (한글). KOSPI/KOSDAQ 실존 종목만
+- is_market_general: tickers 가 비어있고 일반 시장/지수/환율/정책 뉴스이면 true
 - confidence: 0.0~1.0
+
+## 예시
+입력: "코스피 7200선 마감, 외국인 6조 순매도"
+출력: {{"tickers": [], "ticker_rationales": {{}},
+       "is_market_general": true, "confidence": 0.95}}
+
+입력: "삼성 노조 부문 70·사업부 30 고집" (본문: 삼성전자 노사 협의)
+출력: {{"tickers": ["삼성전자"],
+       "ticker_rationales": {{"삼성전자": "노사 협상 주제"}},
+       "is_market_general": false, "confidence": 0.85}}
+
+입력: "삼전·하닉 프리마켓 5%대 급등"
+출력: {{"tickers": ["삼성전자", "SK하이닉스"],
+       "ticker_rationales": {{"삼성전자": "삼전 약어",
+                              "SK하이닉스": "하닉 약어"}},
+       "is_market_general": false, "confidence": 0.9}}
 """
 
 
@@ -88,20 +118,24 @@ def _pg_dsn() -> str:
 
 
 async def fetch_forced_fp(pool: asyncpg.Pool, n: int) -> list[dict]:
-    """algorithm: news_events 의 같은 article_id 가 N(≥3) 개 ticker 와 매핑된
-    cluster 상위 N 케이스. cluster 크기 desc 정렬.
+    """algorithm: 같은 title 의 article_id 가 ≥3 개 ticker 와 매핑된 cluster 상위 N.
+
+    naver 의 종목별 referrer URL (`code=`) 때문에 같은 기사가 ticker 마다 다른
+    article_id (md5(source_url) 기반) 를 가짐. 따라서 article_id 그룹핑은 의미
+    없고, title 동일 기준으로 cluster 식별.
     """
     rows = await pool.fetch(
         """
-        WITH clusters AS (
+        WITH title_clusters AS (
             SELECT
-                ne.article_id,
-                COUNT(DISTINCT ne.ticker) AS ticker_count,
-                ARRAY_AGG(DISTINCT ne.ticker ORDER BY ne.ticker) AS cluster_tickers
-            FROM news_events ne
-            WHERE ne.published_at > NOW() - INTERVAL '7 days'
-            GROUP BY ne.article_id
-            HAVING COUNT(DISTINCT ne.ticker) >= 3
+                title,
+                COUNT(DISTINCT ticker) AS ticker_count,
+                ARRAY_AGG(DISTINCT ticker ORDER BY ticker) AS cluster_tickers,
+                MIN(article_id) AS sample_article_id
+            FROM news_articles
+            WHERE published_at > NOW() - INTERVAL '7 days'
+            GROUP BY title
+            HAVING COUNT(DISTINCT ticker) >= 3
         )
         SELECT
             na.article_id,
@@ -112,9 +146,8 @@ async def fetch_forced_fp(pool: asyncpg.Pool, n: int) -> list[dict]:
             na.published_at,
             c.ticker_count,
             c.cluster_tickers
-        FROM clusters c
-        JOIN news_articles na ON na.article_id = c.article_id
-            AND na.ticker = c.cluster_tickers[1]
+        FROM title_clusters c
+        JOIN news_articles na ON na.article_id = c.sample_article_id
         ORDER BY c.ticker_count DESC, na.published_at DESC
         LIMIT $1
         """,
@@ -220,13 +253,118 @@ async def agent_call(
 # ---------------------------------------------------------------------
 
 
+_COMMON_SUFFIXES = (
+    "에너지솔루션",
+    "전자",
+    "전기",
+    "물산",
+    "중공업",
+    "건설",
+    "건설기계",
+    "케미칼",
+    "이노베이션",
+    "하이닉스",
+    "디스플레이",
+    "바이오로직스",
+    "바이오에피스",
+    "에너지",
+    "텔레콤",
+    "증권",
+    "은행",
+    "지주",
+    "금융",
+    "ELECTRIC",
+    "ENM",
+    "쇼핑",
+    "스토어",
+    "타이어",
+    "화학",
+    "제약",
+    "엔터테인먼트",
+    "유플러스",
+)
+
+
+def _aliases_for(stock_name: str) -> list[str]:
+    """stock_name 에서 약어 후보 생성.
+
+    예: '삼성전자' → ['삼성전자', '삼전', '삼성']
+        'SK하이닉스' → ['SK하이닉스', '하이닉스', 'SK하닉', '하닉']
+        'LG에너지솔루션' → ['LG에너지솔루션', '엔솔', 'LG엔솔']
+    """
+    out = [stock_name]
+    # 공통 접미사 stripped 형태 (그룹+업종 접미사 → 그룹 단독)
+    for sfx in _COMMON_SUFFIXES:
+        if stock_name.endswith(sfx) and len(stock_name) > len(sfx):
+            stem = stock_name[: -len(sfx)]
+            if stem and stem not in out:
+                out.append(stem)
+    # 자주 쓰이는 줄임말 사전 (시장 실측 기준 — 확장 여지)
+    known_short = {
+        "삼성전자": ["삼전"],
+        "SK하이닉스": ["하이닉스", "하닉", "SK하닉"],
+        "LG에너지솔루션": ["엔솔", "LG엔솔"],
+        "삼성SDI": ["SDI"],
+        "삼성바이오로직스": ["삼바", "삼성바이오"],
+        "현대차": ["현대"],
+        "기아": ["기아차"],
+        "현대모비스": ["모비스"],
+        "KB금융": ["KB"],
+        "신한지주": ["신한", "신한금융"],
+        "하나금융지주": ["하나", "하나금융"],
+        "우리금융지주": ["우리", "우리금융"],
+        "NH투자증권": ["NH투자", "농협증권"],
+        "엔씨소프트": ["엔씨", "NC"],
+        "POSCO홀딩스": ["POSCO", "포스코"],
+        "POSCO퓨처엠": ["퓨처엠"],
+        "셀트리온": [],
+        "두산밥캣": ["밥캣"],
+        "한화에어로스페이스": ["한화에어로", "한화우주"],
+        "한국전력": ["한전"],
+        "KT&G": ["KT앤지", "케이티앤지"],
+        "S-Oil": ["에쓰오일", "S오일"],
+    }
+    if stock_name in known_short:
+        out.extend(known_short[stock_name])
+    # 중복 제거
+    seen: set[str] = set()
+    deduped = []
+    for a in out:
+        if a not in seen:
+            seen.add(a)
+            deduped.append(a)
+    return deduped
+
+
+def _matches_text(agent_name: str, text: str, stock_name: str | None) -> bool:
+    """agent 가 emit 한 ticker 이름이 본문 어딘가에 등장하는지.
+
+    1) agent_name 그대로 substring
+    2) name_to_code 매칭되는 stock_name 의 모든 alias 중 하나라도 substring
+    """
+    if agent_name in text:
+        return True
+    candidates: list[str] = []
+    # agent 가 약어 emit 시 (예: "삼전") 호출부가 stock_name 으로 정식명 전달
+    if stock_name:
+        candidates.extend(_aliases_for(stock_name))
+    else:
+        candidates.extend(_aliases_for(agent_name))
+    return any(a and a in text for a in candidates)
+
+
 def title_coverage_rate(
     items: list[dict], name_to_code: dict[str, str]
 ) -> tuple[float, list[dict]]:
-    """Agent ticker(name) 가 article.title+body 에 substring 으로 등장하는 비율."""
+    """Agent ticker(name) 가 article.title+body 에 substring/alias 매칭 비율."""
     total = 0
     covered = 0
     misses: list[dict] = []
+    # name → code 외에 약어 → 정식명 dictionary 도 구축
+    alias_to_name: dict[str, str] = {}
+    for nm in name_to_code:
+        for a in _aliases_for(nm):
+            alias_to_name.setdefault(a, nm)
     for item in items:
         agent_tickers = (item.get("agent_result") or {}).get("tickers") or []
         if not agent_tickers:
@@ -234,7 +372,9 @@ def title_coverage_rate(
         text = (item.get("title") or "") + " " + (item.get("body") or "")
         for tn in agent_tickers:
             total += 1
-            if tn in text:
+            # agent 가 정식명 줬을 때 그 종목의 alias 확인. 약어 줬으면 alias 사전으로 역추적
+            stock_name = tn if tn in name_to_code else alias_to_name.get(tn)
+            if _matches_text(tn, text, stock_name):
                 covered += 1
             else:
                 misses.append(
@@ -555,9 +695,7 @@ def _write_analyses_doc(path: Path, summary: dict, args: argparse.Namespace) -> 
     for pi in m2["per_item"]:
         agent_tickers = ", ".join(pi["agent_tickers"])
         delta = f"{pi['crawler_count']}→{pi['agent_count']}"
-        lines.append(
-            f"| `{pi['article_id']}` | {pi['title'][:50]} | {delta} | {agent_tickers} |"
-        )
+        lines.append(f"| `{pi['article_id']}` | {pi['title'][:50]} | {delta} | {agent_tickers} |")
     lines.append("")
 
     if s["metric_3_cross_llm"]:

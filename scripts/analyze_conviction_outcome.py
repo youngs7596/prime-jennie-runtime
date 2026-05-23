@@ -11,12 +11,14 @@ Coordinator 도입과 독립적으로 즉시 실행 가능한 retrospective scri
 
 데이터 소스 (Coordinator 도입 전):
   - screening_candidates.conviction × outcomes.pnl_pct (via promoted_to_sheet_id)
+  - screening_candidates.factors_json — 결정론 코어 quant.py 7 팩터 점수
   - hour_of_day: screening_candidates.created_at (KST)
   - Nth-in-window: 같은 ticker 가 윈도 안 N 번째 발행 (B1 self-reinforcing)
 
-분석 dimensions (design §10.3):
+분석 dimensions (design §10.3 + 2026-05-24 핸드오프):
   r1  전체
   r2  strategy_tag 별
+  r3  7 팩터 각각 (momentum/quality/value/technical/news/supply_demand/sector_momentum)
   r5  hour_of_day 별 (시초 09:00~ 등 시간대)
   r6  Nth recommendation in window (1st / 2nd / 3rd+)
 
@@ -61,6 +63,18 @@ logger = logging.getLogger("analyze_conviction_outcome")
 DEFAULT_MIN_N = 30
 DEFAULT_WEEKS = 6
 
+# 결정론 코어 quant.py 7 팩터. deterministic_scout.py:171 이 factors_json 으로 적재.
+# ma_score / quant_total 은 conviction 과 동치/근사라 r3 에서 제외 (r1 와 중복).
+FACTOR_KEYS: tuple[str, ...] = (
+    "momentum",
+    "quality",
+    "value",
+    "technical",
+    "news",
+    "supply_demand",
+    "sector_momentum",
+)
+
 
 # ---------------------------------------------------------------------------
 # SQL — 핵심 join.
@@ -84,6 +98,7 @@ WITH sheet_outcomes AS (
         sc.ticker,
         sc.conviction::float            AS conviction,
         sc.strategy_tag,
+        sc.factors_json                 AS factors_json,
         sc.created_at                   AS published_at,
         sc.promoted_to_sheet_id         AS sheet_id,
         ex.first_buy_at,
@@ -171,6 +186,36 @@ def _compute_by_group(
     return results
 
 
+def _compute_r3(df: pd.DataFrame, min_n: int) -> list[CorrResult]:
+    """7 팩터 각각 × pnl_pct r — 결정론 코어 quant.py 의 개별 팩터 정보력 분리.
+
+    factors_json 안의 점수가 누락/비숫자면 그 행만 해당 팩터에서 제외
+    (다른 팩터는 살아있을 수 있음). 2026-05-24 핸드오프: SECTOR_MOMENTUM
+    한 전략에 75% 집중이 새 위험으로 부각된 뒤, 개별 팩터의 정보력을 분리
+    측정해야 가중치 재조정 근거가 생긴다.
+    """
+    results: list[CorrResult] = []
+    if df.empty or "factors_json" not in df.columns:
+        return [CorrResult(label=k, r=None, n=0, _min_n=min_n) for k in FACTOR_KEYS]
+
+    def _pick(d: object, key: str) -> float:
+        if not isinstance(d, dict):
+            return float("nan")
+        val = d.get(key)
+        if val is None:
+            return float("nan")
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return float("nan")
+
+    for key in FACTOR_KEYS:
+        values_x = df["factors_json"].apply(lambda d, k=key: _pick(d, k))
+        r, n = _pearson(values_x, df["pnl_pct"])
+        results.append(CorrResult(label=key, r=r, n=n, _min_n=min_n))
+    return results
+
+
 def _compute_by_hour(df: pd.DataFrame, min_n: int, tz: str = "Asia/Seoul") -> list[CorrResult]:
     """발행 시각 (KST) 의 hour-of-day 별 r."""
     if df.empty:
@@ -249,6 +294,7 @@ async def _load(
                 "ticker",
                 "conviction",
                 "strategy_tag",
+                "factors_json",
                 "published_at",
                 "sheet_id",
                 "first_buy_at",
@@ -280,6 +326,7 @@ def _render_table(
     strategy_tag: str | None,
     r1: CorrResult,
     r2: list[CorrResult],
+    r3: list[CorrResult],
     r5: list[CorrResult],
     r6: list[CorrResult],
 ) -> str:
@@ -303,6 +350,14 @@ def _render_table(
     for c in r2:
         w = "  [low-n]" if c.is_low_confidence else ""
         print(f"  {c.label:<14} r={_fmt_r(c.r)}  n={c.n}{w}", file=out)
+    print("", file=out)
+
+    print("r3 (per quant factor, 7 factors x pnl_pct):", file=out)
+    if not r3:
+        print("  (no rows)", file=out)
+    for c in r3:
+        w = "  [low-n]" if c.is_low_confidence else ""
+        print(f"  {c.label:<16} r={_fmt_r(c.r)}  n={c.n}{w}", file=out)
     print("", file=out)
 
     print("r5 (per hour_of_day, KST):", file=out)
@@ -336,27 +391,31 @@ def _render_csv(
     *,
     r1: CorrResult,
     r2: list[CorrResult],
+    r3: list[CorrResult],
     r5: list[CorrResult],
     r6: list[CorrResult],
 ) -> str:
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["dimension", "label", "r", "n", "low_confidence"])
-    for c in [r1, *r2, *r5, *r6]:
-        dim = (
-            "r1_overall"
-            if c is r1
-            else ("r2_strategy_tag" if c in r2 else ("r5_hour_of_day" if c in r5 else "r6_nth"))
-        )
-        w.writerow(
-            [
-                dim,
-                c.label,
-                "" if c.r is None else f"{c.r:.6f}",
-                c.n,
-                int(c.is_low_confidence),
-            ]
-        )
+    sections: list[tuple[str, list[CorrResult]]] = [
+        ("r1_overall", [r1]),
+        ("r2_strategy_tag", r2),
+        ("r3_factor", r3),
+        ("r5_hour_of_day", r5),
+        ("r6_nth", r6),
+    ]
+    for dim, items in sections:
+        for c in items:
+            w.writerow(
+                [
+                    dim,
+                    c.label,
+                    "" if c.r is None else f"{c.r:.6f}",
+                    c.n,
+                    int(c.is_low_confidence),
+                ]
+            )
     return out.getvalue()
 
 
@@ -368,6 +427,7 @@ def _render_json(
     strategy_tag: str | None,
     r1: CorrResult,
     r2: list[CorrResult],
+    r3: list[CorrResult],
     r5: list[CorrResult],
     r6: list[CorrResult],
 ) -> str:
@@ -385,6 +445,7 @@ def _render_json(
         "strategy_tag": strategy_tag,
         "r1_overall": _ser(r1),
         "r2_strategy_tag": [_ser(c) for c in r2],
+        "r3_factor": [_ser(c) for c in r3],
         "r5_hour_of_day": [_ser(c) for c in r5],
         "r6_nth_in_window": [_ser(c) for c in r6],
     }
@@ -475,6 +536,7 @@ async def _amain(args: argparse.Namespace) -> int:
             strategy_tag=args.strategy_tag,
             r1=empty,
             r2=[],
+            r3=[],
             r5=[],
             r6=[],
         )
@@ -484,11 +546,12 @@ async def _amain(args: argparse.Namespace) -> int:
 
     r1 = _compute_r1(df, args.min_n)
     r2 = _compute_by_group(df, "strategy_tag", args.min_n)
+    r3 = _compute_r3(df, args.min_n)
     r5 = _compute_by_hour(df, args.min_n)
     r6 = _compute_nth_in_window(df, args.min_n)
 
     if args.output == "csv":
-        sys.stdout.write(_render_csv(r1=r1, r2=r2, r5=r5, r6=r6))
+        sys.stdout.write(_render_csv(r1=r1, r2=r2, r3=r3, r5=r5, r6=r6))
     elif args.output == "json":
         sys.stdout.write(
             _render_json(
@@ -498,6 +561,7 @@ async def _amain(args: argparse.Namespace) -> int:
                 strategy_tag=args.strategy_tag,
                 r1=r1,
                 r2=r2,
+                r3=r3,
                 r5=r5,
                 r6=r6,
             )
@@ -512,6 +576,7 @@ async def _amain(args: argparse.Namespace) -> int:
                 strategy_tag=args.strategy_tag,
                 r1=r1,
                 r2=r2,
+                r3=r3,
                 r5=r5,
                 r6=r6,
             )

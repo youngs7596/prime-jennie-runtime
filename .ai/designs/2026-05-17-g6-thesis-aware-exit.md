@@ -1,5 +1,7 @@
 # G6 Thesis-Aware Exit Design (2026-05-17)
 
+> **⚠️ SIMPLIFIED 2026-05-17 / 2026-05-23 archive 확정** — 5-22 결정론 코어 전환으로 thesis_spec=None 발행, position_sheets 스키마에도 thesis 컬럼 부재. thesis 출처 자체가 끊김. 동기는 살아있으므로 세 갈래 (7 팩터 시계열 / 별도 LLM 채널 / Temporal Context PoC 의 Fact layer 흡수) 중 선택 후 새 design doc — `.ai/designs/2026-05-23-post-llm-at-core-realignment.md` §8.2, §9.
+>
 > **⚠️ SIMPLIFIED 2026-05-17** — `.ai/designs/2026-05-17-g-series-simplification.md`
 > §4 에서 단순화 결정:
 > - 명명: G6 → **`thesis_aware_hold`** (의미 기반)

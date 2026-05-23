@@ -1,5 +1,7 @@
 # Scout Overextension Guards + Outcome Feedback Design (2026-05-15)
 
+> **2026-05-23 갱신**: 5-22 결정론 코어 전환 후 **부분 active / 부분 재설계**. G1 outcome feedback 의 "Scout context 노출" 부분은 결정론 Scout 가 context 를 받지 않아 의미 변질 — 입력 데이터에 outcome 반영 여부는 별개로 재설계 필요. G2 archive, G3/G4 backlog 유지, G5 도입 완료. 자세한 분류 — `.ai/designs/2026-05-23-post-llm-at-core-realignment.md` §8, §9.
+
 > 본 문서는 `2026-05-15-cooldown-and-duplicate-guard.md` (audit B1/B2/C fix) 의
 > 후속. 같은 사고 (5-15 오전 -3.35M 손실) 의 **상위 원인 — scout 의 추천 패턴**
 > 자체를 다룬다. cooldown 가드는 "손절 직후 재진입" 을 막을 뿐, **"애초에 상투

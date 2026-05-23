@@ -1,5 +1,7 @@
 # G 시리즈 단순화 결정 (2026-05-17)
 
+> **2026-05-23 갱신**: 5-22 결정론 코어 전환 후 **부분 archive / 부분 재설계**. outcome_feedback (구 G1) 의 Scout context 노출은 의미 변질, same_day_cooldown (구 G5) 은 도입 완료, thesis_aware_hold (구 G6) 는 출처 끊김으로 재설계 필요. 자세한 분류와 thesis 줄기의 세 갈래 (A/B/C) — `.ai/designs/2026-05-23-post-llm-at-core-realignment.md` §8.2, §9.
+
 > 1주일 (5-10 ~ 5-17) 만에 G1~G6 명명 + 두 design v3.1 + Pre-flight + Phase
 > A/B/C + catalog 8종 + 4-state + fail 정책 5종 등 doc 비대화. **doc 의 정밀도가
 > 운영의 정밀도를 앞지름** — 본 doc 으로 재정립 + 단순화.

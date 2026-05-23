@@ -1,5 +1,7 @@
 # Cooldown 가드 + B2/C Advisory Design (2026-05-15)
 
+> **2026-05-23 갱신**: 5-22 결정론 코어 전환 후에도 **active**. L1 enforcement 는 fast_loop 에 도입 완료, L2 advisory 는 event_log 적재 정상. 자세한 배경 — `.ai/designs/2026-05-23-post-llm-at-core-realignment.md` §8.1, §9.
+
 > 본 문서는 `.ai/designs/2026-05-14-agent-coordinator.md` §5 의 정책 B2/C 를
 > 오늘 (5-15) 실제 손실 케이스를 트리거로 **immediate hotfix + Stage 2 advisory**
 > 두 layer 로 구체화한다.

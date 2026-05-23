@@ -46,6 +46,20 @@
 
 핵심 원칙은 누적의 두 층을 강제로 분리하는 것이다. 하나는 결정론 코드가 추출한 수치적 사실만 누적하는 층이다. 종가, 거래량, 이격도, 외국인 수급 변화 같은 것들이다. LLM 이 쓰지 않으므로 한쪽으로 표류하지 않는다. 다른 하나는 LLM 이 매 호출에서 그 사실 위에 새로 해석을 만드는 층이다. 이 해석은 다음 호출에 넘기지 않고 휘발시킨다. 어제 LLM 이 만든 해석이 오늘 LLM 의 입력이 되는 순간이 가장 위험하므로 그 경로 자체를 막는다.
 
+### 5.1 thesis 추적이 이 PoC 안에 합쳐졌다 (2026-05-24)
+
+5-22 결정론 코어 전환으로 옛 G6 thesis-aware exit 의 출처 (Scout LLM 이 발행하던 자연어 thesis 와 critical_conditions) 가 끊겼다. 동기는 살아있다 — hold/exit 결정이 시장 변화에 무관하다는 5-15 사고의 두 결손 중 한쪽이다. 5-23 큰 그림 재정렬에서 세 갈래 (7 팩터 시계열만 / 별도 LLM thesis 채널 / 본 PoC 의 Fact layer 흡수) 중 마지막을 선택했다 (`2026-05-23-post-llm-at-core-realignment.md` §8.2, §10).
+
+흡수의 의미는 단순하다. thesis 신호를 별도 layer 로 두지 않고, 본 PoC 가 만드는 사실 누적 안에 (7 팩터 시계열, 섹터 상대 강도, 거래량 변동, 뉴스 이벤트 발생 같은) 그 신호의 출처를 함께 둔다. LLM 해석은 매 호출 휘발이라는 원칙은 그대로다. 즉 thesis 평가도 매 호출 휘발성으로 만들어지고, 다음 날 다시 사실 위에서 새로 만들어진다.
+
+### 5.2 두 설계 원칙 — 다중 horizon, advisory 출발
+
+(C) 결정 시점에 사용자가 두 의문을 제기했고 답이 PoC 의 두 원칙으로 들어왔다.
+
+**다중 horizon 과 지속성** — 일별 점수 변동은 노이즈가 크다. 한 시점 값이 아니라 1 일·3 일·5 일 변화를 함께 보고, 변화의 지속성 (사흘 연속 음의 변화 같은 것) 을 신호로 쓴다. 임계값은 사전에 박아 두지 않고 본 PoC 의 30 일 표본 (25 종목 × 30 거래일 = 750 매일 결정) 위에서 사후 검증한다. §8 의 Kill criteria 중 stability 항목이 이 검증의 베이스다.
+
+**thesis 신호는 exit 결정을 단독으로 내리지 않는다** — 옛 G6 Phase 2 enforce 의 default 였던 "thesis invalidated → forced_liquidation" 은 이익을 보고 있는 포지션을 강제로 끊을 수 있다. PoC 안에서는 thesis 신호가 Coordinator 의 advisory event 로만 나가고, exit 결정은 fixed_sl·trailing_tp·breakeven·thesis_invalidated 네 신호를 종합하는 별도 결정론 layer 가 내린다. 이익 구간에선 trailing_tp 가 우선이고, thesis 무너짐은 trailing 임계값을 좁히는 방향으로만 작용한다. enforce 단계는 PoC 의 사후 검증으로 thesis_invalidated 의 outcome 예측력이 강하다는 결과가 나오면 그때 별도 결정한다. 그 전엔 advisory 만이 default 다.
+
 ## 6. 실험 설계
 
 실험은 격리된 그림자 평가만으로 한다. 실제 매매에는 영향을 주지 않는다. 인프라 의존성 0 으로 시작한다. 사실 누적은 기존 PostgreSQL 의 SQL view 로 충분히 구성된다.

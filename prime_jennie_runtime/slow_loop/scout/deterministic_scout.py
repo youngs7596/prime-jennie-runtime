@@ -136,7 +136,7 @@ def _assign_strategy_tag(candidate: EnrichedCandidate) -> str:
     v3 ScreeningCandidate 는 strategy_tag 필수 → 단순 결정론 룰로 배정한다.
 
     룰 근거:
-      - RSI ≤ 35 (과매도): 반등 후보 → MEAN_REVERT_RSI
+      - RSI ≤ 30 (과매도): 반등 후보 → MEAN_REVERT_RSI
       - 최근 30일 forward EPS 상향(eps_revision_pct ≥ 5): 실적 모멘텀 → EARNINGS_DRIFT
       - 그 외: 다팩터 추세 복합 → SECTOR_MOMENTUM (기본값)
     GAP_UP_REBOUND 은 장중 갭 정보가 필요 — 결정론 일봉 스코어러는 배정하지 않음.
@@ -144,7 +144,7 @@ def _assign_strategy_tag(candidate: EnrichedCandidate) -> str:
     prices = candidate.daily_prices
     if len(prices) >= 15:
         rsi = _compute_rsi([p.close_price for p in prices], period=14)
-        if rsi is not None and rsi <= 35:
+        if rsi is not None and rsi <= 30:
             return "MEAN_REVERT_RSI"
     cons = candidate.consensus
     if cons is not None and cons.eps_revision_pct is not None and cons.eps_revision_pct >= 5:

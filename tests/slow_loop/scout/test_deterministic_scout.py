@@ -89,7 +89,7 @@ def _quant(code: str = "005930", total: float = 55.0) -> QuantScore:
 
 class TestAssignStrategyTag:
     def test_oversold_rsi_to_mean_revert(self):
-        """강한 하락추세(RSI≤35) → MEAN_REVERT_RSI."""
+        """강한 하락추세(RSI≤30) → MEAN_REVERT_RSI."""
         closes = [300 - i * 3 for i in range(30)]  # 단조 하락
         assert _assign_strategy_tag(_candidate(closes=closes)) == "MEAN_REVERT_RSI"
 
@@ -108,6 +108,25 @@ class TestAssignStrategyTag:
         """과매도가 eps_revision 보다 우선."""
         closes = [300 - i * 3 for i in range(30)]
         cand = _candidate(closes=closes, consensus=ConsensusInfo(eps_revision_pct=10.0))
+        assert _assign_strategy_tag(cand) == "MEAN_REVERT_RSI"
+
+    def test_rsi_between_30_and_35_not_mean_revert(self, monkeypatch):
+        """RSI 30 < x ≤ 35 구간은 MEAN_REVERT_RSI 아님 (2026-05-24 정정).
+
+        옛 prompt 가이드의 RSI ≤ 30 임계로 정렬.
+        """
+        from prime_jennie_runtime.slow_loop.scout import deterministic_scout
+
+        monkeypatch.setattr(deterministic_scout, "_compute_rsi", lambda *a, **kw: 32.0)
+        cand = _candidate(closes=[100 + i for i in range(30)])
+        assert _assign_strategy_tag(cand) == "SECTOR_MOMENTUM"
+
+    def test_rsi_30_boundary_is_mean_revert(self, monkeypatch):
+        """RSI = 30 boundary 는 MEAN_REVERT_RSI (inclusive)."""
+        from prime_jennie_runtime.slow_loop.scout import deterministic_scout
+
+        monkeypatch.setattr(deterministic_scout, "_compute_rsi", lambda *a, **kw: 30.0)
+        cand = _candidate(closes=[100 + i for i in range(30)])
         assert _assign_strategy_tag(cand) == "MEAN_REVERT_RSI"
 
     def test_short_data_no_rsi_default(self):

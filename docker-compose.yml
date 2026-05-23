@@ -397,6 +397,7 @@ services:
       dockerfile: infra/docker/Dockerfile.dashboard
     environment:
       <<: *common-env
+      KIS_GATEWAY_URL: http://kis-gateway:8080
       DASHBOARD_CORS_ORIGINS: ${DASHBOARD_CORS_ORIGINS:-http://localhost:5173}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:

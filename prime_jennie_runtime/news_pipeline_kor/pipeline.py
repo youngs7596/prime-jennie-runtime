@@ -28,6 +28,7 @@ from .crawler import NewsCrawler
 from .dedup import NewsDeduplicator
 from .models import NewsArticle, NewsEvent
 from .sentiment import EventExtractor
+from .shadow_agent import NewsAgentShadow, ShadowResult
 from .storage import EventRepo
 from .stream import (
     BLOCK_MS,
@@ -69,12 +70,18 @@ async def _ensure_group_async(redis_client: Any, stream: str, group: str) -> Non
 
 @dataclass
 class NewsPipeline:
-    """collect + extract 2 stage. app.py 가 2 async loop 로 호출."""
+    """collect + extract 2 stage. app.py 가 2 async loop 로 호출.
+
+    Phase 1 shadow: ``shadow_agent`` 가 주입되면 extract 단계에서 기존 extractor 와
+    병렬 호출되어 결과를 ``NewsEvent.shadow_metadata`` 에 부착. shadow 실패는 silent
+    (운영 영향 0).
+    """
 
     crawler: NewsCrawler
     deduplicator: NewsDeduplicator
     extractor: EventExtractor
     event_repo: EventRepo
+    shadow_agent: NewsAgentShadow | None = None
     _groups_ensured: bool = False
 
     async def ensure_streams(self, redis_client: Any) -> None:
@@ -219,8 +226,22 @@ class NewsPipeline:
         if not to_extract:
             return stats
 
-        results: list[NewsEvent | BaseException] = await asyncio.gather(
-            *(self._extract_one(a) for _, a in to_extract),
+        # 기존 extractor + shadow agent (있으면) 병렬. 같은 article 에 대해 2 LLM
+        # 호출을 한 번에 발사 → throughput. shadow 실패는 silent.
+        async def _extract_pair(article: NewsArticle) -> tuple[NewsEvent, ShadowResult | None]:
+            extractor_task = self._extract_one(article)
+            if self.shadow_agent is not None:
+                shadow_task = self._shadow_one(article)
+                event, shadow = await asyncio.gather(extractor_task, shadow_task)
+            else:
+                event = await extractor_task
+                shadow = None
+            if shadow is not None:
+                event.shadow_metadata = shadow.to_metadata()
+            return event, shadow
+
+        results: list[tuple[NewsEvent, ShadowResult | None] | BaseException] = await asyncio.gather(
+            *(_extract_pair(a) for _, a in to_extract),
             return_exceptions=True,
         )
 
@@ -229,8 +250,9 @@ class NewsPipeline:
             if isinstance(result, BaseException):
                 stats.errors.append(f"extract:{article.article_id}:{result}")
             else:
+                event, _shadow = result
                 try:
-                    await self.event_repo.upsert(result, article=article)
+                    await self.event_repo.upsert(event, article=article)
                     stats.extracted += 1
                 except Exception as e:
                     stats.errors.append(f"upsert:{article.article_id}:{type(e).__name__}:{e}")
@@ -248,6 +270,15 @@ class NewsPipeline:
 
     async def _extract_one(self, article: NewsArticle) -> NewsEvent:
         return await self.extractor.extract(article)
+
+    async def _shadow_one(self, article: NewsArticle) -> ShadowResult | None:
+        """shadow agent 호출. 어떤 예외도 silent — 운영 path 와 격리."""
+        assert self.shadow_agent is not None
+        try:
+            return await self.shadow_agent.extract(article)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("shadow agent failed article=%s: %s", article.article_id, e)
+            return None
 
 
 async def _read_group(

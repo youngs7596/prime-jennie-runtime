@@ -37,6 +37,7 @@ from .adapters.naver_crawler import NaverNewsCrawler
 from .adapters.pg_event_repo import PostgresEventRepo
 from .dedup import RedisDeduplicator
 from .pipeline import NewsPipeline
+from .shadow_agent import NewsAgentShadow
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,13 @@ async def _build_pipeline(
         api_base=vllm_llm_url,
         extra_kwargs={"api_key": "not-needed"},
     )
+    # Phase 1 shadow — design `.ai/designs/2026-05-23-news-agent.md` §6.
+    # 같은 vLLM endpoint, 별도 prompt. shadow_metadata 로 운영 영향 없이 기록.
+    shadow_agent = NewsAgentShadow(
+        model=f"openai/{vllm_llm_model}",
+        api_base=vllm_llm_url,
+        extra_kwargs={"api_key": "not-needed"},
+    )
 
     pool = await asyncpg.create_pool(
         host=cfg.postgres.host,
@@ -88,6 +96,7 @@ async def _build_pipeline(
         deduplicator=dedup,
         extractor=extractor,
         event_repo=event_repo,
+        shadow_agent=shadow_agent,
     )
     return pipeline, sync_redis_client, pool
 

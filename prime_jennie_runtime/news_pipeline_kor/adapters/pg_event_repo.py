@@ -20,8 +20,8 @@ _EVENT_UPSERT = (
     "INSERT INTO news_events "
     "(article_id, ticker, published_at, event_type, impact_level, sentiment, "
     " sentiment_score, time_horizon, keywords, sector_tags, financial_signals, "
-    " confidence, model, analyzed_at) "
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14) "
+    " confidence, shadow_metadata, model, analyzed_at) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13::jsonb, $14, $15) "
     "ON CONFLICT (article_id) DO UPDATE SET "
     "ticker=EXCLUDED.ticker, "
     "published_at=EXCLUDED.published_at, "
@@ -34,6 +34,7 @@ _EVENT_UPSERT = (
     "sector_tags=EXCLUDED.sector_tags, "
     "financial_signals=EXCLUDED.financial_signals, "
     "confidence=EXCLUDED.confidence, "
+    "shadow_metadata=COALESCE(EXCLUDED.shadow_metadata, news_events.shadow_metadata), "
     "model=EXCLUDED.model, "
     "analyzed_at=EXCLUDED.analyzed_at, "
     "updated_at=NOW()"
@@ -82,6 +83,9 @@ class PostgresEventRepo:
             )
 
         signals_json = json.dumps([s.model_dump() for s in event.financial_signals])
+        shadow_json = (
+            json.dumps(event.shadow_metadata) if event.shadow_metadata is not None else None
+        )
         await self.conn.execute(
             _EVENT_UPSERT,
             event.article_id,
@@ -96,6 +100,7 @@ class PostgresEventRepo:
             list(event.sector_tags),
             signals_json,
             float(event.confidence),
+            shadow_json,
             event.model,
             event.analyzed_at,
         )

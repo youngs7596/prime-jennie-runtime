@@ -110,5 +110,9 @@ class NewsEvent(BaseModel):
     financial_signals: list[FinancialSignal] = Field(default_factory=list)
     confidence: Annotated[float, Field(ge=0.0, le=1.0)] = 0.5
 
+    # Phase 1 (shadow) News Agent 출력. {tickers, ticker_rationales,
+    # is_market_general, confidence, model, analyzed_at}. None 이면 shadow 미수행/실패.
+    shadow_metadata: dict | None = None
+
     model: str = "stub"
     analyzed_at: datetime

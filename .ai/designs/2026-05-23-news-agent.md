@@ -143,28 +143,55 @@ CREATE INDEX news_event_tickers_ticker_recent_idx
   단 dedup 약점으로 다수 false ticker 가 이미 저장됨 → backfill 시 Agent 재실행이
   가장 깔끔. 대규모 일감이라 별도 task 로 분리 (Phase 2 진입 직전)
 
-## 5. Pre-flight (gate)
+## 5. Pre-flight (gate, 사람 라벨 없음)
 
-### 5.1 측정 protocol
+### 5.1 한계 인지
 
-- **샘플**: 최근 5 거래일 news_articles 중 무작위 50건 + manual 라벨 10건 (false
-  positive 사례 강제 포함: SK온 7-ticker / 삼성물산-신한지주 / 압구정-신한지주)
-- **라벨**: 사람이 진짜 ticker 정답 부여 (저자 직접)
-- **비교**: Agent 실행 → `tickers` 출력 vs 정답
-- **지표**:
-  - precision (Agent 가 emit 한 ticker 중 진짜 비율)
-  - recall (정답 ticker 중 Agent 가 잡은 비율)
-  - 일반 시장 뉴스 (정답 tickers=[]) 의 false attribution rate
+사람 ground truth 없이는 정확한 precision/recall 측정 불가. 본 protocol 은
+**proxy metric** 으로 false positive 차단 효과를 정량화. proxy 의 노이즈는
+±5%p 수준 — gate 통과 = "false positive 가 대부분 제거됐다" 의 약한 보장.
 
-### 5.2 Gate 임계
+진짜 검증은 Phase 1 shadow 운영의 일별 disagreement 사례를 사용자가 spot-check
+하면서 자연스럽게 이뤄짐.
 
-- precision ≥ 0.90, recall ≥ 0.80 → Phase 1 (shadow) 진입 허용
-- 미달 시 prompt 개선 / universe context 조정 / 본문 토큰 확장 등 반복
+### 5.2 샘플
 
-### 5.3 Pre-flight 산출물
+- 50건: 최근 5 거래일 `news_articles` 무작위 추출. event_type 분포가 한 종류에
+  쏠리지 않게 stratified random (event_type 분류된 news_events 기준)
+- 10건: 알려진 false positive cluster 강제 포함. SQL 로 `article_id` 가 N(≥3) 개
+  ticker 와 매핑된 row 들 중 상위 N 케이스 sampling. SK온 cluster / 삼성물산
+  cluster / 압구정 cluster 포함
 
-`.ai/analyses/2026-05-XX-news-agent-preflight.md` — 라벨 데이터 + 측정 결과 + gate
-판정 기록. 추후 회귀 baseline.
+### 5.3 Agent (Pre-flight 전용 minimal)
+
+정식 Agent 구현 전이라 Pre-flight 는 다음으로 대체:
+
+- 기존 `LiteLLMEventExtractor` 의 prompt 를 확장한 사본 (스크립트 내부)
+- 신규 출력 필드: `tickers: list[str]`, `ticker_rationales: dict[str, str]`
+- prompt 에 `종목코드: {ticker}` 라인 제거 → LLM 입력 bias 차단
+- prompt 에 universe 가이드: "한국 상장사 종목명/별칭을 인지하여 tickers 에 매핑"
+
+Pre-flight 가 통과되면 본 변경을 정식 Agent 로 승격.
+
+### 5.4 Metric
+
+| # | 이름 | 정의 | 목표 |
+|---|---|---|---|
+| 1 | **Title-coverage rate** | Agent 의 tickers 중 stock_name 또는 별칭이 title+body 에 substring 등장하는 비율 | ≥ 0.95 |
+| 2 | **Cluster reduction** | 알려진 FP cluster 10건의 Agent 출력 ticker 수 평균 | ≤ 1.5 (원 cluster 평균 ~5) |
+| 3 | **Cross-LLM sanity** (10건 한정) | Agent (Qwen3) tickers ∩ Claude Sonnet (또는 DeepSeek) tickers / union | ≥ 0.80 |
+| 4 | **Crawler overlap** (information only) | Agent tickers ∩ crawler ticker 의 비율. 낮을수록 Agent 가 기존과 다른 판단 | gate 아님, 기록만 |
+
+### 5.5 Gate 결정
+
+- Metric 1 ≥ 0.95 **AND** Metric 2 ≤ 1.5 → Phase 1 (shadow) 진입
+- Metric 3 < 0.80 시 prompt 개선 후 재실행 (gate 통과 못해도 Phase 1 진입은 1·2 만으로 결정)
+- Metric 4 는 정보 — Phase 1 shadow 일별 disagreement 분석의 초기값
+
+### 5.6 산출물
+
+`.ai/analyses/2026-05-23-news-agent-preflight.md` — 60 sample 라벨링 결과, 4
+metric 값, gate 판정, 대표 disagreement 사례 5건 분석. 추후 회귀 baseline.
 
 ## 6. Phase
 

@@ -258,9 +258,7 @@ async def run() -> None:
 
         risk_throttle = IntradayRiskThrottle(redis_client)
         await risk_throttle.load_state()
-        snapshot_fetcher = RuntimeMarketSnapshotFetcher(
-            http=http_client, redis_client=redis_client, pool=pool
-        )
+        snapshot_fetcher = RuntimeMarketSnapshotFetcher(http=http_client, redis_client=redis_client)
         risk_publisher = TypedStreamPublisher(
             redis_client, STREAM_NOTIFICATIONS, RiskLevelChangeNotification
         )

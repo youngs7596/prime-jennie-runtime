@@ -117,7 +117,6 @@ async def test_sox_floor_through_update(fake_redis, clock):
         kospi_pct=0.0,
         vix=20.0,
         sox_pct=-2.5,
-        council_mult=1.0,
     )
     assert result.level == "CAUTION"
     assert result.intraday_multiplier == 0.8
@@ -284,29 +283,6 @@ async def test_no_skip_levels_critical_to_normal(fake_redis, clock):
 
 
 # =====================================================================
-# 6. min() 역전 방지 — council_final
-# =====================================================================
-
-
-@pytest.mark.asyncio
-async def test_council_final_takes_min_council_lower(fake_redis, clock):
-    """council=0.5, intraday=1.0 → final=0.5."""
-    throttle = IntradayRiskThrottle(fake_redis, clock=clock)
-    r = await throttle.update(kospi_pct=0.0, vix=20.0, council_mult=0.5)
-    assert r.intraday_multiplier == 1.0
-    assert r.council_final == 0.5
-
-
-@pytest.mark.asyncio
-async def test_council_final_takes_min_intraday_lower(fake_redis, clock):
-    """council=1.0, intraday=0.3 → final=0.3."""
-    throttle = IntradayRiskThrottle(fake_redis, clock=clock)
-    r = await throttle.update(kospi_pct=-3.5, vix=20.0, council_mult=1.0)
-    assert r.intraday_multiplier == 0.3
-    assert r.council_final == 0.3
-
-
-# =====================================================================
 # 7. RiskThrottleSnapshot Protocol 호환
 # =====================================================================
 
@@ -398,7 +374,7 @@ async def test_run_risk_updater_single_iteration(fake_redis, clock):
     throttle = IntradayRiskThrottle(fake_redis, clock=clock)
 
     async def fake_fetch():
-        return (-2.5, 20.0, None, 1.0)
+        return (-2.5, 20.0, None)
 
     count = await run_risk_updater(
         throttle=throttle,
@@ -422,7 +398,7 @@ async def test_run_risk_updater_swallows_fetch_errors(fake_redis, clock):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
-        return (0.0, 20.0, None, 1.0)
+        return (0.0, 20.0, None)
 
     count = await run_risk_updater(
         throttle=throttle,

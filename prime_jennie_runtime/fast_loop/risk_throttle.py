@@ -66,11 +66,10 @@ _REDIS_TTL_SEC = 86400  # 24시간
 
 @dataclass(frozen=True)
 class RiskUpdateResult:
-    """`update()` 결과 — level/multiplier 계산 + council 최종값."""
+    """`update()` 결과 — level/multiplier 계산."""
 
     level: str
     intraday_multiplier: float
-    council_final: float  # min(council_mult, intraday_mult)
     prev_level: str  # 이전 레벨 (알림 판단용)
     level_changed: bool
     raw_level: str  # SOX floor 반영 전 원시 level
@@ -175,7 +174,6 @@ class IntradayRiskThrottle:
         kospi_pct: float,
         vix: float | None,
         sox_pct: float | None = None,
-        council_mult: float = 1.0,
         now: datetime | None = None,
     ) -> RiskUpdateResult:
         """시장 지표 받아 level 계산 + 회복 지연 적용 + Redis 저장.
@@ -184,7 +182,6 @@ class IntradayRiskThrottle:
             kospi_pct: KOSPI 일중 등락률 (예: -2.5)
             vix: VIX 지수 (None이면 0.0 취급)
             sox_pct: SOX 변동률 (None이면 floor 미적용)
-            council_mult: Council 배치 multiplier (raw)
             now: 현재 시각 (None이면 clock 사용)
 
         Returns:
@@ -225,13 +222,9 @@ class IntradayRiskThrottle:
         self._current_level = new_level
         self._current_mult = intraday_mult
 
-        # 6) council 최종값 — min() 역전 방지
-        council_final = min(council_mult, intraday_mult)
-
         return RiskUpdateResult(
             level=new_level,
             intraday_multiplier=intraday_mult,
-            council_final=council_final,
             prev_level=prev_level,
             level_changed=(new_level != prev_level),
             raw_level=effective_raw_level,

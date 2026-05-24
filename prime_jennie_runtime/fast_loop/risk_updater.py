@@ -3,7 +3,7 @@
 Track C Stage 2. v2의 `_check_intraday_risk` 반복 호출 로직을 async로 포팅.
 
 구조:
-  - `fetch_snapshot` callable (async): (kospi_pct, vix, sox_pct, council_mult) 튜플 반환
+  - `fetch_snapshot` callable (async): (kospi_pct, vix, sox_pct) 튜플 반환
   - `IntradayRiskThrottle.update()` 호출
   - level 변경 시 notifier.publish(RiskLevelChangeNotification(...))
   - `asyncio.sleep(interval_sec)` 주기로 반복
@@ -23,8 +23,8 @@ from prime_jennie_runtime.infra.redis_streams import TypedStreamPublisher
 
 logger = logging.getLogger(__name__)
 
-# fetch_snapshot(): (kospi_pct, vix, sox_pct, council_mult)
-SnapshotFetcher = Callable[[], Awaitable[tuple[float, float | None, float | None, float]]]
+# fetch_snapshot(): (kospi_pct, vix, sox_pct)
+SnapshotFetcher = Callable[[], Awaitable[tuple[float, float | None, float | None]]]
 
 
 async def run_risk_updater(
@@ -66,14 +66,13 @@ async def run_risk_updater(
             iterations += 1
             continue
 
-        kospi_pct, vix, sox_pct, council_mult = snapshot
+        kospi_pct, vix, sox_pct = snapshot
 
         try:
             result = await throttle.update(
                 kospi_pct=kospi_pct,
                 vix=vix,
                 sox_pct=sox_pct,
-                council_mult=council_mult,
                 now=_now(),
             )
         except asyncio.CancelledError:
@@ -85,15 +84,12 @@ async def run_risk_updater(
             continue
 
         logger.info(
-            "INTRADAY_RISK: level=%s, KOSPI=%.2f%%, VIX=%s, SOX=%s, "
-            "council=%.2f, intraday=%.2f, final=%.2f",
+            "INTRADAY_RISK: level=%s, KOSPI=%.2f%%, VIX=%s, SOX=%s, intraday=%.2f",
             result.level,
             kospi_pct,
             f"{vix:.1f}" if vix is not None else "N/A",
             f"{sox_pct:+.1f}%" if sox_pct is not None else "N/A",
-            council_mult,
             result.intraday_multiplier,
-            result.council_final,
         )
 
         # 레벨 변경 시 알림

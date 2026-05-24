@@ -396,6 +396,9 @@ async def run_slow_loop(
         macro_ctx.market_snapshot,
         recent_macro_runs or [],
         observer,
+        engine=comp.db_engine,
+        macro_run_id=macro_run_id,
+        as_of=as_of_dt,
     )
 
     # DB 기록 (engine=None 이면 no-op). prompt_chars 는 비용 추정용.

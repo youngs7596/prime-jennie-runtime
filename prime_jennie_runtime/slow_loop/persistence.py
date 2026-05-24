@@ -223,6 +223,27 @@ async def persist_macro_run(
         except Exception:
             logger.exception("persist_macro_run shadow merge failed: id=%s", macro_run_id)
 
+    # Reversal guard latch 메타 merge — 발동 시에만 박힌다.
+    reversal_meta = getattr(post, "reversal_meta", None)
+    if reversal_meta:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE macro_runs SET metadata_json = "
+                        "COALESCE(metadata_json, '{}'::jsonb) || CAST(:rev AS JSONB) "
+                        "WHERE macro_run_id = :id"
+                    ),
+                    {
+                        "id": macro_run_id,
+                        "rev": json.dumps(
+                            {"reversal_guard": reversal_meta}, ensure_ascii=False, default=str
+                        ),
+                    },
+                )
+        except Exception:
+            logger.exception("persist_macro_run reversal merge failed: id=%s", macro_run_id)
+
     await _record_macro_llm_stats(
         redis_client, meta, prompt_chars, out_chars, cost, shadow_result, generated_at
     )

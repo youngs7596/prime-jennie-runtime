@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from minyoung_mah import CollectingObserver
 
+from prime_jennie_runtime.slow_loop.macro import post_processor as pp
 from prime_jennie_runtime.slow_loop.macro.closed_conditions import check_closed_conditions
 from prime_jennie_runtime.slow_loop.macro.post_processor import run_post_processing
 from prime_jennie_runtime.slow_loop.macro.schemas import (
@@ -229,3 +230,192 @@ async def test_sector_contagion_triggers_override():
     result = await run_post_processing(raw, snap, [], obs)
     assert result.auto_override_applied is True
     assert "sector_contagion" in result.closed_triggers
+
+
+# =====================================================================
+# Phase 0 #3: reversal_guard — 같은 KST 거래일 closed → open 역행 차단
+# =====================================================================
+
+
+class _FakeEngine:
+    """post_processor 의 reversal_guard 가 engine 을 sentinel 로만 쓰는지 확인용.
+
+    실제 PG 조회는 monkeypatch 로 _fetch_closed_row_today 를 치환해 우회한다.
+    """
+
+
+def _stub_fetch(row: dict | None):
+    async def _f(engine, *, current_run_id, as_of):
+        return row
+
+    return _f
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_latches_open_to_closed_when_today_closed_exists(monkeypatch):
+    """같은 KST 거래일에 closed row 가 있고 현재 LLM 이 open → closed/0 으로 latch."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    latched_at = datetime(2026, 5, 25, 11, 40, tzinfo=UTC)
+    monkeypatch.setattr(
+        pp,
+        "_fetch_closed_row_today",
+        _stub_fetch({"macro_run_id": "mr_20260525_1140_abc", "generated_at": latched_at}),
+    )
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_20260525_1342_xyz",
+        as_of=datetime(2026, 5, 25, 13, 42, tzinfo=UTC),
+    )
+
+    assert result.reversal_latched is True
+    assert result.output.gate == "closed"
+    assert result.output.size_multiplier == 0.0
+    assert result.reversal_meta is not None
+    assert result.reversal_meta["original_gate"] == "open"
+    assert result.reversal_meta["latched_from_macro_run_id"] == "mr_20260525_1140_abc"
+    events = _find_events(obs, "pj.macro.reversal_guard")
+    assert events
+    assert events[0].metadata["latched_from_macro_run_id"] == "mr_20260525_1140_abc"
+    # 자동 closed 이벤트도 같이 발행되어야 한다 (current.gate == closed).
+    assert _find_events(obs, "pj.macro.gate_closed")
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_noop_when_no_closed_today(monkeypatch):
+    """같은 거래일에 closed row 가 없으면 latch 미발동, open 유지."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    monkeypatch.setattr(pp, "_fetch_closed_row_today", _stub_fetch(None))
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_20260525_1142_a",
+        as_of=datetime(2026, 5, 25, 11, 42, tzinfo=UTC),
+    )
+
+    assert result.reversal_latched is False
+    assert result.reversal_meta is None
+    assert result.output.gate == "open"
+    assert _find_events(obs, "pj.macro.reversal_guard") == []
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_disabled_env_bypass(monkeypatch):
+    """MACRO_REVERSAL_GUARD_DISABLED=1 이면 closed row 가 있어도 latch 미발동."""
+    monkeypatch.setenv("MACRO_REVERSAL_GUARD_DISABLED", "1")
+    fetch_called = {"count": 0}
+
+    async def _f(engine, *, current_run_id, as_of):
+        fetch_called["count"] += 1
+        return {"macro_run_id": "should_not_be_used", "generated_at": datetime.now(UTC)}
+
+    monkeypatch.setattr(pp, "_fetch_closed_row_today", _f)
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_test",
+        as_of=datetime(2026, 5, 25, 13, 42, tzinfo=UTC),
+    )
+
+    assert result.reversal_latched is False
+    assert result.output.gate == "open"
+    # bypass env 면 DB 조회 자체를 안 한다 (early return).
+    assert fetch_called["count"] == 0
+    assert _find_events(obs, "pj.macro.reversal_guard") == []
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_skip_when_engine_missing(monkeypatch):
+    """engine 미주입 (smoke/unit) 이면 latch skip — fetch 호출 자체 안 일어남."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    fetch_called = {"count": 0}
+
+    async def _f(engine, *, current_run_id, as_of):  # pragma: no cover - 이 경로는 호출되면 안 됨
+        fetch_called["count"] += 1
+        return None
+
+    monkeypatch.setattr(pp, "_fetch_closed_row_today", _f)
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(raw, _normal_snapshot(), [], obs)
+
+    assert result.reversal_latched is False
+    assert fetch_called["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_skip_when_current_already_closed(monkeypatch):
+    """현재 LLM 이 이미 closed 면 latch 의미 없으므로 fetch 안 함."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    fetch_called = {"count": 0}
+
+    async def _f(engine, *, current_run_id, as_of):  # pragma: no cover
+        fetch_called["count"] += 1
+        return None
+
+    monkeypatch.setattr(pp, "_fetch_closed_row_today", _f)
+
+    obs = CollectingObserver()
+    raw = _output(gate="closed", size=0.0)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_test",
+        as_of=datetime(2026, 5, 25, 13, 42, tzinfo=UTC),
+    )
+
+    assert result.reversal_latched is False
+    assert result.output.gate == "closed"
+    assert fetch_called["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_after_auto_override_no_double_latch(monkeypatch):
+    """auto_override 가 먼저 closed 로 바꿔두면 latch 는 다시 안 박힌다."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    monkeypatch.setattr(
+        pp,
+        "_fetch_closed_row_today",
+        _stub_fetch({"macro_run_id": "mr_prev_closed", "generated_at": datetime.now(UTC)}),
+    )
+
+    snap = _normal_snapshot().model_copy(update={"usd_krw_change_pct": 0.035})
+    assert "fx_shock" in check_closed_conditions(snap)
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        snap,
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_test",
+        as_of=datetime(2026, 5, 25, 13, 42, tzinfo=UTC),
+    )
+
+    assert result.auto_override_applied is True
+    assert result.reversal_latched is False  # auto_override 가 이미 처리
+    assert result.output.gate == "closed"

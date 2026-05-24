@@ -329,6 +329,7 @@ def make_invoker(
     `run_slow_loop_fn` 은 보통 `prime_jennie_runtime.slow_loop.pipeline.run_slow_loop`
     이지만 테스트에선 mock 주입.
     """
+    from .history_query import fetch_recent_macro_runs
 
     async def _invoker(macro_trigger: str) -> None:
         now = (clock or (lambda: datetime.now(tz=KST)))()
@@ -343,12 +344,17 @@ def make_invoker(
             macro_run_id,
             scout_run_id,
         )
+        db_engine = getattr(components, "db_engine", None)
+        recent_macro_runs = (
+            await fetch_recent_macro_runs(db_engine) if db_engine is not None else []
+        )
         await run_slow_loop_fn(
             components,
             as_of_date=as_of_date,
             as_of_dt=now,
             macro_run_id=macro_run_id,
             scout_run_id=scout_run_id,
+            recent_macro_runs=recent_macro_runs,
             macro_trigger=macro_trigger,
             scout_trigger=macro_trigger,
         )

@@ -67,6 +67,7 @@ from .macro.feeders.stub import (
     StubMarketSnapshotFeeder,
     StubWsjDigestFeeder,
 )
+from .macro.history_query import fetch_recent_macro_runs
 from .macro.role import MacroGateRole
 from .macro.state_store import MacroStateStore
 from .macro.trigger_watcher import (
@@ -371,12 +372,18 @@ async def run() -> None:
                 macro_run_id,
                 scout_run_id,
             )
+            recent_macro_runs = (
+                await fetch_recent_macro_runs(components.db_engine)
+                if components.db_engine is not None
+                else []
+            )
             result = await run_slow_loop(
                 components,
                 as_of_date=as_of_date,
                 as_of_dt=now,
                 macro_run_id=macro_run_id,
                 scout_run_id=scout_run_id,
+                recent_macro_runs=recent_macro_runs,
                 macro_trigger=f"scheduled:{trigger}",
                 scout_trigger=f"scheduled:{trigger}",
             )

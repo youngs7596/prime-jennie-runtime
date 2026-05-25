@@ -71,6 +71,68 @@ async def test_history_from_daily_asset_snapshots(app, session_factory):
         assert body[2]["total_asset"] == 199500000
 
 
+async def test_summary_sector_group_and_etf_classification(app, session_factory):
+    """positions 응답의 sector_group: stock_masters lookup + ETF prefix 분기."""
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO stock_masters "
+                "(stock_code, stock_name, market, sector_group) "
+                "VALUES "
+                "('005930', '삼성전자', 'KOSPI', '반도체/IT'), "
+                "('051910', 'LG화학', 'KOSPI', '2차전지/소재'), "
+                "('069500', 'KODEX 200', 'KOSPI', '기타')"
+            )
+        )
+        await session.commit()
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(url__regex=r".*/balance$").mock(
+            return_value=Response(
+                200,
+                json={
+                    "cash_balance": 0,
+                    "total_asset": 0,
+                    "stock_eval_amount": 0,
+                    "positions": [
+                        {
+                            "stock_code": "005930",
+                            "stock_name": "삼성전자",
+                            "quantity": 10,
+                            "average_buy_price": 70000.0,
+                            "total_buy_amount": 700000.0,
+                        },
+                        {
+                            "stock_code": "069500",
+                            "stock_name": "KODEX 200",
+                            "quantity": 100,
+                            "average_buy_price": 35000.0,
+                            "total_buy_amount": 3500000.0,
+                        },
+                        {
+                            "stock_code": "999999",
+                            "stock_name": None,
+                            "quantity": 5,
+                            "average_buy_price": 1000.0,
+                            "total_buy_amount": 5000.0,
+                        },
+                    ],
+                },
+            )
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/portfolio/summary")
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            by_code = {p["stock_code"]: p for p in body["positions"]}
+            # stock_masters 의 sector_group 그대로
+            assert by_code["005930"]["sector_group"] == "반도체/IT"
+            # ETF prefix 우선 — stock_masters 값 무시되고 'ETF'
+            assert by_code["069500"]["sector_group"] == "ETF"
+            # stock_masters 에 없고 ETF 도 아니면 None
+            assert by_code["999999"]["sector_group"] is None
+
+
 async def test_history_empty_when_no_rows(app):
     """daily_asset_snapshots 비어있으면 빈 리스트."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

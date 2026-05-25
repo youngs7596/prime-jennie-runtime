@@ -23,7 +23,7 @@ import httpx
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..deps import get_redis, get_session
@@ -43,6 +43,7 @@ class Position(BaseModel):
     current_value: float | None = None
     profit_pct: float | None = None
     strategy_tag: str | None = None
+    sector_group: str | None = None
 
 
 class PortfolioState(BaseModel):
@@ -69,6 +70,44 @@ class DailySnapshot(BaseModel):
     cash_balance: int
     stock_eval_amount: int
     realized_profit_loss: int | None = None
+
+
+# KOSPI / KOSDAQ 상장 ETF 발행사 prefix. stock_masters 에 type 컬럼이 없어
+# 이름 prefix 로만 식별. SectorGroup enum 에도 ETF 가 없어 별도 분기 필요.
+ETF_NAME_PREFIXES: tuple[str, ...] = (
+    "KODEX ",
+    "TIGER ",
+    "ARIRANG ",
+    "KBSTAR ",
+    "KOSEF ",
+    "HANARO ",
+    "KINDEX ",
+    "ACE ",
+    "RISE ",
+    "PLUS ",
+    "SOL ",
+    "KOACT ",
+)
+
+
+def _classify_sector_group(stock_name: str | None, sector_group: str | None) -> str | None:
+    """ETF 이면 'ETF', 아니면 stock_masters.sector_group 값 그대로."""
+    if stock_name and stock_name.startswith(ETF_NAME_PREFIXES):
+        return "ETF"
+    return sector_group
+
+
+async def _fetch_sector_groups(session: AsyncSession, codes: list[str]) -> dict[str, str | None]:
+    """stock_masters 에서 codes 의 sector_group 을 한 번에 조회."""
+    if not codes:
+        return {}
+    result = await session.execute(
+        text(
+            "SELECT stock_code, sector_group FROM stock_masters WHERE stock_code IN :codes"
+        ).bindparams(bindparam("codes", expanding=True)),
+        {"codes": codes},
+    )
+    return {row["stock_code"]: row["sector_group"] for row in result.mappings().all()}
 
 
 def _kis_gateway_url() -> str:
@@ -120,13 +159,17 @@ async def get_summary(session: AsyncSession = Depends(get_session)) -> Portfolio
         cash = int(balance.get("cash_balance", 0))
         total = int(balance.get("total_asset", 0))
         stock_eval = int(balance.get("stock_eval_amount", 0))
-        for p in balance.get("positions", []):
+        raw_positions = balance.get("positions", [])
+        codes = [p["stock_code"] for p in raw_positions]
+        sectors = await _fetch_sector_groups(session, codes)
+        for p in raw_positions:
             code = p["stock_code"]
+            stock_name = p.get("stock_name")
             sheet_meta = meta.get(code, {})
             positions.append(
                 Position(
                     stock_code=code,
-                    stock_name=p.get("stock_name"),
+                    stock_name=stock_name,
                     quantity=int(p["quantity"]),
                     average_buy_price=float(p["average_buy_price"]),
                     total_buy_amount=float(p["total_buy_amount"]),
@@ -134,6 +177,7 @@ async def get_summary(session: AsyncSession = Depends(get_session)) -> Portfolio
                     current_value=p.get("current_value"),
                     profit_pct=p.get("profit_pct"),
                     strategy_tag=sheet_meta.get("strategy_tag"),
+                    sector_group=_classify_sector_group(stock_name, sectors.get(code)),
                 )
             )
 

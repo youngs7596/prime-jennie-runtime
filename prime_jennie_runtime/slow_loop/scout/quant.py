@@ -12,8 +12,13 @@ v2 `prime_jennie/services/scout/quant.py` 의 **faithful 포팅** (2026-05-22, P
     가 size_multiplier 로부터 환산). 내부 모멘텀 로직은 v2 와 동일.
   - sector_group 은 str (v2 SectorGroup enum — quant 는 dict 키로만 사용).
 
-7개 서브팩터 (가중치 합 110, total 은 100 캡):
-  - 모멘텀 0-20 / 품질 0-20 / 가치 0-20 / 기술 0-10 / 뉴스 0-10 / 수급 0-20 / 섹터모멘텀 0-10
+7개 서브팩터 (가중치 합 100):
+  - 모멘텀 0-20 / 품질 0-20 / 가치 0-20 / 기술 0-10 / 뉴스 0-10 / 수급 0-10 / 섹터모멘텀 0-10
+
+2026-05-25 변경: 수급 가중치 20 → 10. 5-22 이후 결정론 코어가 거래대금 큰 대형주에
+자동 쏠려 v2 winners (자동차/항공/통신/산업재) 가 top 25 에 못 들어오던 문제를 잡기 위해
+sub-score 의 외인·기관·외인비율 버킷 모두 절반으로 축소. SQL `supply_demand × 0.5`
+시뮬레이션 (5-25 분석) 과 동일한 효과. 가중치 합 110/100 미스매치도 함께 해소.
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ class QuantScore(BaseModel):
     value_score: float = 0.0  # 0-20
     technical_score: float = 0.0  # 0-10
     news_score: float = 0.0  # 0-10
-    supply_demand_score: float = 0.0  # 0-20
+    supply_demand_score: float = 0.0  # 0-10 (2026-05-25 20→10 축소)
     sector_momentum_score: float = 0.0  # 0-10
     is_valid: bool = True
     invalid_reason: str | None = None
@@ -69,28 +74,29 @@ class QuantScore(BaseModel):
         return self
 
 
-# ─── v2 가중치 ───────────────────────────────────────────────────
-# NOTE (faithful port): v2 의 가중치 합은 20+20+20+10+10+20+10 = 110 이지만
-# total 은 min(100, ...) 으로 캡된다. v2 teardown §3 이 지적한 110/100 미스매치를
-# 그대로 이식한다 — 가중치 조정은 선정 거동 변경이라 순수 포팅과 분리(follow-up 후보).
+# ─── 가중치 ──────────────────────────────────────────────────────
+# 2026-05-25: 수급 20 → 10 축소. v2 의 110/100 미스매치는 같이 해소 (합 100).
+# 근거: 5-25 분석 메모리 (project_2026_05_25_selection_analysis) — v3 promoted
+# 종목의 supply_demand 평균이 universe 평균보다 +3.5 높아 거래대금 큰 대형주로
+# 자동 쏠림. v2 winners 의 supply_demand 평균은 universe 평균과 거의 같았음.
 V2_WEIGHTS = {
     "momentum": 20,
     "quality": 20,
     "value": 20,
     "technical": 10,
     "news": 10,
-    "supply_demand": 20,
+    "supply_demand": 10,
     "sector_momentum": 10,
 }
 
-# ─── v2 기본값 (데이터 없을 때) ──────────────────────────────────
+# ─── 기본값 (데이터 없을 때) ────────────────────────────────────
 V2_NEUTRAL = {
     "momentum": 10.0,
     "quality": 10.0,
     "value": 10.0,
     "technical": 5.0,
     "news": 5.0,
-    "supply_demand": 10.0,
+    "supply_demand": 5.0,
     "sector_momentum": 5.0,
 }
 
@@ -409,45 +415,48 @@ def _sector_momentum_score(candidate: EnrichedCandidate) -> float:
 
 
 def _supply_demand_score(candidate: EnrichedCandidate) -> float:
-    """수급 점수 (0-20): 외인/기관 매수 + 외인 비율 추세."""
+    """수급 점수 (0-10): 외인/기관 매수 + 외인 비율 추세.
+
+    2026-05-25: 0-20 → 0-10 으로 절반화. 모든 sub-bucket 베이스와 계수가 절반.
+    """
     it = candidate.investor_trading
     if not it:
         return V2_NEUTRAL["supply_demand"]
 
     score = 0.0
 
-    # 외인 순매수 (0-6)
+    # 외인 순매수 (0-3)
     if it.foreign_net_buy_sum > 0:
-        score += min(6.0, 3.0 + it.foreign_net_buy_sum / 5e9 * 3.0)
+        score += min(3.0, 1.5 + it.foreign_net_buy_sum / 5e9 * 1.5)
     elif it.foreign_net_buy_sum < 0:
-        score += max(0.0, 3.0 + it.foreign_net_buy_sum / 5e9 * 3.0)
+        score += max(0.0, 1.5 + it.foreign_net_buy_sum / 5e9 * 1.5)
     else:
-        score += 3.0  # 중립
+        score += 1.5  # 중립
 
-    # 기관 순매수 (0-8)
+    # 기관 순매수 (0-4)
     if it.institution_net_buy_sum > 0:
-        score += min(8.0, 4.0 + it.institution_net_buy_sum / 5e9 * 4.0)
+        score += min(4.0, 2.0 + it.institution_net_buy_sum / 5e9 * 2.0)
     elif it.institution_net_buy_sum < 0:
-        score += max(0.0, 4.0 + it.institution_net_buy_sum / 5e9 * 4.0)
+        score += max(0.0, 2.0 + it.institution_net_buy_sum / 5e9 * 2.0)
     else:
-        score += 4.0
+        score += 2.0
 
-    # 외인 보유비율 추세 (0-6)
+    # 외인 보유비율 추세 (0-3)
     if it.foreign_ratio_trend is not None:
         if it.foreign_ratio_trend > 1.0:
-            score += 6.0
-        elif it.foreign_ratio_trend > 0.3:
-            score += 4.5
-        elif it.foreign_ratio_trend > 0:
             score += 3.0
-        elif it.foreign_ratio_trend > -0.5:
+        elif it.foreign_ratio_trend > 0.3:
+            score += 2.25
+        elif it.foreign_ratio_trend > 0:
             score += 1.5
+        elif it.foreign_ratio_trend > -0.5:
+            score += 0.75
         else:
             score += 0.0
     else:
-        score += 3.0  # 중립
+        score += 1.5  # 중립
 
-    return min(20.0, score)
+    return min(10.0, score)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────

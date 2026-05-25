@@ -138,9 +138,7 @@ class TestScoreCandidate:
                 foreign_ratio_trend=2.0,
             ),
             news_avg=95.0,
-            snapshot=StockSnapshot(
-                stock_code="005930", price=80000, high_52w=90000, low_52w=50000
-            ),
+            snapshot=StockSnapshot(stock_code="005930", price=80000, high_52w=90000, low_52w=50000),
         )
         result = score_candidate(candidate)
         assert 0 <= result.total_score <= 100
@@ -255,7 +253,7 @@ class TestSupplyDemandScore:
                 foreign_ratio_trend=1.5,
             )
         )
-        assert _supply_demand_score(candidate) >= 15.0
+        assert _supply_demand_score(candidate) >= 7.5
 
     def test_strong_selling_low_score(self):
         candidate = _make_candidate(
@@ -265,7 +263,7 @@ class TestSupplyDemandScore:
                 foreign_ratio_trend=-1.0,
             )
         )
-        assert _supply_demand_score(candidate) < 8.0
+        assert _supply_demand_score(candidate) < 4.0
 
     def test_no_data_returns_neutral(self):
         assert _supply_demand_score(_make_candidate()) == V2_NEUTRAL["supply_demand"]

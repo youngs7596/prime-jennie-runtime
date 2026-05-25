@@ -68,8 +68,8 @@ def _candidate(
     )
 
 
-def _quant(code: str = "005930", total: float = 55.0) -> QuantScore:
-    """검증 통과하는 QuantScore — 서브점수 합 55 (V2_NEUTRAL)."""
+def _quant(code: str = "005930", total: float = 50.0) -> QuantScore:
+    """검증 통과하는 QuantScore — 서브점수 합 50 (V2_NEUTRAL, 5-25 수급 절반화 반영)."""
     return QuantScore(
         stock_code=code,
         stock_name=f"종목{code}",
@@ -79,7 +79,7 @@ def _quant(code: str = "005930", total: float = 55.0) -> QuantScore:
         value_score=10.0,
         technical_score=5.0,
         news_score=5.0,
-        supply_demand_score=10.0,
+        supply_demand_score=5.0,
         sector_momentum_score=5.0,
     )
 
@@ -163,8 +163,8 @@ class TestToScreeningCandidate:
 
     def test_factors_carry_subscores(self):
         cand = _candidate(closes=[100 + i for i in range(30)])
-        sc = _to_screening_candidate(cand, _quant(total=55.0), ma_score=60.0)
-        assert sc.factors["quant_total"] == 55.0
+        sc = _to_screening_candidate(cand, _quant(total=50.0), ma_score=60.0)
+        assert sc.factors["quant_total"] == 50.0
         assert sc.factors["ma_score"] == 60.0
         assert "momentum" in sc.factors
 

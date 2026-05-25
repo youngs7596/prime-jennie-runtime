@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 import redis.asyncio as aioredis
 from minyoung_mah import Observer
 
+from prime_jennie_runtime.control.audit import record_change
 from prime_jennie_runtime.infra.observer_impl import pj_event
 from prime_jennie_runtime.infra.redis_streams import (
     STREAM_CONTROL_COMMANDS,
@@ -407,10 +408,13 @@ class ControlCommandConsumer:
 async def _emergency_stop(redis: aioredis.Redis, cmd: ControlCommand) -> None:
     await redis.set(STATE_KEY_STOP, b"1")
     await redis.set(STATE_KEY_PAUSE, (cmd.reason or "emergency_stop").encode())
+    await record_change(redis, "stop", cmd.issued_by, cmd.reason, cmd.issued_at)
+    await record_change(redis, "pause", cmd.issued_by, cmd.reason, cmd.issued_at)
 
 
 async def _pause(redis: aioredis.Redis, cmd: ControlCommand) -> None:
     await redis.set(STATE_KEY_PAUSE, (cmd.reason or "manual_pause").encode())
+    await record_change(redis, "pause", cmd.issued_by, cmd.reason, cmd.issued_at)
 
 
 async def _resume(redis: aioredis.Redis, cmd: ControlCommand) -> None:
@@ -420,6 +424,8 @@ async def _resume(redis: aioredis.Redis, cmd: ControlCommand) -> None:
     # 공존 기간에 `trading_flags:stop=1` 잔존이 confusing). docs/CONTROL_STATE_KEYS.md
     # 참조. v2 deprecate 시 두 키는 import + 본 delete 호출 모두 제거.
     await redis.delete(STATE_KEY_STOP, STATE_KEY_PAUSE, V2_KEY_STOP, V2_KEY_PAUSE)
+    await record_change(redis, "stop", cmd.issued_by, cmd.reason, cmd.issued_at)
+    await record_change(redis, "pause", cmd.issued_by, cmd.reason, cmd.issued_at)
 
 
 async def _set_dryrun(redis: aioredis.Redis, cmd: ControlCommand) -> None:
@@ -428,14 +434,17 @@ async def _set_dryrun(redis: aioredis.Redis, cmd: ControlCommand) -> None:
         await redis.set(STATE_KEY_DRYRUN, b"1")
     else:
         await redis.delete(STATE_KEY_DRYRUN)
+    await record_change(redis, "dryrun", cmd.issued_by, cmd.reason, cmd.issued_at)
 
 
 async def _liquidate_arm(redis: aioredis.Redis, cmd: ControlCommand) -> None:
     await redis.set(STATE_KEY_LIQUIDATE_ARMED, b"1")
+    await record_change(redis, "liquidate_armed", cmd.issued_by, cmd.reason, cmd.issued_at)
 
 
 async def _liquidate_disarm(redis: aioredis.Redis, cmd: ControlCommand) -> None:
     await redis.delete(STATE_KEY_LIQUIDATE_ARMED)
+    await record_change(redis, "liquidate_armed", cmd.issued_by, cmd.reason, cmd.issued_at)
 
 
 async def _liquidate_add(redis: aioredis.Redis, cmd: ControlCommand) -> None:

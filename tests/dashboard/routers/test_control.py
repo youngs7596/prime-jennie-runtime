@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from httpx import ASGITransport, AsyncClient
 
+from prime_jennie_runtime.control.audit import record_change
 from prime_jennie_runtime.infra.redis_streams import STREAM_CONTROL_COMMANDS
 
 
@@ -111,3 +113,33 @@ async def test_state_reads_redis_flags(app, redis_client):
         assert body["pause"] is False
         assert body["dryrun"] is True
         assert body["liquidate_armed"] is False
+
+
+async def test_state_includes_last_change_meta_per_flag(app, redis_client):
+    """control:audit:* hash 에 기록된 last_change 가 응답에 그대로 반영."""
+    ts = datetime(2026, 5, 24, 14, 30, tzinfo=UTC)
+    await record_change(
+        redis_client,
+        "stop",
+        "auto:slow-loop-hb-expired",
+        "slow-loop heartbeat 만료로 STOP 자동 발동",
+        timestamp=ts,
+    )
+    await record_change(
+        redis_client,
+        "dryrun",
+        "ui:alice",
+        "장중 점검",
+        timestamp=ts,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/control/state")
+        body = resp.json()
+        lc = body["last_change"]
+        assert lc["stop"]["triggered_by"] == "auto:slow-loop-hb-expired"
+        assert lc["stop"]["reason"].startswith("slow-loop heartbeat")
+        assert lc["stop"]["timestamp"] == "2026-05-24T14:30:00+00:00"
+        assert lc["dryrun"]["triggered_by"] == "ui:alice"
+        # 기록 없는 flag 는 None
+        assert lc["pause"] is None
+        assert lc["liquidate_armed"] is None

@@ -26,6 +26,7 @@ import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
+from prime_jennie_runtime.control.audit import read_all as read_audit_all
 from prime_jennie_runtime.infra.redis_streams import STREAM_CONTROL_COMMANDS, TypedStreamPublisher
 from prime_jennie_runtime.telegram_bot.control import (
     STATE_KEY_DRYRUN,
@@ -72,12 +73,21 @@ class LiquidateRequest(BaseModel):
     reason: str | None = None
 
 
+class LastChange(BaseModel):
+    timestamp: str
+    triggered_by: str
+    reason: str | None = None
+
+
 class ControlStateResponse(BaseModel):
     stop: bool
     pause: bool
     dryrun: bool
     liquidate_armed: bool
     fetched_at: datetime
+    # flag 별 마지막 변경 메타. UI 의 Control Flag 카드 audit 줄 + auto-triggered
+    # 표시에 사용. triggered_by 가 "auto:*" 로 시작하면 자동 발동.
+    last_change: dict[str, LastChange | None] = {}
 
 
 async def _publish(
@@ -172,10 +182,16 @@ async def state(redis: aioredis.Redis = Depends(get_redis)) -> ControlStateRespo
     pause_v = await redis.get(STATE_KEY_PAUSE)
     dry_v = await redis.get(STATE_KEY_DRYRUN)
     armed_v = await redis.get(STATE_KEY_LIQUIDATE_ARMED)
+    audit = await read_audit_all(redis)
+    last_change = {
+        flag: (LastChange(**data) if data and data.get("timestamp") else None)
+        for flag, data in audit.items()
+    }
     return ControlStateResponse(
         stop=bool(stop_v),
         pause=bool(pause_v),
         dryrun=bool(dry_v),
         liquidate_armed=bool(armed_v),
         fetched_at=datetime.now(UTC),
+        last_change=last_change,
     )

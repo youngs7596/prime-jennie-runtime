@@ -216,7 +216,9 @@ def build_handlers(
         await global_news_crawl_cycle(pool, http)
 
     async def h_global_news_digest(lookback_hours: int = 24) -> None:
-        await global_news_build_digest(pool, http, lookback_hours=lookback_hours)
+        await global_news_build_digest(
+            pool, http, lookback_hours=lookback_hours, redis_client=redis_client
+        )
 
     wsj_creds_path = os.environ.get(
         "WSJ_GMAIL_CREDENTIALS_PATH", "/app/infra/secrets/gmail/credentials.json"

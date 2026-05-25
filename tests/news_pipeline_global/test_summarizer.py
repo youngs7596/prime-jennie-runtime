@@ -26,19 +26,21 @@ def _article(i: int, source: str = "wsj") -> GlobalNewsArticle:
 
 @pytest.mark.asyncio
 async def test_summarize_empty_returns_fallback_marker():
-    summary, model = await summarize([])
+    summary, model, usage = await summarize([])
     assert "없음" in summary
     assert model is None
+    assert usage is None
 
 
 @pytest.mark.asyncio
 async def test_summarize_no_api_key_uses_fallback(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     articles = [_article(1), _article(2, source="bloomberg")]
-    summary, model = await summarize(articles, api_key=None)
+    summary, model, usage = await summarize(articles, api_key=None)
     assert "wsj=1" in summary or "wsj" in summary
     assert "bloomberg" in summary
     assert model is None
+    assert usage is None
 
 
 @pytest.mark.asyncio
@@ -51,11 +53,12 @@ async def test_summarize_calls_deepseek_and_returns_content():
                 json={
                     "choices": [
                         {"message": {"content": "연준 금리 동결 시사 — 미 국채 금리 하락."}}
-                    ]
+                    ],
+                    "usage": {"prompt_tokens": 1234, "completion_tokens": 88},
                 },
             )
         )
-        summary, model = await summarize(
+        summary, model, usage = await summarize(
             articles,
             api_key="sk-test",
             base_url="https://api.deepseek.com/v1",
@@ -63,6 +66,7 @@ async def test_summarize_calls_deepseek_and_returns_content():
         )
     assert "연준" in summary
     assert model == "deepseek-chat"
+    assert usage == {"input_tokens": 1234, "output_tokens": 88}
 
 
 @pytest.mark.asyncio
@@ -72,9 +76,10 @@ async def test_summarize_deepseek_error_falls_back():
         mock.post("https://api.deepseek.com/v1/chat/completions").mock(
             return_value=httpx.Response(500)
         )
-        summary, model = await summarize(
+        summary, model, usage = await summarize(
             articles, api_key="sk-test", base_url="https://api.deepseek.com/v1"
         )
     assert model is None
+    assert usage is None
     # fallback 은 소스 카운트 또는 헤드라인을 포함
     assert "wsj" in summary or "Headline" in summary

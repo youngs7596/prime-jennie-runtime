@@ -41,7 +41,9 @@ _SERVICES = [
     "macro",
     "macro_shadow",
     "news_analysis",
+    "news_global_digest",
     "briefing",
+    "telegram_intent",
     "unknown",
 ]
 
@@ -49,14 +51,22 @@ _SERVICES = [
 # 2026-05-22: scout 는 결정론 quant 코어로 전환 — LLM 매핑에서 제외.
 # News extractor 는 Qwen3-30B-A3B MoE (2026-04-21 EXAONE 4.0-32B 에서 교체).
 # - news_analysis: vLLM Qwen3 (VLLM_LLM_MODEL)
+# - news_global_digest: DeepSeek chat (WSJ/Bloomberg/Reuters 24h 요약)
 # - macro: DeepSeek chat (DEEPSEEK_MODEL)
 # - briefing: DeepSeek chat (DEEPSEEK_MODEL) — 2026-04-24 Opus 에서 전환
+# - telegram_intent: DeepSeek chat (사용자 평문 → 슬래시 명령 분류)
 _FEATURE_MAP = [
     {
         "service": "news_analysis",
         "name": "뉴스 메타데이터 추출",
         "tier": "fast",
         "frequency": "실시간 (배치, */10min)",
+    },
+    {
+        "service": "news_global_digest",
+        "name": "해외 매크로 뉴스 요약",
+        "tier": "reasoning",
+        "frequency": "평일 07:30 / 11:30 (Macro 10분 전)",
     },
     {
         "service": "macro",
@@ -69,6 +79,12 @@ _FEATURE_MAP = [
         "name": "데일리 브리핑",
         "tier": "reasoning",
         "frequency": "1일 1회 (평일 17:00)",
+    },
+    {
+        "service": "telegram_intent",
+        "name": "텔레그램 자연어 명령 분류",
+        "tier": "fast",
+        "frequency": "사용자 평문 메시지 입력 시",
     },
 ]
 
@@ -83,6 +99,15 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
             "jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq",
         )
         return model, "vLLM (Qwen3)"
+    if service == "news_global_digest":
+        # 해외 매크로 뉴스 24h 요약. summarizer 가 MACRO_DIGEST_SUMMARIZER_MODEL
+        # 또는 DEEPSEEK_MODEL 을 우선 사용.
+        model = (
+            os.environ.get("MACRO_DIGEST_SUMMARIZER_MODEL")
+            or os.environ.get("DEEPSEEK_MODEL")
+            or "deepseek-chat"
+        )
+        return model, "DeepSeek"
     if service == "macro":
         # 2026-04-22 swap: Macro primary = DeepSeek chat (4일 shadow 비교 결과 Gate 100% 일치).
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
@@ -93,6 +118,10 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
         return model, "Anthropic"
     if service == "briefing":
         # 2026-04-24: briefing 도 DeepSeek 로 전환 (Opus 월 ~$30-50 절감).
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        return model, "DeepSeek"
+    if service == "telegram_intent":
+        # Telegram 평문 → 슬래시 명령 분류기 (telegram_bot/llm_intent.py).
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         return model, "DeepSeek"
     return "unknown", "unknown"

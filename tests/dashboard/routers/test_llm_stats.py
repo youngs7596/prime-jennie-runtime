@@ -19,10 +19,20 @@ async def test_features(app):
         assert resp.status_code == 200
         feats = resp.json()
         services = {f["service"] for f in feats}
-        assert "macro" in services
-        # scout 는 2026-05-22 결정론 quant 코어로 전환 — LLM feature 아님
+        # 현재 4 backend + 1 telegram 5 자리가 LLM 호출원. scout 는 결정론으로 빠짐.
+        assert {
+            "macro",
+            "briefing",
+            "news_analysis",
+            "news_global_digest",
+            "telegram_intent",
+        } <= services
         assert "scout" not in services
-        assert all("model" in f for f in feats)
+        assert all("model" in f and "provider" in f for f in feats)
+        by_svc = {f["service"]: f for f in feats}
+        # WSJ digest 와 telegram intent 둘 다 DeepSeek 라우팅
+        assert by_svc["news_global_digest"]["provider"] == "DeepSeek"
+        assert by_svc["telegram_intent"]["provider"] == "DeepSeek"
 
 
 async def test_daily_stats(app, redis_client):

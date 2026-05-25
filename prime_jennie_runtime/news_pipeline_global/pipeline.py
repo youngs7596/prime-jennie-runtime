@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import asyncpg
 import httpx
+
+from prime_jennie_runtime.dashboard.llm_pricing import calc_shadow_cost
+from prime_jennie_runtime.infra.llm_stats import record_llm_call
 
 from .feeds import RssFeed, load_feeds
 from .models import MacroNewsDigest
@@ -63,12 +67,13 @@ async def build_digest(
     summary_api_key: str | None = None,
     summary_base_url: str | None = None,
     summary_model: str | None = None,
+    redis_client: Any = None,
 ) -> MacroNewsDigest:
     now = as_of or datetime.now(tz=UTC)
     since = now - timedelta(hours=lookback_hours)
     articles = await fetch_recent_articles(pool, since, limit=50)
     headlines = _format_headlines(articles)
-    summary, model_used = await summarize(
+    summary, model_used, usage = await summarize(
         articles,
         api_key=summary_api_key,
         base_url=summary_base_url,
@@ -88,6 +93,18 @@ async def build_digest(
         summary_model=model_used,
     )
     await upsert_digest(pool, digest)
+    # LLM 호출이 실제로 일어난 경우만 stats 누적 (fallback 경로는 model_used=None).
+    # DeepSeek chat 가격은 dashboard.llm_pricing.PRICING 의 단일 source 사용.
+    if model_used and usage is not None and redis_client is not None:
+        cost = calc_shadow_cost(usage["input_tokens"], usage["output_tokens"])
+        await record_llm_call(
+            redis_client,
+            service="news_global_digest",
+            input_tokens=usage["input_tokens"],
+            output_tokens=usage["output_tokens"],
+            cost_usd=cost,
+            timestamp=now,
+        )
     logger.info(
         "global_news.build_digest done count=%d summary_model=%s",
         len(articles),

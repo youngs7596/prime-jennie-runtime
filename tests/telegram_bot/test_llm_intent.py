@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import fakeredis.aioredis
 import httpx
 import pytest
 
@@ -94,3 +95,59 @@ async def test_invalid_json_returns_none():
         router = IntentRouter(api_key="x", client=client)
         result = await router.classify("이상한 메시지")
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_classify_records_llm_call_with_usage():
+    """LLM 호출 성공 시 redis 의 telegram_intent 키에 calls/tokens/cost 누적."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"command": "/balance", "args": ""})}}
+                ],
+                "usage": {"prompt_tokens": 220, "completion_tokens": 15},
+            },
+        )
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        router = IntentRouter(api_key="x", client=client, redis_client=redis)
+        result = await router.classify("현금 얼마 있어?")
+
+    assert result == ("/balance", "")
+    keys = await redis.keys("llm:stats:*:telegram_intent")
+    assert len(keys) == 1
+    data = await redis.hgetall(keys[0])
+    assert int(data["calls"]) == 1
+    assert int(data["tokens_in"]) == 220
+    assert int(data["tokens_out"]) == 15
+    # DeepSeek chat: (220*0.27 + 15*1.10) / 1M = 75.9 / 1M = 0.0000759
+    assert abs(float(data["cost_usd"]) - 0.0000759) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_classify_records_even_when_command_blocked():
+    """위험 명령으로 None 반환되더라도 LLM 호출은 일어났으므로 stats 누적."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": json.dumps({"command": "/buy", "args": "005930"})}}
+                ],
+                "usage": {"prompt_tokens": 200, "completion_tokens": 20},
+            },
+        )
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        router = IntentRouter(api_key="x", client=client, redis_client=redis)
+        result = await router.classify("삼성전자 사")
+
+    assert result is None  # 안전 가드
+    keys = await redis.keys("llm:stats:*:telegram_intent")
+    assert len(keys) == 1  # 그래도 호출 자체는 stats 에 들어감

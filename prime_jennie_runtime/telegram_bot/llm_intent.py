@@ -18,8 +18,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 
 import httpx
+
+from prime_jennie_runtime.dashboard.llm_pricing import calc_shadow_cost
+from prime_jennie_runtime.infra.llm_stats import record_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +97,7 @@ class IntentRouter:
         model: str | None = None,
         base_url: str | None = None,
         client: httpx.AsyncClient | None = None,
+        redis_client: Any = None,
     ) -> None:
         self._api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self._model = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
@@ -101,6 +106,7 @@ class IntentRouter:
         ).rstrip("/")
         self._owned_client = client is None
         self._client = client or httpx.AsyncClient(timeout=15.0)
+        self._redis_client = redis_client
 
     @property
     def enabled(self) -> bool:
@@ -142,6 +148,19 @@ class IntentRouter:
         except Exception:
             logger.exception("intent classification failed")
             return None
+
+        # LLM 호출 자체는 성공한 자리 — 분류 결과와 무관하게 stats 누적.
+        # parser 실패는 위 except 에서 잡혔으므로 여기 도달 시 usage 추출 안전.
+        usage_raw = data.get("usage") or {}
+        in_tok = int(usage_raw.get("prompt_tokens", 0))
+        out_tok = int(usage_raw.get("completion_tokens", 0))
+        await record_llm_call(
+            self._redis_client,
+            service="telegram_intent",
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cost_usd=calc_shadow_cost(in_tok, out_tok),
+        )
 
         cmd = parsed.get("command")
         if not cmd or not isinstance(cmd, str):

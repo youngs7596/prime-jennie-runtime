@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
                 "telegram-bot KIS client init failed — KIS-dependent commands will degrade"
             )
 
-        intent_router = IntentRouter()
+        intent_router = IntentRouter(redis_client=redis_client)
         long_poll = LongPollLoop(
             config=config.telegram,
             handler=CommandHandler(redis_client, config.telegram, pool=pool, kis_client=kis_client),

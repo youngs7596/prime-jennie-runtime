@@ -59,10 +59,14 @@ async def summarize(
     base_url: str | None = None,
     model: str | None = None,
     http_client: httpx.AsyncClient | None = None,
-) -> tuple[str, str | None]:
-    """(summary, model_used) — 실패 시 fallback + model_used=None."""
+) -> tuple[str, str | None, dict[str, int] | None]:
+    """(summary, model_used, usage) — usage 는 {"input_tokens", "output_tokens"}.
+
+    실패/fallback 경로에서는 model_used=None, usage=None 으로 회신. caller 는
+    model_used 가 set 일 때만 record_llm_call 을 부르면 된다.
+    """
     if not articles:
-        return _fallback_summary(articles), None
+        return _fallback_summary(articles), None, None
 
     api_key = api_key or os.environ.get("DEEPSEEK_API_KEY") or ""
     base_url = (
@@ -77,7 +81,7 @@ async def summarize(
 
     if not api_key:
         logger.info("digest summarizer: no DEEPSEEK_API_KEY, using fallback")
-        return _fallback_summary(articles), None
+        return _fallback_summary(articles), None, None
 
     payload: dict[str, Any] = {
         "model": model,
@@ -103,11 +107,16 @@ async def summarize(
         data = resp.json()
         content = data["choices"][0]["message"]["content"].strip()
         if not content:
-            return _fallback_summary(articles), None
-        return content, model
+            return _fallback_summary(articles), None, None
+        usage_raw = data.get("usage") or {}
+        usage = {
+            "input_tokens": int(usage_raw.get("prompt_tokens", 0)),
+            "output_tokens": int(usage_raw.get("completion_tokens", 0)),
+        }
+        return content, model, usage
     except Exception as exc:  # 네트워크/키/스키마 모두 여기서 잡히고 fallback
         logger.warning("digest summarizer failed: %s", exc)
-        return _fallback_summary(articles), None
+        return _fallback_summary(articles), None, None
     finally:
         if own:
             await http_client.aclose()  # type: ignore[union-attr]

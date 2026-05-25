@@ -36,20 +36,53 @@ _SERVICES = [
 ]
 
 
+_LEVEL_WHITELIST = frozenset({"INFO", "WARN", "WARNING", "ERROR", "DEBUG"})
+
+
+def _escape_logql(value: str) -> str:
+    """LogQL 의 |~ "..." 안에 사용자 입력을 안전하게 끼우기 위한 escape.
+
+    백슬래시 먼저, 그 다음 큰따옴표. 순서 바뀌면 이미 escape 된 \" 의 백슬래시가
+    또 한 번 escape 돼서 \\\" 로 깨진다.
+    """
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _build_query(service: str, levels: list[str] | None, q: str | None) -> str:
+    """LogQL 쿼리 생성. level + q 는 message body 에 대한 |~ regex 로 결합."""
+    parts = [f'{{service="{service}"}}']
+    if levels:
+        safe = [lv.upper() for lv in levels if lv.upper() in _LEVEL_WHITELIST]
+        if safe:
+            alt = "|".join(safe)
+            parts.append(f'|~ "{alt}"')
+    if q:
+        parts.append(f'|~ "{_escape_logql(q)}"')
+    return " ".join(parts)
+
+
 @router.get("/stream")
 async def get_logs(
     service: str = Query(..., description="Loki app 라벨 (서비스명)"),
     limit: int = Query(100, description="반환할 로그 라인 수"),
     start: int | None = Query(None, description="시작 타임스탬프 (ns)"),
     end: int | None = Query(None, description="끝 타임스탬프 (ns)"),
+    level: list[str] | None = Query(
+        None,
+        description="로그 레벨 필터 (INFO / WARN / ERROR / DEBUG 다중 선택)",
+    ),
+    q: str | None = Query(
+        None,
+        description="message body 검색 — LogQL |~ regex (substring 도 가능)",
+    ),
 ) -> dict:
-    """Loki `query_range` 프록시."""
+    """Loki `query_range` 프록시 — level/q 가 있으면 LogQL 에 |~ 로 결합."""
     if not start:
         start = int((time.time() - 3600) * 1e9)
     if not end:
         end = int(time.time() * 1e9)
 
-    query = f'{{service="{service}"}}'
+    query = _build_query(service, level, q)
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             resp = await client.get(

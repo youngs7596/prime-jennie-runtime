@@ -87,6 +87,61 @@ async def test_stream_merges_and_sorts_multiple_streams(app):
             ]
 
 
+async def test_stream_level_and_query_filters_are_applied(app):
+    """level (multi) + q 가 LogQL `|~` 로 결합되어 query_range 에 실린다."""
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(url__regex=r".*/loki/api/v1/query_range.*").mock(
+            return_value=Response(200, json={"data": {"result": []}})
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/api/logs/stream",
+                params=[
+                    ("service", "kis-gateway"),
+                    ("level", "ERROR"),
+                    ("level", "WARN"),
+                    ("q", "timeout"),
+                ],
+            )
+            assert resp.status_code == 200, resp.text
+        called_query = route.calls.last.request.url.params.get("query", "")
+        assert '{service="kis-gateway"}' in called_query
+        assert '|~ "ERROR|WARN"' in called_query
+        assert '|~ "timeout"' in called_query
+
+
+async def test_stream_invalid_level_filtered_out(app):
+    """whitelist (INFO/WARN/ERROR/DEBUG) 외의 값은 조용히 무시."""
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(url__regex=r".*/loki/api/v1/query_range.*").mock(
+            return_value=Response(200, json={"data": {"result": []}})
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/api/logs/stream",
+                params=[("service", "kis-gateway"), ("level", "FOO")],
+            )
+            assert resp.status_code == 200
+        called_query = route.calls.last.request.url.params.get("query", "")
+        assert "|~" not in called_query
+
+
+async def test_stream_quote_in_q_is_escaped(app):
+    """q 의 " 와 \\ 가 LogQL 안에서 안전하게 escape 되어 injection 차단."""
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get(url__regex=r".*/loki/api/v1/query_range.*").mock(
+            return_value=Response(200, json={"data": {"result": []}})
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/api/logs/stream",
+                params={"service": "kis-gateway", "q": 'foo " bar \\baz'},
+            )
+            assert resp.status_code == 200
+        called_query = route.calls.last.request.url.params.get("query", "")
+        assert '|~ "foo \\" bar \\\\baz"' in called_query
+
+
 async def test_stream_applies_limit_after_merge(app):
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=r".*/loki/api/v1/query_range.*").mock(

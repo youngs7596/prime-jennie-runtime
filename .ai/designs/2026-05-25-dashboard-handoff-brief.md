@@ -32,7 +32,7 @@
 
 3. **이 핸드오프 지시서** — 시안 단계의 모든 의사결정 보존 + 백엔드 보강 명세 + 구현 순서
 
-세 자료 모두 필요하다. 시안만으론 narrative 의도 안 살고, 의뢰서 v2 만으론 시안 단계에서 fix 된 자리 (의뢰서엔 없던 결정 30+ 개) 빠진다.
+세 자료 모두 필요하다. 시안만으론 narrative 의도 안 살고, 의뢰서 v2 만으론 시안 단계에서 fix 된 항목 (의뢰서엔 없던 결정 30+ 개) 빠진다.
 
 ---
 
@@ -56,7 +56,7 @@
 
 ## 2. 시안 단계 의사결정 사항
 
-의뢰서 v2 에 명시되지 않은 결정 사항만 정리. 시안 라운드를 거치며 fix 된 자리들이고, 휘발성 채팅 메모리에 남아있던 결정 사항을 보존하기 위한 자료다.
+의뢰서 v2 에 명시되지 않은 결정 사항만 정리. 시안 라운드를 거치며 fix 된 항목들이고, 휘발성 채팅 메모리에 남아있던 결정 사항을 보존하기 위한 자료다.
 
 ### 2.1 디자인 시스템 토큰 결정
 
@@ -202,7 +202,7 @@
 
 ---
 
-## 3. 백엔드 보강 자리
+## 3. 백엔드 보강 항목
 
 프론트 구현 전에 백엔드 보강이 선행되어야 한다. 안 그러면 mock 데이터로 프론트 만들고 나중에 다시 통합해야 함. 각 항목은 별도 PR 단위.
 
@@ -275,7 +275,7 @@ def calc_shadow_cost(tok_in, tok_out, provider="deepseek", model="chat"):
 
 ### 3.7 Trades P&L 데이터 정합성 점검 (데이터 조사)
 
-- KB금융 SELL 72 주 65,500 의 P&L `-` 자리 — lot 매칭 로직 점검. 평단가 152,600 과 SELL 가격 65,500 차이가 비정상.
+- KB금융 SELL 72 주 65,500 의 P&L `-` 표시 — lot 매칭 로직 점검. 평단가 152,600 과 SELL 가격 65,500 차이가 비정상.
 - 가능성 셋: (A) 액면분할 / (B) 다른 lot 의 매도 / (C) 데이터 입력 오류. 확인 후 정정.
 
 ---
@@ -420,9 +420,9 @@ fontFamily: {
 
 ### 7.1 색 토큰 일관성
 
-- [ ] 빨강 = BEAR / STOP / 손실 / heartbeat>120s / LIQUIDATE 5 자리에 같은 hex (`#F85149`)
-- [ ] 녹 = BULL / throttle 1.0 / P&L+ 3 자리에 같은 hex (`#3FB950`)
-- [ ] 노랑 = NEUTRAL / DRYRUN / PAUSE / heartbeat 30-60s / throttle 0.5 5 자리 일관
+- [ ] 빨강 = BEAR / STOP / 손실 / heartbeat>120s / LIQUIDATE 5 곳에 같은 hex (`#F85149`)
+- [ ] 녹 = BULL / throttle 1.0 / P&L+ 3 곳에 같은 hex (`#3FB950`)
+- [ ] 노랑 = NEUTRAL / DRYRUN / PAUSE / heartbeat 30-60s / throttle 0.5 5 곳 일관
 - [ ] macro 서비스 색 = blue (`#3A8FFF`) — LLM Stats / Overview LLM Today / 모든 차트
 - [ ] Service color 매핑 (news cyan / macro blue / scout purple / briefing yellow) 모든 페이지 일관
 
@@ -483,7 +483,7 @@ prime-jennie-control-ui 재설계 핸드오프. 다음 자료 모두 참고:
 - 시안 ZIP 의 Design Tokens.html 에서 CSS variables 추출
 - 핸드오프 지시서 §4.3 의 Tailwind config 구조로 변환
 - prime-jennie-control-ui/tailwind.config.js 에 통합
-- 기존 색 사용 자리를 새 토큰으로 마이그레이션 (전수 검색 후 PR)
+- 기존 색 사용 부분을 새 토큰으로 마이그레이션 (전수 검색 후 PR)
 
 각 Phase 완료 시 PR 단위로 commit, 다음 Phase 진행 전 review 대기.
 ```

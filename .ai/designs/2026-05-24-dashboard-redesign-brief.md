@@ -14,17 +14,17 @@
 
 둘째, 색 토큰이 일관되지 않다. heartbeat 가 25 초여도 빨강, 3 초여도 빨강으로 칠해진다. 정상 범위인데 항상 위험해 보여 운영자가 색을 신뢰하지 않게 된다. Macro 게이트 색, throttle 단계 색, P&L 색이 한 팔레트에서 충돌 안 나게 정의돼 있지도 않다.
 
-셋째, 화면마다 빈 공간이 너무 많다. Logs 페이지 우측 80% 가 비어 있고 검색·필터·하이라이트가 없어 ERROR 검출이 어렵다. LLM Stats Today 가 "No calls today" 한 줄로 비어 있는 자리, Trades 의 Tier/Reason 빈 컬럼도 같은 맥락이다.
+셋째, 화면마다 빈 공간이 너무 많다. Logs 페이지 우측 80% 가 비어 있고 검색·필터·하이라이트가 없어 ERROR 검출이 어렵다. LLM Stats Today 가 "No calls today" 한 줄로 비어 있는 영역, Trades 의 Tier/Reason 빈 컬럼도 같은 맥락이다.
 
 5-23 민지 (이전 컨설팅 LLM) 분석이 이 셋을 짚었다. 이번 글은 그 분석을 받아 (1) 현 코드 ground truth 와 (2) 백엔드 데이터 가용성을 확인하고, Claude Design 캔버스에 넘길 수 있는 형태로 정리한 것이다.
 
 ## 2. 작업 범위
 
-전체 10 개 화면을 한 의뢰서에 묶는다. 디자인 시스템 자체가 화면 단위로 충돌하는 자리가 많아 화면 하나만 시안 뽑으면 나머지가 따라오지 않는다.
+전체 10 개 화면을 한 의뢰서에 묶는다. 디자인 시스템 자체가 화면 단위로 충돌하는 부분이 많아 화면 하나만 시안 뽑으면 나머지가 따라오지 않는다.
 
 - 사이드바 항목 그대로 유지: Overview, Portfolio, Trades, Macro, Scout, News, LLM Stats, Logs, Jobs, System
 - 라우팅과 URL 도 그대로 (`/overview`, `/portfolio`, ...)
-- 백엔드 API 응답 형식은 §6 에 정리된 자리만 보강. 나머지는 현 상태 유지
+- 백엔드 API 응답 형식은 §6 에 정리된 항목만 보강. 나머지는 현 상태 유지
 
 이번 의뢰는 시안 산출이 목적이고, 시안이 나온 다음 Claude Code 핸드오프로 React/Tailwind 구현은 별도 작업으로 간다.
 
@@ -74,7 +74,7 @@ Datadog · Grafana 의 운영 대시보드 톤으로 간다. 이유 세 가지.
 - 60 ~ 120s: 주황 `#F0883E` (경고)
 - > 120s: 빨강 `#F85149` (위험)
 
-지금 코드는 마지막 heartbeat 시각만 보고 무조건 빨강을 칠한다. 임계값 자체가 없다. 이 자리부터 손봐야 한다.
+지금 코드는 마지막 heartbeat 시각만 보고 무조건 빨강을 칠한다. 임계값 자체가 없다. 이 부분부터 손봐야 한다.
 
 **P&L 부호**
 - +: 녹색 `#3FB950`
@@ -90,7 +90,7 @@ Datadog · Grafana 의 운영 대시보드 톤으로 간다. 이유 세 가지.
 
 ### 4.3 타이포그래피
 
-현재 시스템 폰트 (BlinkMacSystemFont, Segoe UI, Noto Sans KR) 그대로 유지. 숫자는 표·통계 카드에서 tabular-nums 적용해 자릿수 정렬. 한국어와 영어 라벨이 섞이는 자리 (예: 사이드바 "Portfolio" + 본문 "기간/종목") 가 있는데, 라벨 자체는 영어로 통일하고 본문 한국어를 허용하는 방향이 운영 도구로는 자연스럽다.
+현재 시스템 폰트 (BlinkMacSystemFont, Segoe UI, Noto Sans KR) 그대로 유지. 숫자는 표·통계 카드에서 tabular-nums 적용해 자릿수 정렬. 한국어와 영어 라벨이 섞이는 곳 (예: 사이드바 "Portfolio" + 본문 "기간/종목") 가 있는데, 라벨 자체는 영어로 통일하고 본문 한국어를 허용하는 방향이 운영 도구로는 자연스럽다.
 
 ### 4.4 spacing 과 그리드
 
@@ -122,13 +122,13 @@ Datadog · Grafana 의 운영 대시보드 톤으로 간다. 이유 세 가지.
 
 핵심 정보: 보유 종목 리스트와 평가액, 자산 시계열.
 
-정보 위계: 상단 요약 (Holdings 수, Eval, P&L) 그대로. Positions 표는 Stock / Sector / Qty / Avg Price / Cur Price / P&L / Eval 컬럼. Sector 컬럼은 §6 의 자리에 따라 sector_group 데이터가 채워진다. Asset History 탭은 P&L curve 와 평가액 curve 두 시계열 차트로.
+정보 위계: 상단 요약 (Holdings 수, Eval, P&L) 그대로. Positions 표는 Stock / Sector / Qty / Avg Price / Cur Price / P&L / Eval 컬럼. Sector 컬럼은 §6 의 매핑에 따라 sector_group 데이터가 채워진다. Asset History 탭은 P&L curve 와 평가액 curve 두 시계열 차트로.
 
 데이터 모델:
 - Positions: `/api/portfolio/positions` 응답에 `sector_group` 필드 추가 필요 (백엔드 DB 에 있는데 응답 모델에서 누락)
 - Asset History: `/api/portfolio/history?days=30` — 이미 daily_asset_snapshots 백엔드 데이터 있음, 차트로 그리기만
 
-빈 공간 채우는 방법: Asset History 탭을 currently 비활성처럼 보이는 자리에서 실제 시계열 차트로. 30 일 / 60 일 / YTD 토글.
+빈 공간 채우는 방법: Asset History 탭을 currently 비활성처럼 보이는 상태에서 실제 시계열 차트로. 30 일 / 60 일 / YTD 토글.
 
 ### 5.3 Trades
 
@@ -136,7 +136,7 @@ Datadog · Grafana 의 운영 대시보드 톤으로 간다. 이유 세 가지.
 
 정보 위계: 상단 요약 줄 (Total / Buy / Sell / Realized P&L) 유지. 7d / 14d / 30d / 60d 토글 유지. 표 컬럼은 Time / Stock / Type / Qty / Price / Total / P&L%.
 
-**Tier / Reason 컬럼은 제거한다**. §6 에서 확인했듯이 v3 schema 에 데이터 자체가 없다. v2-only 필드라 의도적으로 빠진 자리. 컬럼 자리를 비워 두느니 표 전체가 보이는 공간을 늘리는 게 운영에 낫다.
+**Tier / Reason 컬럼은 제거한다**. §6 에서 확인했듯이 v3 schema 에 데이터 자체가 없다. v2-only 필드라 의도적으로 뺀 컬럼이다. 컬럼을 비워 두느니 표 전체가 보이는 공간을 늘리는 게 운영에 낫다.
 
 데이터 모델: `/api/trades/recent?days=N` — 현재 응답 형식 그대로.
 
@@ -148,7 +148,7 @@ Datadog · Grafana 의 운영 대시보드 톤으로 간다. 이유 세 가지.
 
 데이터 모델: `/api/macro/runs?limit=50` + `/api/macro/insight/{run_id}`. 응답 그대로.
 
-추가: 우측 상단에 "previous run 과 비교" 토글 — 직전 run 의 gate, size, top_risks 차이를 보여 주는 자리. 5-24 0004 세션에서 추가한 recent_macro_runs 가 prompt 에 들어가기 시작했으니 운영자도 그 비교를 볼 수 있어야 한다.
+추가: 우측 상단에 "previous run 과 비교" 토글 — 직전 run 의 gate, size, top_risks 차이를 보여 주는 영역. 5-24 0004 세션에서 추가한 recent_macro_runs 가 prompt 에 들어가기 시작했으니 운영자도 그 비교를 볼 수 있어야 한다.
 
 ### 5.5 Scout
 
@@ -200,7 +200,7 @@ Datadog · Grafana 의 운영 대시보드 톤으로 간다. 이유 세 가지.
 
 핵심 정보: 11 개 서비스 헬스, Control 명령.
 
-정보 위계: 11/11 healthy 요약 줄 유지. 카드 그리드 그대로. **heartbeat 색은 §4.2 토큰으로 단계화**. Port 와 Uptime 자리는 §6 의 자리에서 데이터 채움 (`url` 에서 포트 파싱, `uptime_seconds` 그대로 표시).
+정보 위계: 11/11 healthy 요약 줄 유지. 카드 그리드 그대로. **heartbeat 색은 §4.2 토큰으로 단계화**. Port 와 Uptime 영역은 §6 의 매핑에서 데이터 채움 (`url` 에서 포트 파싱, `uptime_seconds` 그대로 표시).
 
 Control 섹션 버튼이 지금 흐릿한 비활성 톤이다. **Resume 은 녹색 outline, Pause/Dryrun ON 은 노랑 outline, Emergency Stop/Liquidate Arm 은 빨강 outline 으로 위급도 색 코딩**. 클릭 가능함을 색으로 알 수 있게.
 
@@ -210,7 +210,7 @@ Control 섹션 버튼이 지금 흐릿한 비활성 톤이다. **Resume 은 녹�
 
 ## 6. 데이터 가용성 분류
 
-빈 자리 일곱 군데를 세 분류로 묶었다.
+빈 영역 일곱 군데를 세 분류로 묶었다.
 
 **즉시 노출 가능** (백엔드에 데이터 있음, API 응답 모델만 보강)
 - Portfolio Sector: `stock_masters.sector_group` 컬럼 있음. positions API 응답 모델에 필드 추가만.
@@ -224,7 +224,7 @@ Control 섹션 버튼이 지금 흐릿한 비활성 톤이다. **Resume 은 녹�
 - Logs 레벨 필터·검색: 현재 `/api/logs/stream` 이 `level`, `q` 파라미터를 안 받음. Loki 쿼리 동적 생성으로 보강. PR 1 개 분량.
 
 **데이터 자체 없음** (DB schema 또는 파이프라인부터)
-- Trades Tier / Reason: v3 schema 에 컬럼 자체 없음. v2-only 필드라 의도적으로 빠진 자리. 이번 재설계에서는 컬럼 자체를 제거.
+- Trades Tier / Reason: v3 schema 에 컬럼 자체 없음. v2-only 필드라 의도적으로 뺀 컬럼. 이번 재설계에서는 컬럼 자체를 제거.
 
 ## 7. 시안 우선순위
 
@@ -343,11 +343,11 @@ Claude Design 캔버스에 던질 때 한 번에 10 화면을 다 만들지 말�
 
 세 가지를 의식하고 작업한다.
 
-첫째, Claude Design 의 한계. research preview 라 시안 결과가 production-grade 가 아니다. 차트 영역의 숫자 정렬, 시계열 데이터의 시간축 처리, 한국어 텍스트의 줄바꿈 같은 자리는 시안에서 흐릿하게 나올 가능성이 있다. 시안은 정보 위계와 색 토큰 검증 목적이고, 실제 픽셀 단위 fix 는 Claude Code 핸드오프 단계에서 한다.
+첫째, Claude Design 의 한계. research preview 라 시안 결과가 production-grade 가 아니다. 차트 영역의 숫자 정렬, 시계열 데이터의 시간축 처리, 한국어 텍스트의 줄바꿈 같은 부분은 시안에서 흐릿하게 나올 가능성이 있다. 시안은 정보 위계와 색 토큰 검증 목적이고, 실제 픽셀 단위 fix 는 Claude Code 핸드오프 단계에서 한다.
 
 둘째, 데이터 밀도가 높은 거래 대시보드는 AI 가 약한 영역이다. Macro Timeline 의 막대 10 개가 시각적으로 너무 좁게 나오거나, Logs 페이지의 검색·필터·시간축 sparkline 이 한 헤더에 안 들어갈 수 있다. 시안 받고 한 번에 ok 라고 보지 말고 인라인 코멘트와 슬라이더로 한두 라운드 손본다.
 
-셋째, 백엔드 보강이 의존성인 자리. Logs 의 level/검색 필터는 백엔드 `/api/logs/stream` 의 파라미터 보강이 선행돼야 한다. 시안에는 UI 다 그리되, 구현 단계에서 백엔드 PR 을 먼저 보내고 프론트는 그 다음에. 이 의존성을 시안 단계에서 잊지 말 것.
+셋째, 백엔드 보강이 의존성인 항목. Logs 의 level/검색 필터는 백엔드 `/api/logs/stream` 의 파라미터 보강이 선행돼야 한다. 시안에는 UI 다 그리되, 구현 단계에서 백엔드 PR 을 먼저 보내고 프론트는 그 다음에. 이 의존성을 시안 단계에서 잊지 말 것.
 
 ## 10. 참조
 

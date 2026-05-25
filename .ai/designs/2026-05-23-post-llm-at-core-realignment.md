@@ -94,7 +94,7 @@ Phase 0 #1 conviction-outcome 상관 분석은 결정론 코어 conviction 위�
 
 이 줄기는 가장 크게 바뀐다. 결정론 코어가 thesis_spec=None 으로 발행하고 position_sheets 스키마에도 thesis 컬럼이 없다. 옛 G6 가 깔았던 "Scout LLM 이 발행한 thesis 의 critical_conditions 가 다음 날 살아있는지" 라는 평가 방식은 출처가 통째로 끊겼다.
 
-그러나 동기는 그대로 살아있다. hold/exit 결정이 시장 변화에 무관하다는 문제는 결정론 코어로 갈아도 그대로다. 7 팩터 점수가 어제와 다르게 움직이는 것을 thesis 변화로 본다든지, daily_quant_scores 의 시계열 변동을 hold 신호로 쓴다든지 하는 새 경로가 가능하다. 5-23 Temporal Context PoC 의 Fact layer 가 사실은 이 새 경로와 같은 자리에 있다.
+그러나 동기는 그대로 살아있다. hold/exit 결정이 시장 변화에 무관하다는 문제는 결정론 코어로 갈아도 그대로다. 7 팩터 점수가 어제와 다르게 움직이는 것을 thesis 변화로 본다든지, daily_quant_scores 의 시계열 변동을 hold 신호로 쓴다든지 하는 새 경로가 가능하다. 5-23 Temporal Context PoC 의 Fact layer 가 사실은 이 새 경로와 같은 방향에 있다.
 
 세 갈래로 좁힐 수 있다.
 
@@ -102,7 +102,7 @@ Phase 0 #1 conviction-outcome 상관 분석은 결정론 코어 conviction 위�
 - (B) thesis 만 따로 발행하는 별도 LLM 채널을 둔다. enforcement 와 분리된 흐름으로, 5-12 폐기된 LLM 자율성 비전과의 경계를 명확히 다시 그어야 한다.
 - (C) thesis 추적을 5-23 Temporal Context PoC 의 Fact layer 에 흡수한다. 결정론 추출은 누적 가능 (Fact), LLM 해석은 휘발 (Interpretation) 이라는 분리에 맞춰 thesis 신호도 사실 층으로 옮긴다.
 
-(C) 가 가장 자연스럽다. 5-22 결정론 코어가 Fact layer 의 일부를 이미 만들어 준 상태이기 때문이다. PoC 와 thesis 줄기가 같은 자리로 합쳐진다.
+(C) 가 가장 자연스럽다. 5-22 결정론 코어가 Fact layer 의 일부를 이미 만들어 준 상태이기 때문이다. PoC 와 thesis 줄기가 같은 흐름으로 합쳐진다.
 
 ## 9. 옛 design doc 6 편의 상태 일괄 결정
 

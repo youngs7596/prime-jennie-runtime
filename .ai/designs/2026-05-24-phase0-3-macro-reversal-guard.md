@@ -27,7 +27,7 @@
 
 LLM Macro 게이트는 KOSPI 변동, 섹터 전염, 지정학 뉴스, 시스템 이벤트, 시장 휴장 다섯 가지 조건을 보고 open/closed 를 판단한다. 동일 입력에서도 LLM 출력은 sampling 분포에 따라 흔들린다. minyoung-mah 학습이 분명하게 말했다 — prompt 로 LLM 의 결정론을 제어하려 하지 말고, 결정론은 별도 layer 에 두라. master doc §3 도 같은 원칙을 5-15 scout-overextension doc 에서 인용했다 ("모든 enforcement 는 결정론 코드 layer").
 
-5-15 사례는 그 원칙의 보강이 필요한 자리다. closed 조건을 만족해 한 번 게이트가 닫혔다는 사실은 LLM 의 출력 노이즈로 되돌릴 수 있는 결정이 아니다. 그 자체가 결정론 layer 의 단방향 잠금 대상이다.
+5-15 사례는 그 원칙을 보강해야 한다는 것을 보여준다. closed 조건을 만족해 한 번 게이트가 닫혔다는 사실은 LLM 의 출력 노이즈로 되돌릴 수 있는 결정이 아니다. 그 자체가 결정론 layer 의 단방향 잠금 대상이다.
 
 ## 3. 옵션 비교
 
@@ -55,7 +55,7 @@ closed 전환 뒤 open 으로 풀리려면 KOSPI 가 closed 시점 대비 X% 이
 
 옵션 A 권장. 거래일 단위 단방향 잠금.
 
-이 결정의 정신은 다음과 같다. 한 번 closed 가 켜졌다는 사실은 그날의 시장 상태가 "매수 위험을 새로 무릅쓸 자리가 아니다" 라는 판단을 이미 내렸다는 것이다. LLM 의 다음 호출이 같은 시장 상태를 다르게 본다고 해서 그 판단을 되돌릴 권한을 LLM 에게 주지 않는다. 다음 거래일 시초의 새 컨텍스트에서 다시 판단한다.
+이 결정의 정신은 다음과 같다. 한 번 closed 가 켜졌다는 사실은 그날의 시장 상태가 "매수 위험을 새로 무릅쓸 시점이 아니다" 라는 판단을 이미 내렸다는 것이다. LLM 의 다음 호출이 같은 시장 상태를 다르게 본다고 해서 그 판단을 되돌릴 권한을 LLM 에게 주지 않는다. 다음 거래일 시초의 새 컨텍스트에서 다시 판단한다.
 
 5-15 사례 한 건만 보고 정하는 결정이 아니다. 결정론 layer 와 LLM layer 의 경계를 그리는 결정이다. minyoung-mah 학습과 master doc §3 의 원칙을 macro 도메인에 그대로 적용한 결과다.
 
@@ -63,7 +63,7 @@ closed 전환 뒤 open 으로 풀리려면 KOSPI 가 closed 시점 대비 X% 이
 
 ### 5.1 위치
 
-`prime_jennie_runtime/slow_loop/macro/post_processor.py` 가 LLM macro 출력에 후처리 가드를 거는 자리다. 기존에 `auto_override` (KOSPI 20d vol 임계 초과 시 강제 closed) 같은 가드가 거기 있다. 이번 가드도 같은 layer.
+`prime_jennie_runtime/slow_loop/macro/post_processor.py` 가 LLM macro 출력에 후처리 가드를 거는 모듈이다. 기존에 `auto_override` (KOSPI 20d vol 임계 초과 시 강제 closed) 같은 가드가 거기 있다. 이번 가드도 같은 layer.
 
 ### 5.2 동작
 
@@ -91,7 +91,7 @@ closed 전환 뒤 open 으로 풀리려면 KOSPI 가 closed 시점 대비 X% 이
 작업 전에 다음을 확인한다.
 
 - `post_processor.py` 의 현 구조 (auto_override 가 어떻게 적용되는지)
-- macro_runs 테이블의 동일 거래일 SELECT 가 LLM 호출 직전에 들어갈 만한 자리인지 (latency 비용 거의 0 — PG 로컬 1 row 조회)
+- macro_runs 테이블의 동일 거래일 SELECT 가 LLM 호출 직전에 들어가도 무방한지 (latency 비용 거의 0 — PG 로컬 1 row 조회)
 - `feedback_consumer_regression_check.md`: 결정 변경 시 macro 결과를 소비하는 모든 곳 (fast-loop sizer 등) 이 새 동작과 호환되는지 grep 확인. closed 의 의미가 바뀐 게 아니라 closed 의 latch 가 추가된 것이라 호환 깨질 가능성은 낮음.
 
 ## 7. 다음 단계

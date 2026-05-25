@@ -50,13 +50,14 @@ from minyoung_mah import (
 )
 
 from prime_jennie_runtime.control.state import SystemState
-from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig
+from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig, validate_kis_gateway_url
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.observer_impl import (
     CompositePJObserver,
     StructlogPJObserver,
 )
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
+from prime_jennie_runtime.infra.trading_calendar import is_trading_day_via_gateway
 from prime_jennie_runtime.position_sheet.schema import KST
 from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
 from prime_jennie_runtime.telegram_bot.bot import TelegramBot
@@ -356,9 +357,14 @@ async def run() -> None:
                 "스케줄은 기동하지만 handler 는 skip"
             )
 
+        kis_gateway_url = validate_kis_gateway_url(cfg.kis)
+
         async def scout_daily(trigger: str = "scheduled") -> None:
             if components is None:
                 logger.warning("scout_daily skipped: components unavailable")
+                return
+            if not await is_trading_day_via_gateway(kis_gateway_url):
+                logger.info("scout_daily skipped: non-trading day")
                 return
             now = datetime.now(tz=KST)
             as_of_date = now.date()

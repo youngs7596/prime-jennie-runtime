@@ -34,6 +34,7 @@ from prime_jennie_runtime.infra.config import (
 )
 from prime_jennie_runtime.infra.db import create_engine
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
+from prime_jennie_runtime.infra.trading_calendar import is_trading_day_via_gateway
 from prime_jennie_runtime.news_pipeline_global.pipeline import (
     build_digest as global_news_build_digest,
 )
@@ -120,18 +121,30 @@ def build_handlers(
         await cleanup_old_data(pool, days=days)
 
     async def h_macro_validate_store() -> None:
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("macro_validate_store skipped: non-trading day")
+            return
         await macro_validate_store(redis_client)
 
     bok_ecos_api_key = os.environ.get("BOK_ECOS_API_KEY") or None
     dart_api_key = os.environ.get("DART_API_KEY") or ""
 
     async def h_macro_collect_global() -> None:
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("macro_collect_global skipped: non-trading day")
+            return
         await macro_collect_global(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
 
     async def h_macro_collect_korea() -> None:
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("macro_collect_korea skipped: non-trading day")
+            return
         await macro_collect_korea(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
 
     async def h_macro_quick() -> None:
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("macro_quick skipped: non-trading day")
+            return
         await macro_quick(redis_client, http, bok_ecos_api_key=bok_ecos_api_key)
 
     async def h_contract_smoke_test() -> None:

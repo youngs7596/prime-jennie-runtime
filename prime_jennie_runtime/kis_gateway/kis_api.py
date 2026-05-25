@@ -531,6 +531,31 @@ class KISApi:
             )
         return executions
 
+    async def search_info(self, stock_code: str) -> dict[str, Any] | None:
+        """종목 기본 정보 조회 (CTPF1002R).
+
+        반환 dict 의 핵심 필드:
+          - ``scty_grp_id_cd``: ST/EF/EN/EW (주식/ETF/ETN/ELW)
+          - ``mket_id_cd``: 시장 (STK/KSQ 등)
+          - ``prdt_name``: 정식 종목명 (예: '삼성KODEX레버리지증권상장지수투자신탁')
+
+        실패 시 None — 호출자가 'STOCK' default 로 fallback.
+        """
+        try:
+            data = await self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/quotations/search-info",
+                tr_id="CTPF1002R",
+                params={"PDNO": stock_code, "PRDT_TYPE_CD": "300"},
+            )
+        except Exception:
+            logger.warning("search_info failed for %s", stock_code, exc_info=True)
+            return None
+        output = data.get("output")
+        if not output:
+            return None
+        return output
+
     async def is_trading_day(self, target_date: date | None = None) -> bool:
         """거래일 여부 확인 (CTCA0903R)."""
         target = target_date or date.today()

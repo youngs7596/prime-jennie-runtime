@@ -184,7 +184,7 @@ def build_handlers(
         await collect_quarterly_financials(pool, http)
 
     async def h_seed_stock_masters(market: str = "KOSPI") -> None:
-        await seed_stock_masters(pool, http, market=market)
+        await seed_stock_masters(pool, http, market=market, kis_gateway_url=kis_gateway_url)
 
     async def h_daily_asset_snapshot() -> None:
         # 전용 httpx.AsyncClient 는 함수 내부에서 생성 — stale keepalive 격리.

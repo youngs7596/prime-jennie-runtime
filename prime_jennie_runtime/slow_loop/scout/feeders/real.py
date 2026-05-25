@@ -69,6 +69,7 @@ class RealUniverseFeeder:
                 text(
                     "SELECT stock_code FROM stock_masters "
                     "WHERE is_active = TRUE AND market_cap IS NOT NULL "
+                    "  AND security_type = 'STOCK' "
                     "ORDER BY market_cap DESC LIMIT :n"
                 ),
                 {"n": self._size},

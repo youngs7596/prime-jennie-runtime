@@ -280,6 +280,19 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         open_flag, session_str = gw.calendar.is_market_open()
         return {"is_open": open_flag, "session": session_str}
 
+    @app.get("/api/quotations/search-info/{stock_code}")
+    async def api_search_info(stock_code: str) -> dict[str, Any]:
+        """종목 기본 정보 (CTPF1002R) — security_type 분류용.
+
+        응답에서 ``scty_grp_id_cd`` 가 ST/EF/EN/EW 중 하나. seed_stock_masters 가
+        이 값을 STOCK/ETF/ETN/ELW 로 매핑해 stock_masters.security_type 채운다.
+        """
+        gw = _gw(app.state)
+        info = await gw.kis_api.search_info(stock_code)
+        if info is None:
+            raise HTTPException(404, f"종목 정보 없음: {stock_code}")
+        return info
+
     # ─── Orders ──────────────────────────────────────────────────
 
     @app.post("/api/order/buy", response_model=OrderResult)

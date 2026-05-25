@@ -92,6 +92,23 @@ def test_heartbeat_level_four_stages():
     assert _heartbeat_level(3600) == "danger"
 
 
+def test_classify_status_label_recovered_heuristic():
+    """uptime<1h + heartbeat<30s 면 recovered. 그 외엔 None."""
+    from prime_jennie_runtime.dashboard.routers.system import _classify_status_label
+
+    # 정상 recovered 케이스 — 30 분 전 재시작 + heartbeat 10s
+    assert _classify_status_label(uptime_seconds=1800, heartbeat_age_seconds=10) == "recovered"
+    # 경계: uptime 정확히 1h 면 recovered 아님 (1h 이상은 안정 운영)
+    assert _classify_status_label(uptime_seconds=3600, heartbeat_age_seconds=10) is None
+    # 1h 넘으면 평상 운영 — recovered 아님
+    assert _classify_status_label(uptime_seconds=7200, heartbeat_age_seconds=10) is None
+    # heartbeat 30s 이상이면 recovered 아님 (heartbeat 단계 색이 우선)
+    assert _classify_status_label(uptime_seconds=1800, heartbeat_age_seconds=45) is None
+    # None 입력은 None
+    assert _classify_status_label(None, 10) is None
+    assert _classify_status_label(1800, None) is None
+
+
 def test_extract_port_only_for_http():
     """http(s) URL 만 포트 파싱, redis:// / docker:// 는 None."""
     from prime_jennie_runtime.dashboard.routers.system import _extract_port

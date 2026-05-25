@@ -84,6 +84,8 @@ class ServiceStatus(BaseModel):
     port: int | None = None
     heartbeat_age_seconds: float | None = None
     heartbeat_status_level: str | None = None  # healthy / attention / warn / danger
+    # "recovered" — 최근 재시작 후 heartbeat 정상화. 그 외엔 None.
+    status_label: str | None = None
 
 
 _OK_LIKE_STATUSES = ("ok", "healthy", "alive", "up")
@@ -114,6 +116,26 @@ def _heartbeat_level(age_seconds: float | None) -> str | None:
     if age_seconds < 120:
         return "warn"
     return "danger"
+
+
+# recovered 판정 임계 — uptime 1 시간 미만 + heartbeat 정상이면 "최근 재시작 후
+# 정상화" 로 본다. 핸드오프 §3.6 의 정확한 조건 (last_24h_heartbeat_breach > 0)
+# 은 breach 누적 인프라가 별도라 minimal 휴리스틱으로 시작. UI 의 RESTARTS KPI
+# 와 함께 보면 "직전 unhealthy 였다가 회복" 컨텍스트가 살아난다. 후속에서 hourly
+# breach counter (Redis) 추가하면 더 엄밀해진다.
+_RECOVERED_MAX_UPTIME_S = 3600.0
+_RECOVERED_MAX_HB_AGE_S = 30.0
+
+
+def _classify_status_label(
+    uptime_seconds: float | None, heartbeat_age_seconds: float | None
+) -> str | None:
+    """uptime + heartbeat 가 recovered 휴리스틱 만족 시 "recovered". 아니면 None."""
+    if uptime_seconds is None or heartbeat_age_seconds is None:
+        return None
+    if uptime_seconds < _RECOVERED_MAX_UPTIME_S and heartbeat_age_seconds < _RECOVERED_MAX_HB_AGE_S:
+        return "recovered"
+    return None
 
 
 async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatus:
@@ -200,6 +222,7 @@ async def _check_daemon_heartbeat(
         message=f"heartbeat {age:.0f}s ago (pid={hb.get('pid')})",
         heartbeat_age_seconds=age,
         heartbeat_status_level=_heartbeat_level(age),
+        status_label=_classify_status_label(uptime, age),
     )
 
 

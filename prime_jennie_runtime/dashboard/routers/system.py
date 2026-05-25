@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from datetime import UTC
+from urllib.parse import urlparse
 
 import httpx
 import redis.asyncio as aioredis
@@ -79,9 +80,40 @@ class ServiceStatus(BaseModel):
     version: str | None = None
     uptime_seconds: float | None = None
     message: str | None = None
+    # control-ui 가 직접 임계 비교하지 않도록 백엔드에서 미리 계산.
+    port: int | None = None
+    heartbeat_age_seconds: float | None = None
+    heartbeat_status_level: str | None = None  # healthy / attention / warn / danger
 
 
 _OK_LIKE_STATUSES = ("ok", "healthy", "alive", "up")
+
+
+def _extract_port(url: str) -> int | None:
+    """http(s) URL 의 명시 포트만. redis://, docker://, 포트 누락은 None."""
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        return urlparse(url).port
+    except ValueError:
+        return None
+
+
+def _heartbeat_level(age_seconds: float | None) -> str | None:
+    """heartbeat 4 단계 — 핸드오프 §3.3, control-ui HeartbeatDot 와 같은 임계.
+
+    임계 변경 시 여기 한 자리에서만 조정. 프론트가 직접 초 비교하면 임계 갱신
+    시 두 군데를 동기화해야 해서 한쪽이 stale 되기 쉽다.
+    """
+    if age_seconds is None:
+        return None
+    if age_seconds < 30:
+        return "healthy"
+    if age_seconds < 60:
+        return "attention"
+    if age_seconds < 120:
+        return "warn"
+    return "danger"
 
 
 async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatus:
@@ -103,14 +135,31 @@ async def _check(client: httpx.AsyncClient, name: str, url: str) -> ServiceStatu
                 status=status,
                 version=data.get("version"),
                 uptime_seconds=data.get("uptime_seconds"),
+                port=_extract_port(url),
             )
         return ServiceStatus(
-            name=name, url=url, status="unhealthy", message=f"HTTP {resp.status_code}"
+            name=name,
+            url=url,
+            status="unhealthy",
+            message=f"HTTP {resp.status_code}",
+            port=_extract_port(url),
         )
     except httpx.ConnectError:
-        return ServiceStatus(name=name, url=url, status="unreachable", message="connection refused")
+        return ServiceStatus(
+            name=name,
+            url=url,
+            status="unreachable",
+            message="connection refused",
+            port=_extract_port(url),
+        )
     except Exception as e:
-        return ServiceStatus(name=name, url=url, status="unreachable", message=str(e)[:120])
+        return ServiceStatus(
+            name=name,
+            url=url,
+            status="unreachable",
+            message=str(e)[:120],
+            port=_extract_port(url),
+        )
 
 
 async def _check_daemon_heartbeat(
@@ -149,6 +198,8 @@ async def _check_daemon_heartbeat(
         status="healthy",
         uptime_seconds=uptime,
         message=f"heartbeat {age:.0f}s ago (pid={hb.get('pid')})",
+        heartbeat_age_seconds=age,
+        heartbeat_status_level=_heartbeat_level(age),
     )
 
 

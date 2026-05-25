@@ -10,6 +10,7 @@ Tier 매핑은 v3 `LLMConfig` (infra/config.py) 를 읽어 표시.
 
 from __future__ import annotations
 
+import calendar
 import os
 from datetime import date, datetime
 from typing import Any
@@ -21,6 +22,14 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: F401
 from prime_jennie_runtime.infra.config import LLMConfig
 
 from ..deps import get_redis
+from ..llm_pricing import (
+    VLLM_AMORTIZED_DAILY_USD,
+    calc_shadow_cost,
+)
+
+# news_analysis 는 self-hosted vLLM 이라 record_llm_call cost_usd = 0.
+# actual cost 합계에서는 0 으로 잡히고, 별도 vllm_amortized_*_usd 필드로 노출.
+_VLLM_SERVICES = frozenset({"news_analysis"})
 
 router = APIRouter(prefix="/llm", tags=["llm"])
 
@@ -101,6 +110,9 @@ async def _build_daily_stats(target_date: str, r: aioredis.Redis) -> dict:
     total_calls = 0
     total_tokens_in = 0
     total_tokens_out = 0
+    total_cost_actual = 0.0
+    total_cost_shadow = 0.0
+    has_vllm = False
 
     for svc in _SERVICES:
         data = await r.hgetall(f"llm:stats:{target_date}:{svc}")
@@ -109,10 +121,22 @@ async def _build_daily_stats(target_date: str, r: aioredis.Redis) -> dict:
         calls = int(data.get("calls", 0))
         tokens_in = int(data.get("tokens_in", 0))
         tokens_out = int(data.get("tokens_out", 0))
-        services[svc] = {"calls": calls, "tokens_in": tokens_in, "tokens_out": tokens_out}
+        cost_actual = float(data.get("cost_usd", 0) or 0)
+        cost_shadow = calc_shadow_cost(tokens_in, tokens_out)
+        services[svc] = {
+            "calls": calls,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_actual_usd": cost_actual,
+            "cost_shadow_usd": cost_shadow,
+        }
         total_calls += calls
         total_tokens_in += tokens_in
         total_tokens_out += tokens_out
+        total_cost_actual += cost_actual
+        total_cost_shadow += cost_shadow
+        if svc in _VLLM_SERVICES and calls > 0:
+            has_vllm = True
 
     return {
         "date": target_date,
@@ -121,37 +145,78 @@ async def _build_daily_stats(target_date: str, r: aioredis.Redis) -> dict:
             "calls": total_calls,
             "tokens_in": total_tokens_in,
             "tokens_out": total_tokens_out,
+            "cost_actual_usd": total_cost_actual,
+            "cost_shadow_usd": total_cost_shadow,
         },
+        # vLLM 호출이 한 번이라도 있었던 날만 amortized 비용을 부과 — 휴장으로
+        # 컨테이너 자체가 idle 인 날 amortize 시키면 운영자가 비용 해석을 잘못한다.
+        "vllm_amortized_daily_usd": VLLM_AMORTIZED_DAILY_USD if has_vllm else 0.0,
     }
 
 
 async def _build_monthly_stats(target_month: str, r: aioredis.Redis) -> dict:
     """YYYY-MM 월의 일별 키를 SCAN 으로 모아 합산."""
-    services: dict[str, dict] = {
-        svc: {"calls": 0, "tokens_in": 0, "tokens_out": 0} for svc in _SERVICES
+    base = {
+        "calls": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "cost_actual_usd": 0.0,
+        "cost_shadow_usd": 0.0,
     }
-    total = {"calls": 0, "tokens_in": 0, "tokens_out": 0}
+    services: dict[str, dict] = {svc: dict(base) for svc in _SERVICES}
+    total = dict(base)
+    vllm_active_days: set[str] = set()
 
     async for key in r.scan_iter(match=f"llm:stats:{target_month}-*"):
         parts = key.split(":")
         if len(parts) < 4:
             continue
+        day = parts[2]  # YYYY-MM-DD
         svc = parts[3]
         data = await r.hgetall(key)
         if not data:
             continue
-        bucket = services.setdefault(svc, {"calls": 0, "tokens_in": 0, "tokens_out": 0})
-        for field in ("calls", "tokens_in", "tokens_out"):
-            val = int(data.get(field, 0))
-            bucket[field] += val
-            total[field] += val
+        bucket = services.setdefault(svc, dict(base))
+        calls = int(data.get("calls", 0))
+        tokens_in = int(data.get("tokens_in", 0))
+        tokens_out = int(data.get("tokens_out", 0))
+        cost_actual = float(data.get("cost_usd", 0) or 0)
+        cost_shadow = calc_shadow_cost(tokens_in, tokens_out)
+        bucket["calls"] += calls
+        bucket["tokens_in"] += tokens_in
+        bucket["tokens_out"] += tokens_out
+        bucket["cost_actual_usd"] += cost_actual
+        bucket["cost_shadow_usd"] += cost_shadow
+        total["calls"] += calls
+        total["tokens_in"] += tokens_in
+        total["tokens_out"] += tokens_out
+        total["cost_actual_usd"] += cost_actual
+        total["cost_shadow_usd"] += cost_shadow
+        if svc in _VLLM_SERVICES and calls > 0:
+            vllm_active_days.add(day)
+
+    # vLLM amortized = active 일수 × daily. 미사용 일은 amortize 안 시킴.
+    vllm_amortized = VLLM_AMORTIZED_DAILY_USD * len(vllm_active_days)
+    # 이번 달의 총 일수도 참고로 (UI 에서 "X / N 일 활성" 표기용).
+    try:
+        year, month = (int(p) for p in target_month.split("-"))
+        days_in_month = calendar.monthrange(year, month)[1]
+    except (ValueError, calendar.IllegalMonthError):
+        days_in_month = 0
 
     # 0 인 서비스는 제거
     services = {
         k: v for k, v in services.items() if v["calls"] or v["tokens_in"] or v["tokens_out"]
     }
 
-    return {"month": target_month, "services": services, "total": total}
+    return {
+        "month": target_month,
+        "services": services,
+        "total": total,
+        "vllm_amortized_monthly_usd": vllm_amortized,
+        "vllm_active_days": len(vllm_active_days),
+        "days_in_month": days_in_month,
+    }
 
 
 @router.get("/features")

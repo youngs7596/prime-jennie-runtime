@@ -92,6 +92,9 @@ async def test_universe_feeder_returns_top_n_codes_ordered():
     assert "FROM stock_masters" in sql
     assert "is_active = TRUE" in sql
     assert "market_cap IS NOT NULL" in sql
+    assert "security_type = 'STOCK'" in sql
+    # 2026-05-26 회귀 방지: KOSPI 필터가 SQL 에 포함돼야 KOSDAQ 종목이 universe 에서 빠진다.
+    assert "market = 'KOSPI'" in sql
     assert "ORDER BY market_cap DESC" in sql
     assert params == {"n": 3}
 

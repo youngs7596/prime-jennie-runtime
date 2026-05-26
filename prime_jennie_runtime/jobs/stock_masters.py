@@ -11,6 +11,9 @@ v3 어댑터:
 - v2 와 동일하게 sector 매핑 미존재 종목은 sector_group="기타" 로 fall through.
 - 2026-05-25: security_type 컬럼 채움. kis-gateway search-info 호출해서
   ST→STOCK / EF→ETF / EN→ETN / EW→ELW 매핑. universe SQL 이 STOCK 만 사용.
+- 2026-05-26: 같은 search-info 응답의 mket_id_cd (STK/KSQ) 로 market 컬럼도
+  정정. NAVER 시총 페이지가 KOSDAQ 종목을 KOSPI 로 박은 케이스를 KIS 정본으로
+  덮어쓰기 — universe 의 KOSPI 필터가 의미를 가지려면 마스터 라벨이 정확해야.
 """
 
 from __future__ import annotations
@@ -41,27 +44,41 @@ _SCTY_GRP_TO_TYPE = {
     "EW": "ELW",
 }
 
+_MKET_TO_MARKET = {
+    "STK": "KOSPI",
+    "KSQ": "KOSDAQ",
+}
 
-async def _fetch_security_type(
-    http: httpx.AsyncClient, kis_gateway_url: str, stock_code: str
-) -> str:
-    """KIS search-info 응답의 scty_grp_id_cd → security_type 매핑.
 
-    실패 시 'STOCK' default (안전 측 — universe SQL 이 STOCK 만 보므로
-    분류 실패 종목은 포함됨).
+async def _fetch_master_info(
+    http: httpx.AsyncClient,
+    kis_gateway_url: str,
+    stock_code: str,
+    *,
+    default_market: str,
+) -> tuple[str, str]:
+    """KIS search-info 응답 → (market, security_type).
+
+    실패 시 (default_market, 'STOCK') fallback. universe SQL 은 STOCK + KOSPI 만
+    보므로 분류 실패 종목이 호출자 의도와 어긋나지 않게 함수 인자의 시장을
+    그대로 둔다.
     """
     url = f"{kis_gateway_url.rstrip('/')}/api/quotations/search-info/{stock_code}"
     try:
         resp = await http.get(url, timeout=10.0)
         if resp.status_code == 404:
-            return DEFAULT_SECURITY_TYPE
+            return default_market, DEFAULT_SECURITY_TYPE
         resp.raise_for_status()
         info = resp.json() or {}
     except Exception:
-        logger.warning("search-info HTTP 실패 %s — STOCK fallback", stock_code, exc_info=True)
-        return DEFAULT_SECURITY_TYPE
+        logger.warning("search-info HTTP 실패 %s — fallback", stock_code, exc_info=True)
+        return default_market, DEFAULT_SECURITY_TYPE
     grp = info.get("scty_grp_id_cd") or ""
-    return _SCTY_GRP_TO_TYPE.get(grp, DEFAULT_SECURITY_TYPE)
+    mket = info.get("mket_id_cd") or ""
+    return (
+        _MKET_TO_MARKET.get(mket, default_market),
+        _SCTY_GRP_TO_TYPE.get(grp, DEFAULT_SECURITY_TYPE),
+    )
 
 
 async def seed_stock_masters(
@@ -115,12 +132,16 @@ async def seed_stock_masters(
                     else DEFAULT_SECTOR_GROUP
                 )
                 if kis_gateway_url:
-                    security_type = await _fetch_security_type(http, kis_gateway_url, s.stock_code)
+                    row_market, security_type = await _fetch_master_info(
+                        http, kis_gateway_url, s.stock_code, default_market=market
+                    )
                     await asyncio.sleep(SECURITY_TYPE_RATE_LIMIT_DELAY_SEC)
                 else:
+                    row_market = market
                     security_type = DEFAULT_SECURITY_TYPE
 
                 # COALESCE 패턴으로 v2 의 "값 있을 때만 덮어쓰기" 의미 보존.
+                # market 은 KIS search-info 의 정본을 신뢰해 덮어쓴다.
                 await conn.execute(
                     "INSERT INTO stock_masters "
                     "(stock_code, stock_name, market, market_cap, sector_naver, "
@@ -128,6 +149,7 @@ async def seed_stock_masters(
                     "VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, NOW()) "
                     "ON CONFLICT (stock_code) DO UPDATE SET "
                     "stock_name = EXCLUDED.stock_name, "
+                    "market = EXCLUDED.market, "
                     "market_cap = COALESCE("
                     "    EXCLUDED.market_cap, stock_masters.market_cap"
                     "), "
@@ -145,7 +167,7 @@ async def seed_stock_masters(
                     "updated_at = NOW()",
                     s.stock_code,
                     s.stock_name,
-                    market,
+                    row_market,
                     s.market_cap if s.market_cap else None,
                     sector or None,
                     group,

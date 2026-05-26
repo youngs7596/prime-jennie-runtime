@@ -70,6 +70,7 @@ class RealUniverseFeeder:
                     "SELECT stock_code FROM stock_masters "
                     "WHERE is_active = TRUE AND market_cap IS NOT NULL "
                     "  AND security_type = 'STOCK' "
+                    "  AND market = 'KOSPI' "
                     "ORDER BY market_cap DESC LIMIT :n"
                 ),
                 {"n": self._size},

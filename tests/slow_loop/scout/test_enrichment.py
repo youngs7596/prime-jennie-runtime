@@ -1,15 +1,21 @@
-"""결정론 enrichment — 순수 헬퍼 테스트.
+"""결정론 enrichment — 순수 헬퍼 + SQL 패턴 테스트.
 
-DB batch 로더는 fixture 없이 검증 불가 — sentiment 척도 변환 + snapshot 합성만.
+DB batch 로더 검증 중 SQL 형태와 row→model 매핑은 _FakeEngine 로 가능,
+실 Postgres 라운드트립은 통합 테스트에서 담당.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
+
+import pytest
 
 from prime_jennie_runtime.slow_loop.scout.enrichment import (
     DailyPrice,
     _build_snapshot,
+    _load_fundamentals,
     _sentiment_to_0_100,
 )
 
@@ -68,3 +74,83 @@ class TestBuildSnapshot:
         snap = _build_snapshot("005930", prices)
         assert snap is not None
         assert snap.change_pct == 10.0  # 110/100 - 1
+
+
+# --- _load_fundamentals SQL 패턴 -------------------------------------
+
+
+@dataclass
+class _FakeResult:
+    rows: list[Any] = field(default_factory=list)
+
+    def all(self) -> list[Any]:
+        return list(self.rows)
+
+    def mappings(self) -> _FakeResult:
+        return self
+
+
+@dataclass
+class _FakeConn:
+    rows: list[dict] = field(default_factory=list)
+    executed: list[tuple[str, dict]] = field(default_factory=list)
+
+    async def execute(self, stmt, params=None) -> _FakeResult:
+        self.executed.append((str(stmt), dict(params or {})))
+        return _FakeResult(rows=list(self.rows))
+
+    async def __aenter__(self) -> _FakeConn:
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+
+@dataclass
+class _FakeEngine:
+    conn: _FakeConn
+
+    def connect(self) -> _FakeConn:
+        return self.conn
+
+
+class TestLoadFundamentalsSql:
+    """SQL 이 컬럼별 최신 non-null 를 잡는 CTE 패턴인지 확인.
+
+    2026-05-26 회귀 방지: 단일 DISTINCT ON 으로 돌아가면 ROE-only 월간 갱신이
+    PER/PBR null 행을 최신으로 골라 quality/value 점수를 왜곡한다.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sql_has_column_wise_latest_ctes(self):
+        conn = _FakeConn(rows=[])
+        engine = _FakeEngine(conn)
+
+        await _load_fundamentals(engine, ["005930"], as_of=date(2026, 5, 26))  # type: ignore[arg-type]
+
+        sql, params = conn.executed[0]
+        assert "per_latest" in sql
+        assert "pbr_latest" in sql
+        assert "roe_latest" in sql
+        assert "per IS NOT NULL" in sql
+        assert "pbr IS NOT NULL" in sql
+        assert "roe IS NOT NULL" in sql
+        assert params == {"codes": ["005930"], "as_of": date(2026, 5, 26)}
+
+    @pytest.mark.asyncio
+    async def test_returns_financial_trend_from_rows(self):
+        conn = _FakeConn(
+            rows=[
+                {"stock_code": "005930", "per": 11.04, "pbr": 3.73, "roe": 44.15},
+                {"stock_code": "000660", "per": None, "pbr": None, "roe": 12.5},
+            ]
+        )
+        engine = _FakeEngine(conn)
+
+        out = await _load_fundamentals(engine, ["005930", "000660"], as_of=date(2026, 5, 26))  # type: ignore[arg-type]
+
+        assert out["005930"].per == 11.04
+        assert out["005930"].pbr == 3.73
+        assert out["005930"].roe == 44.15
+        assert out["000660"].per is None
+        assert out["000660"].roe == 12.5

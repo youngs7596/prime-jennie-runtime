@@ -353,13 +353,38 @@ async def _load_investor_trading(
 async def _load_fundamentals(
     engine: AsyncEngine, codes: list[str], *, as_of: date
 ) -> dict[str, FinancialTrend]:
-    """stock_fundamentals 에서 종목별 최신(trade_date<=as_of) per/pbr/roe."""
+    """stock_fundamentals 에서 종목별 최신(trade_date<=as_of) per/pbr/roe.
+
+    컬럼별로 따로 최신 non-null 행을 잡는다. ROE 만 채우는 월간 잡 (collect_naver_roe)
+    이 PER/PBR null 인 더 최신 trade_date 행을 만드는 경우가 있어, 단일 DISTINCT ON
+    으로는 PER/PBR 이 가려진다. 2026-05-26 진단 참고 (project_fundamentals_asymmetry).
+    """
     stmt = text(
         """
-        SELECT DISTINCT ON (stock_code) stock_code, per, pbr, roe
-        FROM stock_fundamentals
-        WHERE stock_code = ANY(:codes) AND trade_date <= :as_of
-        ORDER BY stock_code, trade_date DESC
+        WITH per_latest AS (
+            SELECT DISTINCT ON (stock_code) stock_code, per
+            FROM stock_fundamentals
+            WHERE stock_code = ANY(:codes) AND trade_date <= :as_of AND per IS NOT NULL
+            ORDER BY stock_code, trade_date DESC
+        ),
+        pbr_latest AS (
+            SELECT DISTINCT ON (stock_code) stock_code, pbr
+            FROM stock_fundamentals
+            WHERE stock_code = ANY(:codes) AND trade_date <= :as_of AND pbr IS NOT NULL
+            ORDER BY stock_code, trade_date DESC
+        ),
+        roe_latest AS (
+            SELECT DISTINCT ON (stock_code) stock_code, roe
+            FROM stock_fundamentals
+            WHERE stock_code = ANY(:codes) AND trade_date <= :as_of AND roe IS NOT NULL
+            ORDER BY stock_code, trade_date DESC
+        )
+        SELECT m.code AS stock_code, p.per, b.pbr, r.roe
+        FROM unnest(CAST(:codes AS TEXT[])) AS m(code)
+        LEFT JOIN per_latest p ON p.stock_code = m.code
+        LEFT JOIN pbr_latest b ON b.stock_code = m.code
+        LEFT JOIN roe_latest r ON r.stock_code = m.code
+        WHERE p.per IS NOT NULL OR b.pbr IS NOT NULL OR r.roe IS NOT NULL
         """
     )
     out: dict[str, FinancialTrend] = {}
@@ -432,9 +457,7 @@ async def _load_consensus(
         if row["forward_eps"] is not None and code in old_eps:
             old_date, old_val = old_eps[code]
             if old_val != 0 and old_date != row["trade_date"]:
-                info.eps_revision_pct = (
-                    (float(row["forward_eps"]) - old_val) / abs(old_val) * 100
-                )
+                info.eps_revision_pct = (float(row["forward_eps"]) - old_val) / abs(old_val) * 100
         out[code] = info
     return out
 

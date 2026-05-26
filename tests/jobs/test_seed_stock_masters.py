@@ -164,7 +164,9 @@ async def test_seed_stock_masters_populates_security_type_via_gateway(monkeypatc
 
     def handler(req: httpx.Request) -> httpx.Response:
         code = req.url.path.rsplit("/", 1)[-1]
-        return httpx.Response(200, json={"scty_grp_id_cd": grp_by_code.get(code, "")})
+        return httpx.Response(
+            200, json={"scty_grp_id_cd": grp_by_code.get(code, ""), "mket_id_cd": "STK"}
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         await smod.seed_stock_masters(
@@ -178,20 +180,82 @@ async def test_seed_stock_masters_populates_security_type_via_gateway(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_fetch_security_type_falls_back_to_stock_on_http_failure():
+async def test_seed_stock_masters_corrects_market_from_kis(monkeypatch):
+    """KIS search-info 의 mket_id_cd=KSQ 면 market 라벨이 KOSDAQ 으로 정정.
+
+    NAVER 시총 KOSPI 페이지가 KOSDAQ 종목을 잘못 끼워 넣은 케이스를 KIS 정본으로
+    덮어쓰는지 확인. 2026-05-26 서진시스템 사고의 회귀 방지.
+    """
+    pool = _FakePool(existing=[])
+
+    async def fake_market(client, market):
+        return [
+            MarketStock(stock_code="005930", stock_name="삼성전자", market_cap=400_000_000),
+            MarketStock(stock_code="178320", stock_name="서진시스템", market_cap=8_000_000),
+        ]
+
+    async def fake_sectors(client):
+        return {"005930": "전기전자", "178320": "전기전자"}
+
+    monkeypatch.setattr(smod, "fetch_market_stocks", fake_market)
+    monkeypatch.setattr(smod, "build_naver_sector_mapping", fake_sectors)
+    monkeypatch.setattr(smod, "SECURITY_TYPE_RATE_LIMIT_DELAY_SEC", 0.0)
+
+    mket_by_code = {"005930": "STK", "178320": "KSQ"}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        code = req.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200, json={"scty_grp_id_cd": "ST", "mket_id_cd": mket_by_code.get(code, "")}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        await smod.seed_stock_masters(
+            pool, client, market="KOSPI", kis_gateway_url="http://kis-gateway:8080"
+        )
+
+    inserts = [c for c in pool.conn.execute_calls if "INSERT INTO stock_masters" in c[0]]
+    by_code = {c[1][0]: c[1][2] for c in inserts}  # idx 2 = market 컬럼
+    assert by_code["005930"] == "KOSPI"
+    assert by_code["178320"] == "KOSDAQ"
+    # UPSERT SQL 이 market = EXCLUDED.market 로 기존 라벨도 덮어쓰는지.
+    assert "market = EXCLUDED.market" in inserts[0][0]
+
+
+@pytest.mark.asyncio
+async def test_fetch_master_info_falls_back_on_http_failure():
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(503)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await smod._fetch_security_type(client, "http://kis-gateway:8080", "005930")
-    assert result == "STOCK"
+        market, sec_type = await smod._fetch_master_info(
+            client, "http://kis-gateway:8080", "005930", default_market="KOSPI"
+        )
+    assert market == "KOSPI"
+    assert sec_type == "STOCK"
 
 
 @pytest.mark.asyncio
-async def test_fetch_security_type_unknown_grp_falls_back_to_stock():
+async def test_fetch_master_info_unknown_codes_fall_back():
     def handler(req: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"scty_grp_id_cd": "ZZ"})
+        return httpx.Response(200, json={"scty_grp_id_cd": "ZZ", "mket_id_cd": "XX"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        result = await smod._fetch_security_type(client, "http://kis-gateway:8080", "005930")
-    assert result == "STOCK"
+        market, sec_type = await smod._fetch_master_info(
+            client, "http://kis-gateway:8080", "005930", default_market="KOSDAQ"
+        )
+    assert market == "KOSDAQ"
+    assert sec_type == "STOCK"
+
+
+@pytest.mark.asyncio
+async def test_fetch_master_info_maps_ksq_to_kosdaq():
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"scty_grp_id_cd": "ST", "mket_id_cd": "KSQ"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        market, sec_type = await smod._fetch_master_info(
+            client, "http://kis-gateway:8080", "178320", default_market="KOSPI"
+        )
+    assert market == "KOSDAQ"
+    assert sec_type == "STOCK"

@@ -3,14 +3,17 @@
 v2 `prime_jennie/services/scout/enrichment.py` 의 포팅 (2026-05-22, Phase 1 a).
 v2 는 종목별 동기 쿼리 + KIS 스냅샷 병렬 수집이었다. v3 포팅은:
   - v3 postgres 테이블(daily_prices / stock_investor_tradings / stock_fundamentals /
-    stock_consensus / news_sentiments / stock_masters)에서 async SQLAlchemy 로드.
+    stock_consensus / news_events / stock_masters)에서 async SQLAlchemy 로드.
   - 종목별 N회 쿼리 대신 universe 전체 batch 쿼리 (`= ANY(:codes)`) — 집계 로직은
     v2 와 동일, fetch 만 batch. 200종목 × 5테이블 = 1000쿼리 → 6쿼리.
   - KIS 실시간 스냅샷 호출은 포팅하지 않음 (선정 경로 외부 의존 최소화) —
     `StockSnapshot` 은 daily_prices 최신행에서 합성 (price=마지막 종가,
     high_52w=로드 윈도우 내 최고가 — 윈도우 제한 근사, docstring 명시).
-  - news factor: v2 `news_sentiment_avg` (0-100) → v3 `news_sentiments.score`
-    (-1~1 척도) 를 0-100 으로 변환 후 평균 (quant.py `_news_score` 무수정 유지).
+  - news factor: 2026-05-26 까지는 v2 `news_sentiment_avg` (옛 news_sentiments
+    테이블 14일 평균) 를 사용. v3 의 news_pipeline_kor 가 Qwen3 메타데이터로
+    옮겨가면서 news_sentiments 테이블이 4-21 부터 비기 시작 → 모든 종목 news
+    점수 중립. 2026-05-26 fix 로 `RealNewsEventFeeder` 의 events_by_impact 분포를
+    그대로 받아서 quant.py 의 `_news_score` 가 impact level × event type 으로 계산.
 
 에러 격리: 테이블별 쿼리 실패 시 해당 필드만 비고 진행 (fail-open) — v2 동일.
 """
@@ -25,12 +28,14 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from .feeders.real import RealNewsEventFeeder
+from .schemas import NewsEventEntry
+
 logger = logging.getLogger(__name__)
 
-# v2 enrichment.py 기본 윈도우 — 일봉 150일, 수급 60일, 뉴스 14일, 컨센서스 30일.
+# v2 enrichment.py 기본 윈도우 — 일봉 150일, 수급 60일, 컨센서스 30일.
 DAILY_PRICE_LOOKBACK_DAYS = 150
 INVESTOR_LOOKBACK_DAYS = 60
-NEWS_LOOKBACK_DAYS = 14
 CONSENSUS_HISTORY_DAYS = 30
 
 
@@ -118,7 +123,7 @@ class EnrichedCandidate(BaseModel):
     master: StockMaster
     snapshot: StockSnapshot | None = None
     daily_prices: list[DailyPrice] = []
-    news_sentiment_avg: float | None = None
+    news_event: NewsEventEntry | None = None  # 2026-05-26: news_sentiment_avg 대체
     investor_trading: InvestorTradingSummary | None = None
     financial_trend: FinancialTrend | None = None
     consensus: ConsensusInfo | None = None
@@ -130,14 +135,6 @@ class EnrichedCandidate(BaseModel):
 # =====================================================================
 # v3 DB batch 로더
 # =====================================================================
-
-
-def _sentiment_to_0_100(score: float) -> float:
-    """v3 news_sentiments.score (-1~1 척도) → v2 _news_score 가 기대하는 0-100.
-
-    실측 분포 min -0.6 / max 0.7 / avg 0.38. 선형 변환 (score+1)/2*100 후 클램프.
-    """
-    return max(0.0, min(100.0, (score + 1.0) / 2.0 * 100.0))
 
 
 async def enrich_universe(
@@ -170,7 +167,7 @@ async def enrich_universe(
     trading = await _load_investor_trading(engine, codes, as_of=as_of)
     fundamentals = await _load_fundamentals(engine, codes, as_of=as_of)
     consensus = await _load_consensus(engine, codes, as_of=as_of)
-    news = await _load_news_sentiment(engine, codes, as_of=as_of)
+    news_events = await _load_news_events(engine, codes, as_of=as_of)
 
     result: dict[str, EnrichedCandidate] = {}
     for code, master in masters.items():
@@ -180,7 +177,7 @@ async def enrich_universe(
         candidate.investor_trading = trading.get(code)
         candidate.financial_trend = fundamentals.get(code)
         candidate.consensus = consensus.get(code)
-        candidate.news_sentiment_avg = news.get(code)
+        candidate.news_event = news_events.get(code)
         result[code] = candidate
 
     logger.info(
@@ -190,7 +187,7 @@ async def enrich_universe(
         sum(1 for c in result.values() if c.investor_trading),
         sum(1 for c in result.values() if c.financial_trend),
         sum(1 for c in result.values() if c.consensus),
-        sum(1 for c in result.values() if c.news_sentiment_avg is not None),
+        sum(1 for c in result.values() if c.news_event and c.news_event.article_count > 0),
     )
     return result
 
@@ -462,43 +459,20 @@ async def _load_consensus(
     return out
 
 
-async def _load_news_sentiment(
+async def _load_news_events(
     engine: AsyncEngine, codes: list[str], *, as_of: date
-) -> dict[str, float]:
-    """news_sentiments 14일 평균 → v2 0-100 척도로 변환.
+) -> dict[str, NewsEventEntry]:
+    """RealNewsEventFeeder 위임 — Qwen3 메타데이터 기반 news_events 분포.
 
-    v3 news_sentiments.score 는 -1~1 척도라 _sentiment_to_0_100 으로 변환 후
-    종목별 평균. quant.py `_news_score` 는 0-100 가정이므로 무수정 유지.
+    LLM 프롬프트용 path (context_builder) 와 같은 feeder 를 공유. 결과는
+    종목별 NewsEventEntry — events_by_impact / positive_events / risk_events /
+    article_count / staleness_hours 를 quant.`_news_score` 가 직접 사용.
     """
-    since = as_of - timedelta(days=NEWS_LOOKBACK_DAYS)
-    stmt = text(
-        """
-        SELECT ticker, score
-        FROM news_sentiments
-        WHERE ticker = ANY(:codes)
-          AND analyzed_at >= :since AND analyzed_at < :until
-        """
-    )
-    by_code: dict[str, list[float]] = {}
     try:
-        async with engine.connect() as conn:
-            res = await conn.execute(
-                stmt,
-                {
-                    "codes": codes,
-                    "since": since,
-                    "until": as_of + timedelta(days=1),
-                },
-            )
-            for row in res.mappings().all():
-                by_code.setdefault(row["ticker"], []).append(
-                    _sentiment_to_0_100(float(row["score"]))
-                )
+        return await RealNewsEventFeeder(engine).fetch(as_of, codes)
     except Exception:
-        logger.exception("_load_news_sentiment 실패 — 빈 dict (fail-open)")
+        logger.exception("_load_news_events 실패 — 빈 dict (fail-open)")
         return {}
-
-    return {code: sum(vals) / len(vals) for code, vals in by_code.items() if vals}
 
 
 __all__ = [

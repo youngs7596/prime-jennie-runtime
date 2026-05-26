@@ -29,6 +29,7 @@ from typing import Self
 from pydantic import BaseModel, model_validator
 
 from .enrichment import DailyPrice, EnrichedCandidate
+from .schemas import POSITIVE_EVENT_TYPES, RISK_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -397,13 +398,41 @@ def _technical_score(prices: list[DailyPrice]) -> float:
 
 
 def _news_score(candidate: EnrichedCandidate) -> float:
-    """뉴스 점수 (0-10): 감성 모멘텀."""
-    sentiment = candidate.news_sentiment_avg
-    if sentiment is None:
+    """뉴스 점수 (0-10): impact level × event type 분포 기반.
+
+    2026-05-26 재작성. 옛 path (news_sentiments 14일 평균 → 0-100 score) 가
+    Qwen3 메타데이터 전환 이후 4-21 부터 비어서 모든 종목 중립 5점으로 굳어
+    있던 문제 해결. RealNewsEventFeeder 가 채운 events_by_impact 를 직접 산식화.
+
+    산식:
+      base 5
+      + min(3, high impact positive event 건수 × 1.5)
+      + min(1, medium impact positive event 건수 × 0.5)
+      - min(4, high impact risk event 건수 × 2.0)
+      - min(1, medium impact risk event 건수 × 0.5)
+      - 0.5 if staleness > 24h (정보 가치 감쇄)
+    """
+    entry = candidate.news_event
+    if entry is None or entry.article_count == 0:
         return V2_NEUTRAL["news"]
 
-    # sentiment_score: 0=극부정, 50=중립, 100=극긍정
-    return _linear_map(sentiment, 20, 80, 0, 10)
+    high = entry.events_by_impact.get("high", {})
+    medium = entry.events_by_impact.get("medium", {})
+    high_pos = sum(high.get(t, 0) for t in POSITIVE_EVENT_TYPES)
+    high_risk = sum(high.get(t, 0) for t in RISK_EVENT_TYPES)
+    med_pos = sum(medium.get(t, 0) for t in POSITIVE_EVENT_TYPES)
+    med_risk = sum(medium.get(t, 0) for t in RISK_EVENT_TYPES)
+
+    score = 5.0
+    score += min(3.0, high_pos * 1.5)
+    score += min(1.0, med_pos * 0.5)
+    score -= min(4.0, high_risk * 2.0)
+    score -= min(1.0, med_risk * 0.5)
+
+    if entry.staleness_hours > 24:
+        score -= 0.5
+
+    return max(0.0, min(10.0, score))
 
 
 def _sector_momentum_score(candidate: EnrichedCandidate) -> float:

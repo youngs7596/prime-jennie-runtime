@@ -34,6 +34,7 @@ from prime_jennie_runtime.slow_loop.scout.quant import (
     _value_score,
     score_candidate,
 )
+from prime_jennie_runtime.slow_loop.scout.schemas import NewsEventEntry
 
 # ─── Fixtures ────────────────────────────────────────────────────
 
@@ -71,7 +72,7 @@ def _make_candidate(
     snapshot: StockSnapshot | None = None,
     ft: FinancialTrend | None = None,
     it: InvestorTradingSummary | None = None,
-    news_avg: float | None = None,
+    news_event: NewsEventEntry | None = None,
 ) -> EnrichedCandidate:
     return EnrichedCandidate(
         master=_make_master(),
@@ -79,7 +80,35 @@ def _make_candidate(
         daily_prices=prices or [],
         financial_trend=ft,
         investor_trading=it,
-        news_sentiment_avg=news_avg,
+        news_event=news_event,
+    )
+
+
+def _news_entry(
+    high_pos: int = 0,
+    high_risk: int = 0,
+    med_pos: int = 0,
+    med_risk: int = 0,
+    *,
+    article_count: int | None = None,
+    staleness_hours: float = 2.0,
+) -> NewsEventEntry:
+    """impact level 별 positive/risk event 수로 NewsEventEntry 합성 — 테스트 fixture."""
+    events_by_impact: dict[str, dict[str, int]] = {}
+    if high_pos:
+        events_by_impact.setdefault("high", {})["earnings"] = high_pos
+    if high_risk:
+        events_by_impact.setdefault("high", {})["lawsuit"] = high_risk
+    if med_pos:
+        events_by_impact.setdefault("medium", {})["contract"] = med_pos
+    if med_risk:
+        events_by_impact.setdefault("medium", {})["regulation"] = med_risk
+    total = high_pos + high_risk + med_pos + med_risk
+    return NewsEventEntry(
+        article_count=article_count if article_count is not None else max(total, 1),
+        latest_at=None,
+        staleness_hours=staleness_hours,
+        events_by_impact=events_by_impact,
     )
 
 
@@ -92,7 +121,7 @@ class TestScoreCandidate:
             prices=_make_prices(150),
             ft=FinancialTrend(per=12.0, pbr=1.5, roe=12.0),
             it=InvestorTradingSummary(foreign_net_buy_sum=1e9, institution_net_buy_sum=5e8),
-            news_avg=60.0,
+            news_event=_news_entry(high_pos=1),
         )
         result = score_candidate(candidate)
 
@@ -137,7 +166,7 @@ class TestScoreCandidate:
                 institution_net_buy_sum=10e9,
                 foreign_ratio_trend=2.0,
             ),
-            news_avg=95.0,
+            news_event=_news_entry(high_pos=3),
             snapshot=StockSnapshot(stock_code="005930", price=80000, high_52w=90000, low_52w=50000),
         )
         result = score_candidate(candidate)
@@ -217,14 +246,54 @@ class TestTechnicalScore:
 
 
 class TestNewsScore:
-    def test_positive_sentiment_high_score(self):
-        assert _news_score(_make_candidate(news_avg=80.0)) >= 8.0
-
-    def test_negative_sentiment_low_score(self):
-        assert _news_score(_make_candidate(news_avg=20.0)) <= 2.0
-
     def test_no_data_returns_neutral(self):
         assert _news_score(_make_candidate()) == V2_NEUTRAL["news"]
+
+    def test_zero_article_count_returns_neutral(self):
+        entry = NewsEventEntry(article_count=0, staleness_hours=48.0)
+        assert _news_score(_make_candidate(news_event=entry)) == V2_NEUTRAL["news"]
+
+    def test_high_impact_positive_event_lifts_score(self):
+        # high_pos=1 → +1.5 → 6.5
+        candidate = _make_candidate(news_event=_news_entry(high_pos=1))
+        assert _news_score(candidate) == 6.5
+
+    def test_high_impact_positive_caps_at_three(self):
+        # high_pos=3 → cap 3 → 8.0
+        candidate = _make_candidate(news_event=_news_entry(high_pos=3))
+        assert _news_score(candidate) == 8.0
+
+    def test_high_impact_risk_drops_score(self):
+        # high_risk=1 → -2 → 3.0
+        candidate = _make_candidate(news_event=_news_entry(high_risk=1))
+        assert _news_score(candidate) == 3.0
+
+    def test_high_impact_risk_caps_at_four(self):
+        # high_risk=3 → cap 4 → 1.0
+        candidate = _make_candidate(news_event=_news_entry(high_risk=3))
+        assert _news_score(candidate) == 1.0
+
+    def test_medium_positive_modest_lift(self):
+        # med_pos=1 → +0.5 → 5.5
+        candidate = _make_candidate(news_event=_news_entry(med_pos=1))
+        assert _news_score(candidate) == 5.5
+
+    def test_positive_and_risk_offset(self):
+        # high_pos=2 (+3) high_risk=2 (-4) → 4.0
+        candidate = _make_candidate(news_event=_news_entry(high_pos=2, high_risk=2))
+        assert _news_score(candidate) == 4.0
+
+    def test_staleness_over_24h_decays(self):
+        # high_pos=1 (+1.5) staleness=30h (-0.5) → 6.0
+        candidate = _make_candidate(news_event=_news_entry(high_pos=1, staleness_hours=30.0))
+        assert _news_score(candidate) == 6.0
+
+    def test_score_clamped_to_zero(self):
+        # high_risk=5 (-4 cap) + med_risk=5 (-1 cap) + stale 30h (-0.5) → 5 - 5.5 = -0.5 → 0
+        candidate = _make_candidate(
+            news_event=_news_entry(high_risk=5, med_risk=5, staleness_hours=30.0)
+        )
+        assert _news_score(candidate) == 0.0
 
 
 class TestSectorMomentumScore:

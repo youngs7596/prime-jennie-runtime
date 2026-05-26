@@ -16,7 +16,6 @@ from prime_jennie_runtime.slow_loop.scout.enrichment import (
     DailyPrice,
     _build_snapshot,
     _load_fundamentals,
-    _sentiment_to_0_100,
 )
 
 
@@ -30,27 +29,6 @@ def _price(close: int, high: int, low: int) -> DailyPrice:
         close_price=close,
         volume=1_000_000,
     )
-
-
-class TestSentimentTo0100:
-    def test_neutral_maps_to_50(self):
-        assert _sentiment_to_0_100(0.0) == 50.0
-
-    def test_max_positive_maps_to_100(self):
-        assert _sentiment_to_0_100(1.0) == 100.0
-
-    def test_max_negative_maps_to_0(self):
-        assert _sentiment_to_0_100(-1.0) == 0.0
-
-    def test_observed_positive_avg(self):
-        """실측 평균 0.38 → ~69."""
-        assert _sentiment_to_0_100(0.38) == 69.0
-
-    def test_clamped_above_1(self):
-        assert _sentiment_to_0_100(2.0) == 100.0
-
-    def test_clamped_below_minus1(self):
-        assert _sentiment_to_0_100(-3.0) == 0.0
 
 
 class TestBuildSnapshot:

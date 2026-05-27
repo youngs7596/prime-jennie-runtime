@@ -38,6 +38,11 @@ from prime_jennie_runtime.coordinator.publish import (
     COORDINATOR_STREAM_MAXLEN,
     publish_event,
 )
+from prime_jennie_runtime.coordinator.state import (
+    HeldPositionSummary,
+    HeldSource,
+    get_held_positions,
+)
 
 __all__ = [
     "COORDINATOR_CONSUMER_ENV",
@@ -52,8 +57,11 @@ __all__ = [
     "ExitDecidedEvent",
     "ExitFilledEvent",
     "ExternalEvent",
+    "HeldPositionSummary",
+    "HeldSource",
     "PolicyChangedEvent",
     "SheetPublishedEvent",
+    "get_held_positions",
     "publish_event",
     "run_listener",
 ]

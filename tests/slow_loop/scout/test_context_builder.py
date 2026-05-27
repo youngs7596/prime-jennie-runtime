@@ -110,3 +110,76 @@ async def test_today_exits_failopen_on_db_error():
 
     result = await _fetch_today_exits(_BrokenEngine())
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_held_positions_empty_when_no_engine():
+    """Coordinator A1 v1 — engine 미주입 시 held_positions 빈 list (fail-open)."""
+    builder = ScoutContextBuilder(
+        universe=StubUniverseFeeder(),
+        news=StubNewsEventFeeder(),
+        sector=StubSectorMomentumFeeder(),
+        market=StubMarketSummaryFeeder(),
+    )
+    macro = MacroStateForScout(gate="open", size_multiplier=1.0, gate_run_id="m1")
+    ctx = await builder.build(as_of=date(2026, 4, 16), macro_state=macro)
+    assert ctx.held_positions == []
+
+
+@pytest.mark.asyncio
+async def test_held_positions_injected_from_state_hub(monkeypatch):
+    """get_held_positions 결과가 ScoutContext.held_positions 로 그대로 주입된다."""
+    from prime_jennie_runtime.coordinator.state import HeldPositionSummary
+    from prime_jennie_runtime.slow_loop.scout import context_builder as cb_mod
+
+    fixture = [
+        HeldPositionSummary(
+            ticker="005930",
+            name="삼성전자",
+            quantity=100,
+            average_buy_price=70_000,
+            source="mixed",
+            open_sheet_ids=["ps_x"],
+        ),
+    ]
+
+    async def fake_get_held(engine, *, ticker=None):
+        return fixture
+
+    monkeypatch.setattr(cb_mod, "get_held_positions", fake_get_held)
+
+    builder = ScoutContextBuilder(
+        universe=StubUniverseFeeder(),
+        news=StubNewsEventFeeder(),
+        sector=StubSectorMomentumFeeder(),
+        market=StubMarketSummaryFeeder(),
+        engine=object(),  # truthy — fake_get_held 가 결과 반환
+    )
+    macro = MacroStateForScout(gate="open", size_multiplier=1.0, gate_run_id="m1")
+    ctx = await builder.build(as_of=date(2026, 4, 16), macro_state=macro)
+
+    assert len(ctx.held_positions) == 1
+    assert ctx.held_positions[0].ticker == "005930"
+    assert ctx.held_positions[0].source == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_held_positions_failopen_on_state_error(monkeypatch):
+    """State Hub 가 예외 던지면 빈 list 로 fail-open — Scout 진행 보장."""
+    from prime_jennie_runtime.slow_loop.scout import context_builder as cb_mod
+
+    async def boom(engine, *, ticker=None):
+        raise RuntimeError("state hub down")
+
+    monkeypatch.setattr(cb_mod, "get_held_positions", boom)
+
+    builder = ScoutContextBuilder(
+        universe=StubUniverseFeeder(),
+        news=StubNewsEventFeeder(),
+        sector=StubSectorMomentumFeeder(),
+        market=StubMarketSummaryFeeder(),
+        engine=object(),
+    )
+    macro = MacroStateForScout(gate="open", size_multiplier=1.0, gate_run_id="m1")
+    ctx = await builder.build(as_of=date(2026, 4, 16), macro_state=macro)
+    assert ctx.held_positions == []

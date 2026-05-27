@@ -13,9 +13,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from prime_jennie_runtime.coordinator.state import HeldPositionSummary
 from prime_jennie_runtime.position_sheet.schema import ThesisCondition, ThesisSpec
 
-__all__ = ["ThesisCondition", "ThesisSpec"]  # re-export for downstream
+__all__ = ["HeldPositionSummary", "ThesisCondition", "ThesisSpec"]  # re-export for downstream
 
 # =====================================================================
 # 뉴스 / 매크로 입력 보조 타입
@@ -168,6 +169,9 @@ class ScoutContext(BaseModel):
     # G1 outcome 피드백 (2026-05-15 도입) — 최근 7일 청산 완료 추천 결과.
     # scout_outcomes_v1 view 에서 추출. enforcement 없음 (informational only).
     previous_outcomes: list[PreviousOutcome] = Field(default_factory=list)
+    # Coordinator A1 v1 (2026-05-27) — 현재 들고 있는 종목 (KIS 잔고 + 미청산 시트).
+    # 이번 commit 은 inject 만, quant/strategy 활용은 다음 commit. fail-open 빈 list.
+    held_positions: list[HeldPositionSummary] = Field(default_factory=list)
 
 
 # =====================================================================

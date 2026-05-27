@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from prime_jennie_runtime.coordinator.state import get_held_positions
 from prime_jennie_runtime.position_sheet.schema import ALLOWED_STRATEGY_TAGS
 
 from .feeders.base import (
@@ -196,6 +197,13 @@ class ScoutContextBuilder:
         today_exits = await _fetch_today_exits(self.engine)
         # G1 — outcome 피드백 (engine 주입 + view 존재 시).
         previous_outcomes = await _fetch_previous_outcomes(self.engine)
+        # Coordinator A1 v1 (2026-05-27) — 현재 보유 종목 노출 (inject 만, 활용은 별 commit).
+        # fail-open: engine None 또는 DB 오류 시 빈 list.
+        try:
+            held_positions = await get_held_positions(self.engine)
+        except Exception:
+            logger.exception("held_positions fetch failed — using empty list (fail-open)")
+            held_positions = []
 
         return ScoutContext(
             as_of=as_of,
@@ -212,4 +220,5 @@ class ScoutContextBuilder:
             recent_stop_loss_tickers=recent_stops,
             recently_exited_today_tickers=today_exits,
             previous_outcomes=previous_outcomes,
+            held_positions=held_positions,
         )

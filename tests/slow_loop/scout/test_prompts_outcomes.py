@@ -31,9 +31,9 @@ def _mk_outcome(
     )
 
 
-def test_prompt_version_bumped_to_v0_6():
-    """G1 도입에 따른 prompt version bump 확인."""
-    assert SCOUT_PROMPT_VERSION == "v0.6"
+def test_prompt_version_bumped_to_v0_8():
+    """prompt 내용 변경 시 버전 동반 bump 를 lock — 현재 v0.8 (G6 Phase A)."""
+    assert SCOUT_PROMPT_VERSION == "v0.8"
 
 
 def test_outcomes_section_empty():

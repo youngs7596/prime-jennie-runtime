@@ -251,6 +251,18 @@ SEEDS: list[SeedJob] = [
         cron="0 17 * * 1-5",
         kwargs={},
     ),
+    # paper_outcomes — STOP 상태에서 발행된 시트의 사후 paper PnL 측정 (2026-05-27 도입).
+    # daily_prices 가 16:00 갱신 후 충분 마진을 두고 18:00 KST 평일 시작. 윈도우(시트의
+    # time_stop hold_days) 가 닫힌 미측정 시트들 일괄 시뮬레이션 → paper_outcomes 적재.
+    # v0 은 일봉 simulator (overextension_exit 자동 skip), v1 에서 1분봉 어댑터 + scale_out
+    # 정밀 처리. control STOP 무관 — 시트는 STOP 중에도 DB 에 영속되므로 측정 대상으로 충분.
+    SeedJob(
+        id="job_worker.paper_outcomes_daily",
+        owner="job_worker",
+        handler_key="paper_outcomes_daily",
+        cron="0 18 * * 1-5",
+        kwargs={},
+    ),
     # Phase 2.13-1 — WSJ/Bloomberg/Reuters RSS 크롤러. 2시간 간격.
     SeedJob(
         id="job_worker.global_news_crawl",

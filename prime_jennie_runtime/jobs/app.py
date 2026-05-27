@@ -69,6 +69,7 @@ from .market_data import (
     refresh_market_caps,
 )
 from .minute_chart import collect_minute_chart
+from .paper_outcomes import measure_paper_outcomes
 from .positions import sync_positions
 from .positions_reconcile import reconcile_state_kis
 from .stock_masters import seed_stock_masters
@@ -214,6 +215,14 @@ def build_handlers(
     async def h_collect_full_market_data(top_n: int = 300, days: int = 30) -> None:
         await collect_full_market_data(pool, http, kis_gateway_url, top_n=top_n, days=days)
 
+    async def h_paper_outcomes_daily() -> None:
+        # 휴장일에는 daily_prices 갱신이 없어 측정할 새 시트가 없지만, 가드를 일관성
+        # 측면에서 적용. catch-up 이 필요하면 control-ui 에서 수동 트리거.
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("paper_outcomes_daily skipped: non-trading day")
+            return
+        await measure_paper_outcomes(pool)
+
     briefing_llm_caller = _build_briefing_llm_caller()
 
     async def h_daily_briefing_report() -> None:
@@ -273,6 +282,7 @@ def build_handlers(
         "weekly_factor_analysis": h_weekly_factor_analysis,
         "collect_minute_chart": h_collect_minute_chart,
         "collect_full_market_data": h_collect_full_market_data,
+        "paper_outcomes_daily": h_paper_outcomes_daily,
         "daily_briefing_report": h_daily_briefing_report,
         "global_news_crawl": h_global_news_crawl,
         "global_news_digest": h_global_news_digest,

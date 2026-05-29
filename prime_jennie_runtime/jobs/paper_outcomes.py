@@ -101,7 +101,17 @@ async def measure_paper_outcomes(pool: Any, *, today: date | None = None) -> dic
             stats["errors"] += 1
             continue
 
-        await _upsert_outcome(pool, outcome)
+        # upsert 도 시트별로 격리한다 — 한 건의 INSERT 실패(제약 위반 등)가 배치
+        # 전체를 롤백해 나머지 멀쩡한 시트까지 못 들어가는 일을 막는다. 도입 초기
+        # entry_price NOT NULL 제약이 data_missing 행을 거부하면서 이 격리 부재로
+        # 측정 잡이 매일 통째로 죽었다 (migration 023 + 이 격리로 복구).
+        try:
+            await _upsert_outcome(pool, outcome)
+        except Exception:
+            logger.exception("paper_outcomes: upsert failed sheet_id=%s", sheet_id)
+            stats["errors"] += 1
+            continue
+
         stats["measured"] += 1
         if outcome["exit_reason"] == "data_missing":
             stats["data_missing"] += 1

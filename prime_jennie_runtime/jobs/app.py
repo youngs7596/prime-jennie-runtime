@@ -221,7 +221,30 @@ def build_handlers(
         if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
             logger.info("paper_outcomes_daily skipped: non-trading day")
             return
-        await measure_paper_outcomes(pool)
+
+        async def _alert(text: str) -> None:
+            # paper 모드의 핵심 고리인 측정 잡이 죽거나 일부 시트 적재에 실패하면
+            # 알린다 — 조용히 실패하면 분석 시점에야 "데이터가 없네" 로 뒤늦게
+            # 발견한다 (도입 후 5-29 까지 매일 죽었는데 아무도 몰랐던 사고).
+            if telegram_config is None:
+                return
+            from prime_jennie_runtime.telegram_bot.bot import TelegramBot
+
+            bot = TelegramBot(telegram_config, client=http)
+            await bot.send_message(f"⚠️ paper outcomes 측정 잡: {text}")
+
+        try:
+            stats = await measure_paper_outcomes(pool)
+        except Exception as exc:
+            # 잡 전체가 죽은 경우 — alert 후 re-raise 해 scheduled_job_runs 에 failed 로 남긴다.
+            await _alert(f"예외로 중단됨 — {exc!r}")
+            raise
+        if stats["errors"] > 0:
+            await _alert(
+                f"{stats['errors']}건 적재 실패 "
+                f"(candidates={stats['candidates']} measured={stats['measured']} "
+                f"data_missing={stats['data_missing']})"
+            )
 
     briefing_llm_caller = _build_briefing_llm_caller()
 

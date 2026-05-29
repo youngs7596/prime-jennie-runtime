@@ -1,0 +1,13 @@
+-- 023_paper_outcomes_entry_price_nullable.sql
+-- entry_price 의 NOT NULL 제약 해제 — 진입가 결손 시트를 data_missing 으로 기록 가능하게.
+--
+-- paper_outcomes.py 는 시트 발행일 종가를 daily_prices 에서 못 찾으면 entry_price=None,
+-- exit_reason='data_missing', metadata={"reason":"entry_close_missing"} outcome 을 만들어
+-- 기록하도록 설계돼 있다 (커버리지 추적용 — "전체 시트 중 몇 % 가 측정 불가인가"는
+-- 측정된 alpha 의 신뢰도를 판단하는 메타데이터다). 그런데 022 의 entry_price NOT NULL 이
+-- 이 INSERT 를 거부했고, upsert 호출이 격리돼 있지 않아 한 건 실패가 배치 전체를 롤백했다.
+-- 그 결과 도입(5-27) 이래 측정 잡이 매일 죽어 paper_outcomes 가 0 건이었다.
+--
+-- 제약을 풀면 코드 의도대로 data_missing 행이 기록된다. 측정 모집단(pnl 집계)에서는
+-- exit_reason='data_missing' 으로 걸러내면 된다.
+ALTER TABLE paper_outcomes ALTER COLUMN entry_price DROP NOT NULL;

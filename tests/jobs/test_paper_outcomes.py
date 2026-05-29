@@ -88,11 +88,19 @@ class _FakeConn:
       - execute (upsert)
     """
 
-    def __init__(self, *, daily: dict[date, dict], sheets_pending: list[dict]) -> None:
+    def __init__(
+        self,
+        *,
+        daily: dict[date, dict],
+        sheets_pending: list[dict],
+        fail_upsert_for: set[str] | None = None,
+    ) -> None:
         # daily: price_date -> {open, high, low, close}
         self.daily = daily
         self.sheets_pending = sheets_pending
         self.upserts: list[tuple] = []
+        # 특정 sheet_id 의 upsert 가 제약 위반 등으로 터지는 상황 재현용.
+        self.fail_upsert_for = fail_upsert_for or set()
 
     async def fetch(self, sql: str, *args: Any) -> list[dict]:
         if "FROM position_sheets ps" in sql:
@@ -132,6 +140,9 @@ class _FakeConn:
 
     async def execute(self, sql: str, *args: Any) -> str:
         if "INSERT INTO paper_outcomes" in sql:
+            sheet_id = args[0]
+            if sheet_id in self.fail_upsert_for:
+                raise RuntimeError(f"simulated upsert constraint violation: {sheet_id}")
             self.upserts.append(args)
         return "OK"
 
@@ -389,3 +400,58 @@ async def test_pending_filter_skips_bt_sheets():
     assert stats["candidates"] == 0
     assert stats["measured"] == 0
     assert len(conn.upserts) == 0
+
+
+@pytest.mark.asyncio
+async def test_upsert_failure_isolated_per_sheet():
+    """한 시트의 upsert 가 터져도 나머지 시트는 측정된다 — 배치 전체 롤백 방지.
+
+    운영에서 entry_price NOT NULL 제약이 data_missing 행을 거부했을 때, upsert
+    호출이 격리돼 있지 않아 첫 실패가 잡 전체를 죽이고 멀쩡한 시트까지 못 들어갔다
+    (paper_outcomes 0건 사고). 격리 후엔 실패 건만 errors 로 세고 나머지는 측정된다.
+    """
+    publish = date(2026, 5, 20)
+    daily = {
+        publish: _ohlc(100),
+        publish + timedelta(days=1): _ohlc(102),
+        publish + timedelta(days=2): _ohlc(103),
+        publish + timedelta(days=3): _ohlc(104),
+        publish + timedelta(days=4): _ohlc(105),
+        publish + timedelta(days=5): _ohlc(106),
+        publish + timedelta(days=6): _ohlc(107),
+    }
+    s_fail = _make_sheet(
+        sheet_id="ps_20260520_110000_fa01",
+        generated_at=datetime(2026, 5, 20, 11, 0, tzinfo=KST),
+    )
+    s_ok = _make_sheet(
+        sheet_id="ps_20260520_120000_fa02",
+        generated_at=datetime(2026, 5, 20, 12, 0, tzinfo=KST),
+    )
+    conn = _FakeConn(
+        daily=daily,
+        sheets_pending=[
+            {
+                "sheet_id": s_fail.sheet_id,
+                "sheet_json": s_fail.model_dump_json(),
+                "generated_at": s_fail.generated_at,
+            },
+            {
+                "sheet_id": s_ok.sheet_id,
+                "sheet_json": s_ok.model_dump_json(),
+                "generated_at": s_ok.generated_at,
+            },
+        ],
+        fail_upsert_for={s_fail.sheet_id},
+    )
+    pool = _FakePool(conn)
+
+    stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=10))
+
+    # 첫 시트는 upsert 실패 → errors, 둘째는 정상 측정. 배치가 안 죽는다.
+    assert stats["candidates"] == 2
+    assert stats["errors"] == 1
+    assert stats["measured"] == 1
+    # 성공한 시트만 적재됐다.
+    assert len(conn.upserts) == 1
+    assert conn.upserts[0][0] == s_ok.sheet_id

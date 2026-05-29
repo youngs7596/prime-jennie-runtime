@@ -1,8 +1,10 @@
 # MACRO_GATE_SPEC
 
+> **2026-05-29 paper 모드 정합**: macro 는 바이너리 게이트 (open/closed + sizing). 출력은 결정론 스코어러의 입력 데이터로만 쓰인다. 매매 결정 권한 없음.
+>
 > **문서 목적**: Macro Gate 에이전트의 전수 명세. 바이너리 게이트 원칙, 입력 소스, 판정 기준, 프롬프트 전략, 실패 처리까지.
 >
-> **선행 문서**: `prime_jennie_v3_phase0_design.md` §4.3, §1.1
+> **선행 문서**: `archive/prime_jennie_v3_phase0_design.md` §4.3, §1.1 (2026-05-29 archive 이동)
 >
 > **작성자**: 민지 × 영석
 > **작성일**: 2026-04-16

@@ -76,7 +76,7 @@ LLM 코드 생성을 폐기하고, v2 에서 안정적이었던 결정론 quant 
 
 설계 결정 기록: [`.ai/decisions/2026-05-22-selection-architecture-decision.md`](./.ai/decisions/2026-05-22-selection-architecture-decision.md)
 
-원래 4종 설계 문서 중 [`SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) 는 1차 아키텍처 시절 명세이므로 현재는 **역사 자료**입니다. 나머지 ([`prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md), [`POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md), [`MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md)) 는 그대로 유효합니다.
+원래 4종 설계 문서 중 [`SCOUT_CODE_GENERATION.md`](./docs/archive/SCOUT_CODE_GENERATION.md) 와 [`prime_jennie_v3_phase0_design.md`](./docs/archive/prime_jennie_v3_phase0_design.md) 는 1차 아키텍처(LLM 코드 생성) 시절 명세라 2026-05-29 `docs/archive/` 로 옮겼습니다. [`POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md) 와 [`MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md) 는 `docs/` 에 그대로 유효합니다.
 
 ### 주요 특징
 
@@ -570,11 +570,12 @@ prime-jennie-runtime/
 │   ├─ docker/                    # 서비스별 Dockerfile
 │   ├─ promtail/ · grafana/ · loki/ · prometheus/
 ├─ docs/                        # 설계 문서 + 운영 가이드
-│   ├─ prime_jennie_v3_phase0_design.md
 │   ├─ POSITION_SHEET_SPEC.md
 │   ├─ MACRO_GATE_SPEC.md
-│   ├─ SCOUT_CODE_GENERATION.md   # 1차 아키텍처 (LLM 코드 생성, 2026-05-22 폐기 — 역사 자료)
 │   ├─ REAL_MODE_MIGRATION_CHECKLIST.md
+│   ├─ archive/                  # LLM-at-core 시절 문서 (2026-05-29 이동, 역사 자료)
+│   │   ├─ prime_jennie_v3_phase0_design.md · SCOUT_CODE_GENERATION.md
+│   │   └─ PHASE2_PLAN.md · PHASE_2_10_UTILITIES_INVENTORY.md · PHASE_2_13_COMPLETE.md
 │   └─ ...
 ├─ .ai/sessions/                # 세션 핸드오프 기록 (session-YYYY-MM-DD-NNNN.md)
 ├─ .ai/decisions/               # 아키텍처 결정 기록 (ADR-style)
@@ -803,11 +804,11 @@ push to main → GitHub Actions (self-hosted runner `ms-01-v3`)
 ## 문서 인덱스
 
 ### 설계
-- [`docs/prime_jennie_v3_phase0_design.md`](./docs/prime_jennie_v3_phase0_design.md) — 전체 v3 설계 (v0.3, 일부 1차 아키텍처 잔재 포함)
+- [`.ai/designs/2026-05-29-paper-mode-alpha-discovery.md`](./.ai/designs/2026-05-29-paper-mode-alpha-discovery.md) — **현재 정체성·경계의 ground truth** (paper alpha 탐색 실험실, 2026-05-29)
 - [`docs/POSITION_SHEET_SPEC.md`](./docs/POSITION_SHEET_SPEC.md) — 포지션 시트 JSON 스키마 + 9 exit rules · 유효
 - [`docs/MACRO_GATE_SPEC.md`](./docs/MACRO_GATE_SPEC.md) — Macro Gate 이진 판정 명세 · 유효
-- [`docs/SCOUT_CODE_GENERATION.md`](./docs/SCOUT_CODE_GENERATION.md) — **역사 자료** (1차 아키텍처 LLM 코드 생성, 2026-05-22 폐기). 현재 결정론 코어는 코드 직접 참조: `prime_jennie_runtime/slow_loop/scout/`
 - [`.ai/decisions/2026-05-22-selection-architecture-decision.md`](./.ai/decisions/2026-05-22-selection-architecture-decision.md) — LLM-at-core 폐기 결정
+- [`docs/archive/`](./docs/archive/) — **역사 자료** (2026-05-29 이동): `prime_jennie_v3_phase0_design.md`, `SCOUT_CODE_GENERATION.md` 등 1차 아키텍처 시절 명세. 현재 결정론 코어는 코드 직접 참조: `prime_jennie_runtime/slow_loop/scout/`
 
 ### 가드 / 단순화 (2026-05-17)
 - [`.ai/designs/2026-05-17-g-series-simplification.md`](./.ai/designs/2026-05-17-g-series-simplification.md) — G 시리즈 명명 폐기, 의미 기반 3 카테고리 재정립 (decision)
@@ -815,10 +816,10 @@ push to main → GitHub Actions (self-hosted runner `ms-01-v3`)
 - [`.ai/designs/2026-05-15-scout-overextension-guards.md`](./.ai/designs/2026-05-15-scout-overextension-guards.md) — G1~G5 통합 design (5-15)
 - [`.ai/analyses/`](./.ai/analyses/) — Pre-flight 분석 산출물 (G2 폐기 / G6 catalog coverage)
 
-### 로드맵 / 진행 상황
-- [`docs/PHASE2_PLAN.md`](./docs/PHASE2_PLAN.md) — Phase 2 원 계획 (완료)
-- [`docs/PHASE_2_10_UTILITIES_INVENTORY.md`](./docs/PHASE_2_10_UTILITIES_INVENTORY.md) — v2→v3 utility 이관 내역
-- [`docs/PHASE_2_13_COMPLETE.md`](./docs/PHASE_2_13_COMPLETE.md) — Phase 2.10~2.13 완료 보고서 + Phase 3 경계
+### 로드맵 / 진행 상황 (완료, 역사 자료 — 2026-05-29 `docs/archive/` 이동)
+- [`docs/archive/PHASE2_PLAN.md`](./docs/archive/PHASE2_PLAN.md) — Phase 2 원 계획 (완료)
+- [`docs/archive/PHASE_2_10_UTILITIES_INVENTORY.md`](./docs/archive/PHASE_2_10_UTILITIES_INVENTORY.md) — v2→v3 utility 이관 내역
+- [`docs/archive/PHASE_2_13_COMPLETE.md`](./docs/archive/PHASE_2_13_COMPLETE.md) — Phase 2.10~2.13 완료 보고서 + Phase 3 경계
 
 ### 운영 가이드
 - [`docs/REAL_MODE_MIGRATION_CHECKLIST.md`](./docs/REAL_MODE_MIGRATION_CHECKLIST.md) — KIS paper → real 전환 체크리스트

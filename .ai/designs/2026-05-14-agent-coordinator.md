@@ -3,6 +3,7 @@
 **작성일**: 2026-05-14
 **상태**: 초안 (검토 중)
 **2026-05-23 갱신**: 5-22 결정론 코어 전환 후에도 **active**. 골격 (State Hub / Decision Authority / Event Bus) 가 가동 중. §10 의 conviction 출처 설명은 결정론 코어 기준으로 한 줄 갱신 필요 — `.ai/designs/2026-05-23-post-llm-at-core-realignment.md` §6, §9 참조.
+**2026-05-29 paper 모드 전환**: Coordinator 는 "결정론 컴포넌트 간 cross-cutting policy 게이팅" 으로 재정의. "LLM agents 추천 검증" 문구는 Scout 결정론화로 부분 무효. 본문 정합은 cooldown/dedup policy 구현 시 갱신.
 **대체**: `.ai/sessions/session-2026-05-12-0001.md` 의 폐기된 LLM 자율성 비전
 **근거**: 2026-05-14 v3 audit 결과 (6 영역 12 위험) — 메모리 [[project-audit-2026-05-14]]
 

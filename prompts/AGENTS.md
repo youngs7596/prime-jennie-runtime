@@ -1,7 +1,7 @@
 # prompts/ — LLM 프롬프트 자산
 
 v2 `prime-jennie/prompts/` 에서 포팅. 판정/이관 기록은
-`docs/PHASE_2_10_UTILITIES_INVENTORY.md` 참조.
+`docs/archive/PHASE_2_10_UTILITIES_INVENTORY.md` 참조 (2026-05-29 archive 이동).
 
 ## 디렉토리
 

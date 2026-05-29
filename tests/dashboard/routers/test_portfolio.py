@@ -44,6 +44,10 @@ async def test_summary_with_kis_mock(app):
 
 async def test_history_from_daily_asset_snapshots(app, session_factory):
     """`/api/portfolio/history` 가 daily_asset_snapshots 테이블 행을 시간순으로 반환."""
+    # /history 는 'now - days' 창으로 필터하므로 날짜를 오늘 기준 상대값으로 찍는다
+    # (고정 과거 날짜로 찍으면 실행일이 지나며 창 밖으로 빠져 0 행 — 구 stale 원인).
+    today = datetime.now(UTC).date()
+    d0, d1, d2 = (today - timedelta(days=n) for n in (3, 2, 1))
     async with session_factory() as session:
         await session.execute(
             text(
@@ -51,9 +55,9 @@ async def test_history_from_daily_asset_snapshots(app, session_factory):
                 "(snapshot_date, total_asset, cash_balance, stock_eval_amount, "
                 "position_count, total_profit_loss, realized_profit_loss) "
                 "VALUES "
-                "('2026-04-22', 200000000, 50000000, 150000000, 3, -1000000, 0), "
-                "('2026-04-23', 198000000, 50000000, 148000000, 3, -3000000, -500000), "
-                "('2026-04-24', 199500000, 50000000, 149500000, 3, -1500000, 0)"
+                f"('{d0.isoformat()}', 200000000, 50000000, 150000000, 3, -1000000, 0), "
+                f"('{d1.isoformat()}', 198000000, 50000000, 148000000, 3, -3000000, -500000), "
+                f"('{d2.isoformat()}', 199500000, 50000000, 149500000, 3, -1500000, 0)"
             )
         )
         await session.commit()
@@ -66,7 +70,7 @@ async def test_history_from_daily_asset_snapshots(app, session_factory):
         assert len(body) == 3
         # 시간 오름차순
         dates = [r["snapshot_date"][:10] for r in body]
-        assert dates == ["2026-04-22", "2026-04-23", "2026-04-24"]
+        assert dates == [d0.isoformat(), d1.isoformat(), d2.isoformat()]
         assert body[1]["realized_profit_loss"] == -500000
         assert body[2]["total_asset"] == 199500000
 

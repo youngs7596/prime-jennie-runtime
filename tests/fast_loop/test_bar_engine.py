@@ -102,9 +102,13 @@ def test_recent_high_warmup_returns_none():
 
 def test_indicator_provider_adapter():
     eng = BarEngine()
-    # 20개 완성 분봉 생성
+    # intraday_cum_volume 은 wall-clock '오늘' 과 분봉 날짜를 비교한다. 분봉을
+    # 고정 과거 날짜로 찍으면 실행일이 지나며 날짜 불일치로 0 이 된다(구 stale
+    # 원인). 오늘 자정 기준으로 찍어 시간 의존성을 없앤다.
+    today_base = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    # 20개 완성 분봉 + 1개 진행 분봉
     for i in range(21):
-        eng.update("A", price=100.0 + i, volume=1000, ts=_ts(i, 0))
+        eng.update("A", price=100.0 + i, volume=1000, ts=today_base + timedelta(minutes=i))
 
     provider = BarEngineIndicatorProvider(eng)
     assert provider.volume_ma20("A") == 1000.0

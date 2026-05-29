@@ -1,17 +1,15 @@
 """Slow Loop Pipeline 조립.
 
-Phase 0 design §4. 구조:
-  1. Macro Gate role (fast path)
-  2. Macro 후처리 (결정론) — auto_override, discretize, 이벤트
-  3. macro:current_state 저장 + stale 체크
-  4. Scout role (fast path)
-  5. Screening Executor 호출 (Track D stub) → candidates
-  6. Scout 결과 검증 (validate_candidates)
-  7. Strategy Engine.build_sheet × N
-  8. PositionSheetPublisher.publish
+Phase 0 design §4 (2026-05-22 결정론 코어 전환 반영). 구조:
+  1. Macro Gate role (LLM fast path) + 결정론 후처리 (auto_override, discretize, 이벤트)
+  2. macro:current_state 저장 + stale 체크
+  3. 결정론 Scout (deterministic_scout.run_deterministic_scout — LLM 호출 0회)
+  4. 후보 검증 (validate_candidates — universe / 중복 / cap / hallucination)
+  5. Strategy Engine.build_sheet × N
+  6. PositionSheetPublisher.publish
 
-StaticPipeline이 LLM 두 번만 호출한다 (Scout, Macro). 나머지는 파이프라인 밖
-결정론 후처리. minyoung-mah에 없는 조건부 분기/retry를 local workaround로.
+LLM 호출은 Macro gate 한 번뿐 (+선택적 shadow). Scout 는 결정론 quant 코어로
+포팅됐다 (2026-05-22). minyoung-mah에 없는 조건부 분기/retry를 local workaround로.
 
 DLQ 정책 (2026-05-11):
 - `publisher.publish` 의 stream 발행 실패는 publisher 내부에서 raw sheet JSON 을
@@ -64,7 +62,6 @@ from .scout.schemas import (
     ScoutRunSummary,
     ScreeningCandidate,
 )
-from .scout.screening_stub import ScreeningInvoker
 from .strategy.engine import StrategyEngine, StrategyEngineInputs
 from .strategy.publisher import PositionSheetPublisher
 
@@ -129,53 +126,6 @@ async def _dlq_send(
         logger.exception("dlq_send failed reason=%s", reason)
 
 
-async def _run_pipeline_with_retry(
-    orchestrator: Orchestrator,
-    pipeline: StaticPipeline,
-    observer: Observer,
-    *,
-    role_name: str,
-    max_attempts: int = 3,
-    user_request: str = "",
-) -> Any:
-    """파이프라인을 돌리되 실패 시 최대 3회 재시도.
-
-    단일 role의 구조화 출력 파싱이 드물게 실패할 때를 위한 방어망. 시도마다
-    동일 pipeline 객체를 그대로 재호출하므로 context 갱신은 지원하지 않는다 —
-    그런 경우 ``_run_macro_with_retry`` 처럼 매 시도마다 pipeline 을 재조립한다.
-    """
-    last_error: str | None = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            result = await orchestrator.run_pipeline(pipeline, user_request=user_request)
-            if result.completed:
-                return result
-            last_error = result.error or f"aborted at step {result.aborted_at}"
-        except Exception as e:  # noqa: BLE001
-            last_error = f"{type(e).__name__}: {e}"
-
-        await observer.emit(
-            pj_event(
-                f"pj.{role_name}.retry",
-                role=role_name,
-                ok=False,
-                attempt=attempt,
-                error=last_error,
-            )
-        )
-
-    await observer.emit(
-        pj_event(
-            f"pj.{role_name}.failed",
-            role=role_name,
-            ok=False,
-            attempts=max_attempts,
-            error=last_error,
-        )
-    )
-    raise RuntimeError(f"{role_name} failed after {max_attempts} attempts: {last_error}")
-
-
 async def _run_macro_with_retry(
     orchestrator: Orchestrator,
     macro_ctx: Any,
@@ -187,9 +137,8 @@ async def _run_macro_with_retry(
 ) -> Any:
     """Macro 전용 재시도 — 매 시도마다 ``previous_attempts`` 를 ctx 에 주입.
 
-    Scout 의 ``generate_validated_code`` 와 동일 사상: 직전 시도의 실패 사유를
-    LLM 에 그대로 보여줘 같은 실수 반복을 차단한다. context 가 매 시도 변하므로
-    ``_macro_pipeline(ctx)`` 를 매번 새로 조립.
+    직전 시도의 실패 사유를 LLM 에 그대로 보여줘 같은 실수 반복을 차단한다.
+    context 가 매 시도 변하므로 ``_macro_pipeline(ctx)`` 를 매번 새로 조립.
     """
     from .macro.schemas import MacroAttemptHint
 
@@ -250,7 +199,6 @@ class SlowLoopComponents:
     orchestrator: Orchestrator
     scout_builder: ScoutContextBuilder
     macro_builder: MacroContextBuilder
-    screening: ScreeningInvoker
     engine: StrategyEngine
     publisher: PositionSheetPublisher
     state_store: MacroStateStore
@@ -274,22 +222,6 @@ def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
                     task_summary="daily macro gate",
                     user_request="",
                     metadata={"macro_context": macro_ctx},
-                ),
-            ),
-        ],
-    )
-
-
-def _scout_pipeline(scout_ctx: Any) -> StaticPipeline:
-    return StaticPipeline(
-        steps=[
-            PipelineStep(
-                name="scout",
-                role="scout",
-                input_mapping=lambda _s: InvocationContext(
-                    task_summary="daily scout run",
-                    user_request="",
-                    metadata={"scout_context": scout_ctx},
                 ),
             ),
         ],

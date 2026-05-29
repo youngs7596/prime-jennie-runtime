@@ -52,15 +52,10 @@ from minyoung_mah import (
 from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.infra.config import AppConfig, TelegramConfig, validate_kis_gateway_url
 from prime_jennie_runtime.infra.db import create_engine
-from prime_jennie_runtime.infra.observer_impl import (
-    CompositePJObserver,
-    StructlogPJObserver,
-)
+from prime_jennie_runtime.infra.observer_impl import StructlogPJObserver
 from prime_jennie_runtime.infra.scheduler import PostgresSchedulerStore, SchedulerRunner
 from prime_jennie_runtime.infra.trading_calendar import is_trading_day_via_gateway
 from prime_jennie_runtime.position_sheet.schema import KST
-from prime_jennie_runtime.screening_executor.adapter import ScreeningToolAdapter
-from prime_jennie_runtime.telegram_bot.bot import TelegramBot
 
 from .macro.context_builder import MacroContextBuilder
 from .macro.feeders.stub import (
@@ -84,8 +79,6 @@ from .scout.feeders.stub import (
     StubSectorMomentumFeeder,
     StubUniverseFeeder,
 )
-from .scout.observers import EscalateTelegramObserver
-from .scout.role import ScoutRole
 from .strategy.engine import StrategyEngine
 from .strategy.policy import load_policy
 from .strategy.publisher import PositionSheetPublisher
@@ -166,25 +159,13 @@ def _try_build_tiered_router() -> Any | None:
 
 
 def _build_observer(telegram_cfg: TelegramConfig) -> object:
-    """Slow_loop observer 합성: structlog + (옵션) Telegram escalate hook.
+    """Slow_loop observer — structlog only.
 
-    텔레그램 토큰/chat_id 가 비어있으면 Telegram observer 는 등록하지 않는다 — fail-safe.
-    토큰이 있으면 ``pj.scout.escalate`` 이벤트가 텔레그램으로 즉시 알림 발송된다.
+    (2026-05-29) scout codegen escalate hook 제거. ``pj.scout.escalate`` 를 emit 하던
+    code_loop 이 결정론 코어로 은퇴해 텔레그램 escalate 의 emit 원천이 사라졌다.
+    telegram_cfg 는 호출부 호환을 위해 시그니처에 남겨 둔다.
     """
-    structlog_obs = StructlogPJObserver()
-
-    # Telegram 미설정 (토큰/chat_id 둘 중 하나라도 비어있음) → telegram observer skip
-    if not (telegram_cfg.bot_token and telegram_cfg.chat_id):
-        logger.info("Telegram bot_token/chat_id 미설정 — escalate 알림 비활성 (structlog only)")
-        return structlog_obs
-
-    bot = TelegramBot(telegram_cfg)
-    escalate_obs = EscalateTelegramObserver(bot, dry_run=telegram_cfg.dry_run)
-    logger.info(
-        "Slow_loop observer wired: structlog + telegram escalate (dry_run=%s)",
-        telegram_cfg.dry_run,
-    )
-    return CompositePJObserver(structlog_obs, escalate_obs)
+    return StructlogPJObserver()
 
 
 def _build_slow_loop_components(
@@ -195,7 +176,7 @@ def _build_slow_loop_components(
     """SlowLoopComponents 조립. tier 라우터 구성 실패 시 None.
 
     db_engine 이 주어지면 macro_runs/scout_runs 를 persist. None 이면 기록 없이 실행.
-    telegram_cfg 가 주어지면 ``pj.scout.escalate`` 이벤트가 텔레그램으로 라우팅된다.
+    telegram_cfg 는 observer 합성에 전달되나 현재 escalate hook 은 비활성 (structlog only).
     """
     tiers = _try_build_tiered_router()
     if tiers is None:
@@ -203,7 +184,7 @@ def _build_slow_loop_components(
 
     observer = _build_observer(telegram_cfg or TelegramConfig())
     orchestrator = Orchestrator(
-        role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),
+        role_registry=RoleRegistry.of(MacroGateRole()),
         tool_registry=ToolRegistry(),
         model_router=TieredModelRouter(tiers),
         memory=NullMemoryStore(),
@@ -212,24 +193,20 @@ def _build_slow_loop_components(
         resilience=default_resilience(),
     )
 
-    # Shadow orchestrator — Macro + Scout 을 DeepSeek 로 병렬 평가. Opus 결정이 primary.
-    # MACRO_SHADOW_ENABLED=0 / SCOUT_SHADOW_ENABLED=0 으로 개별 비활성화 가능.
-    # shadow_orchestrator 자체는 shadow_* 태그 중 하나라도 활성이면 구성됨.
+    # Shadow orchestrator — Macro gate 만 DeepSeek 로 병렬 평가. Opus 결정이 primary.
+    # MACRO_SHADOW_ENABLED=0 으로 비활성화. (scout shadow 는 2026-05-22 결정론 코어
+    # 전환으로 은퇴 — codegen 이 없으면 비교 대상이 무의미.)
     shadow_orchestrator: Orchestrator | None = None
     macro_shadow_on = os.environ.get("MACRO_SHADOW_ENABLED", "1") == "1"
-    scout_shadow_on = os.environ.get("SCOUT_SHADOW_ENABLED", "1") == "1"
-    if (macro_shadow_on or scout_shadow_on) and (
-        "shadow_reasoning" in tiers or "shadow_strong" in tiers
-    ):
+    if macro_shadow_on and "shadow_reasoning" in tiers:
         shadow_tiers = {
-            # shadow 가 꺼진 role 은 primary 모델 그대로 재사용 (shadow 호출 자체를
-            # pipeline 단에서 skip 하므로 실사용 안 됨 — fallback 안전치)
-            "strong": tiers["shadow_strong"] if scout_shadow_on else tiers["strong"],
-            "reasoning": tiers["shadow_reasoning"] if macro_shadow_on else tiers["reasoning"],
-            "default": tiers["shadow_strong"] if scout_shadow_on else tiers["default"],
+            # macro gate 만 shadow 평가 — strong/default 는 fallback 안전치
+            "strong": tiers["strong"],
+            "reasoning": tiers["shadow_reasoning"],
+            "default": tiers["default"],
         }
         shadow_orchestrator = Orchestrator(
-            role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),
+            role_registry=RoleRegistry.of(MacroGateRole()),
             tool_registry=ToolRegistry(),
             model_router=TieredModelRouter(shadow_tiers),
             memory=NullMemoryStore(),
@@ -313,9 +290,6 @@ def _build_slow_loop_components(
         orchestrator=orchestrator,
         scout_builder=scout_builder,
         macro_builder=macro_builder,
-        screening=ScreeningToolAdapter(
-            timeout_s=float(os.environ.get("SCREENING_TIMEOUT_S", "300")),
-        ),
         engine=engine,
         publisher=publisher,
         state_store=state_store,

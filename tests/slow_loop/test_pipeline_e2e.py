@@ -43,13 +43,11 @@ from prime_jennie_runtime.slow_loop.scout.feeders.stub import (
     StubSectorMomentumFeeder,
     StubUniverseFeeder,
 )
-from prime_jennie_runtime.slow_loop.scout.role import ScoutRole
 from prime_jennie_runtime.slow_loop.scout.schemas import (
     EntryHint,
     ScoutOutput,
     ScreeningCandidate,
 )
-from prime_jennie_runtime.slow_loop.scout.screening_stub import ScreeningToolAdapterStub
 from prime_jennie_runtime.slow_loop.strategy.engine import StrategyEngine
 from prime_jennie_runtime.slow_loop.strategy.policy import load_policy
 from prime_jennie_runtime.slow_loop.strategy.publisher import PositionSheetPublisher
@@ -88,6 +86,39 @@ def _default_macro_output(gate: str = "open", size: float = 0.75) -> MacroGateOu
     )
 
 
+def _default_candidates() -> list[ScreeningCandidate]:
+    """E2E 기본 후보 3종 — 구 ScreeningToolAdapterStub 의 고정 후보를 인라인.
+
+    정상 경로 테스트가 "3 시트 발행" 을 기대하므로 3종 유지.
+    """
+    return [
+        ScreeningCandidate(
+            ticker="005930",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.72,
+            entry_hint=EntryHint(trigger="limit", price_hint=71200.0),
+            factors={"momentum_5d": 0.034, "news_score": 0.3},
+            notes="반도체 모멘텀 (stub)",
+        ),
+        ScreeningCandidate(
+            ticker="000660",
+            strategy_tag="SECTOR_MOMENTUM",
+            conviction=0.65,
+            entry_hint=EntryHint(trigger="limit", price_hint=135000.0),
+            factors={"momentum_5d": 0.028, "news_score": 0.2},
+            notes="하이닉스 모멘텀 (stub)",
+        ),
+        ScreeningCandidate(
+            ticker="207940",
+            strategy_tag="EARNINGS_DRIFT",
+            conviction=0.58,
+            entry_hint=EntryHint(trigger="market"),
+            factors={"eps_revision": 0.06, "news_score": 0.1},
+            notes="삼성바이오 실적 (stub)",
+        ),
+    ]
+
+
 def _fake_scout_runner(candidates: list[ScreeningCandidate]):
     """결정론 scout(run_deterministic_scout) 자리에 끼우는 fake — canned 후보 반환.
 
@@ -117,7 +148,7 @@ def _make_components(
     stub_model = StubChatModel({ScoutOutput: scout_out, MacroGateOutput: macro_out})
 
     orch = Orchestrator(
-        role_registry=RoleRegistry.of(ScoutRole(), MacroGateRole()),
+        role_registry=RoleRegistry.of(MacroGateRole()),
         tool_registry=ToolRegistry(),
         model_router=SingleModelRouter(stub_model),
         memory=NullMemoryStore(),
@@ -138,14 +169,10 @@ def _make_components(
         kor=StubKorMacroNewsFeeder(),
     )
 
-    screening = (
-        ScreeningToolAdapterStub()
-        if screening_candidates is None
-        else ScreeningToolAdapterStub(candidates=screening_candidates)
-    )
     # 결정론 scout 포팅(2026-05-22) 후 pipeline 은 comp.scout_runner 를 호출한다.
-    # screening adapter 의 고정 후보를 그대로 돌려주는 fake runner 를 주입.
-    scout_runner = _fake_scout_runner(screening.candidates)
+    # canned 후보를 그대로 돌려주는 fake runner 를 주입 (DB 의존 enrichment 우회).
+    candidates = _default_candidates() if screening_candidates is None else screening_candidates
+    scout_runner = _fake_scout_runner(candidates)
 
     engine = StrategyEngine(load_policy(), risk_throttle or NoOpRiskThrottle())
     publisher = PositionSheetPublisher(fake_redis)
@@ -155,7 +182,6 @@ def _make_components(
         orchestrator=orch,
         scout_builder=scout_builder,
         macro_builder=macro_builder,
-        screening=screening,
         engine=engine,
         publisher=publisher,
         state_store=state_store,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from prime_jennie_runtime.slow_loop.scout.code_hasher import compute_code_hash
+from prime_jennie_runtime.slow_loop.scout.deterministic_scout import compute_code_hash
 
 
 def test_same_code_same_hash():

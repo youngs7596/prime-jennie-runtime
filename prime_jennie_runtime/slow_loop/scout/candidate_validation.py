@@ -1,6 +1,7 @@
-"""Scout 결과 검증.
+"""Scout 후보 검증 (결정론).
 
-ScreeningExecutor(Track D)가 코드를 실제 실행해 반환한 candidates를 검증.
+결정론 스코어러가 낸 candidates 를 정제·검증한다. 후보 출처와 무관한 일반
+검증 로직 — 2026-05-29 LLM-at-core 잔재 정리 때 validators.py 에서 옮겨 왔다.
 - S06: 21개+ 반환 → 상위 20개만 취함
 - S07: ticker 중복 → conviction 높은 것 유지
 - S08: universe 밖 ticker가 30% 이상이면 경고, 50% 이상이면 실패

@@ -1,9 +1,9 @@
-"""Scout validators 테스트 (S06, S07, S08)."""
+"""Scout 후보 검증 테스트 (S06, S07, S08)."""
 
 from __future__ import annotations
 
+from prime_jennie_runtime.slow_loop.scout.candidate_validation import validate_candidates
 from prime_jennie_runtime.slow_loop.scout.schemas import EntryHint, ScreeningCandidate
-from prime_jennie_runtime.slow_loop.scout.validators import validate_candidates
 
 
 def _cand(ticker: str, conviction: float = 0.5) -> ScreeningCandidate:

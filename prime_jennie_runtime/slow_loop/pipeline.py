@@ -56,7 +56,7 @@ from .persistence import (
     persist_screening_candidates,
     update_candidate_promotion,
 )
-from .scout.code_hasher import compute_code_hash
+from .scout.candidate_validation import ScoutValidationResult, validate_candidates
 from .scout.context_builder import ScoutContextBuilder
 from .scout.schemas import (
     MacroStateForScout,
@@ -65,7 +65,6 @@ from .scout.schemas import (
     ScreeningCandidate,
 )
 from .scout.screening_stub import ScreeningInvoker
-from .scout.validators import ScoutValidationResult, validate_candidates
 from .strategy.engine import StrategyEngine, StrategyEngineInputs
 from .strategy.publisher import PositionSheetPublisher
 
@@ -510,7 +509,11 @@ async def run_slow_loop(
     # 결정 기록: .ai/decisions/2026-05-22-selection-architecture-decision.md
     import hashlib as _hashlib
 
-    from .scout.deterministic_scout import SCORER_VERSION, run_deterministic_scout
+    from .scout.deterministic_scout import (
+        SCORER_VERSION,
+        compute_code_hash,
+        run_deterministic_scout,
+    )
 
     _scout_runner = comp.scout_runner or run_deterministic_scout
     validated_scout = await _scout_runner(

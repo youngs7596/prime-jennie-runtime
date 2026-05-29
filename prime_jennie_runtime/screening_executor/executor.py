@@ -5,7 +5,7 @@
 2. 컨테이너 내부: `python -m prime_jennie_runtime.screening_executor.executor`로
    stdin → stdout JSON 프로토콜로 호출 (Track D adapter가 docker run으로 spawn)
 
-검증/dedup/cap의 일부 책임은 slow_loop.scout.validators가 또 한 번 한다.
+검증/dedup/cap의 일부 책임은 slow_loop.scout.candidate_validation이 또 한 번 한다.
 executor에서는 §6.4의 "21+ → 상위 20개" 까지만 가벼운 cap을 둔다 (이중 안전장치).
 """
 

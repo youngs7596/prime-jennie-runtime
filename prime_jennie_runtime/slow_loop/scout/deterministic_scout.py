@@ -15,6 +15,7 @@ LLM codegen(`code_loop.generate_validated_code`) 의 라이브 대체물. 반환
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -36,6 +37,17 @@ logger = logging.getLogger(__name__)
 # 스코어러 버전 — scout_runs.code_hash 안정화용 (synthetic screening_code 마커).
 # 팩터 수식/가중치/임계 의미 변경 시 bump.
 SCORER_VERSION = "deterministic-quant-v2-port@1"
+
+
+def compute_code_hash(code: str) -> str:
+    """결정론 스코어러 마커(screening_code)의 sha256 — scout_runs.code_hash 안정화용.
+
+    `sha256:<64hex>` 형식. 공백/줄바꿈 정규화 없음 (같은 소스 → 같은 해시).
+    2026-05-29 LLM-at-core 잔재 정리 때 code_hasher.py 에서 옮겨 왔다.
+    """
+    digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
 
 # v2 ScoutConfig 기본값 — env override.
 MIN_PRICE: int = int(os.environ.get("SCOUT_MIN_PRICE", "10000"))

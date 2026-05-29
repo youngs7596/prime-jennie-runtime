@@ -4,9 +4,20 @@
 
 ## 리포 경계
 
-- **이 리포**: v3 실행 엔진. 느린 루프 + 빠른 루프 + v2 포팅 서비스
+- **이 리포**: v3 paper alpha 탐색 엔진. 느린 루프 + 빠른 루프 + v2 포팅 서비스. paper 로 alpha 를 증명하는 실험실이며 실계좌 자산을 매매하지 않는다 (정체성: `.ai/designs/2026-05-29-paper-mode-alpha-discovery.md`)
 - **minyoung-mah**: Multi-Agent Harness 라이브러리. `pip install -e ../minyoung-mah`로 소비. **직접 수정하지 않음** (별도 repo, 별도 계정)
 - **prime-jennie (v2)**: 참조 전용. 포팅 시 원본 경로 명시
+
+## 폐기된 비전
+
+향후 이 항목들로 회귀하지 않는다. 회귀 충동이 들면 이 표와 `.ai/designs/2026-05-29-paper-mode-alpha-discovery.md` §3 을 먼저 읽는다.
+
+| 폐기 비전 | 폐기 시점 | 사유 |
+|---|---|---|
+| LLM-at-core (매 scout 코드 LLM 생성) | 5-22 | 138 run 전부 distinct code_hash, Jaccard 0.317 진동. 132건 -2.24% |
+| multi-agent council debate | 4월 | 단일 LLM structured output 으로 단순화 |
+| 실계좌 alpha 자동매매 | 5-29 | 자산 정체. paper 증명 후 재고 |
+| 은퇴 후 방치 자율 운용 | 5-29 | 현 LLM 한계 (stateless·확률적·uncalibrated) 로 도달 불가 |
 
 ## Track 소유권 (Phase 1)
 
@@ -21,7 +32,6 @@
 ## 공유 스펙 (변경 시 stop-the-world)
 
 - `docs/POSITION_SHEET_SPEC.md`
-- `docs/SCOUT_CODE_GENERATION.md`
 - `docs/MACRO_GATE_SPEC.md`
 - `position_sheet/schema.py`
 
@@ -32,6 +42,15 @@
 - **테스트**: 코드 변경 시 관련 테스트 필수. 테스트 없는 커밋 금지
 - **린트**: 커밋 전 `ruff format . && ruff check .`
 - **시크릿**: `.env`, 토큰, 키 절대 커밋 금지
+
+## 결정 변경 룰
+
+새 결정/설계를 commit 할 때는 그 결정이 무효화하는 자산을 같은 commit 또는 후속 commit 으로 함께 처리한다. 결정만 바꾸고 깨진 문서·코드를 방치하면 옛 문서가 다시 ground truth 행세를 한다.
+
+- 깨진 docs → `docs/archive/` 로 이동
+- 폐기된 `.ai/designs`·`.ai/decisions` → `.ai/archive/` 로 이동
+- dead code → 같은 또는 후속 commit 으로 삭제
+- 폐기된 방향이면 위 "폐기된 비전" 표에 한 줄 추가
 
 ## minyoung-mah 소비 규칙
 

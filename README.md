@@ -1,4 +1,4 @@
-# Prime Jennie Runtime — 자가진화 KOSPI/KOSDAQ AI 트레이딩 엔진 (v3)
+# Prime Jennie Runtime — paper 기반 alpha 탐색 실험실 (v3)
 
 <div align="center">
 
@@ -7,11 +7,11 @@
 ![Docker](https://img.shields.io/badge/docker-compose-2496ED)
 ![Tests](https://img.shields.io/badge/tests-1405%20passed-brightgreen)
 ![Selection](https://img.shields.io/badge/selection-deterministic%20quant-green)
-![Mode](https://img.shields.io/badge/runtime-real-red)
+![Mode](https://img.shields.io/badge/mode-paper-blue)
 
-**KOSPI 자율 트레이딩 엔진 — v3 실행 런타임**
+**paper 기반 alpha 탐색 실험실 — 실계좌 자산 운용과 분리**
 
-*"결정론이 종목을 고르고, 빠른 루프가 집행한다."* (2026-05-22 LLM 코드 생성 폐기)
+*"결정론이 종목을 고르고, 빠른 루프가 집행한다. LLM 은 매매 결정 외부."* (2026-05-29 paper 모드 전환)
 
 </div>
 
@@ -40,7 +40,9 @@
 
 ## 개요
 
-**Prime Jennie Runtime**(v3)은 한국투자증권 Open API 기반 KOSPI/KOSDAQ AI 자율 트레이딩 엔진의 **실행 런타임**입니다. v2(`prime-jennie`)의 단일 거대 모놀리식 구조를 분해하여 **느린 루프(Slow Loop) + 빠른 루프(Fast Loop) + 메타 진화(Meta)** 의 3-레이어로 재구성한 후속 세대입니다.
+**Prime Jennie Runtime**(v3)은 **paper 기반 alpha 탐색 실험실**입니다. 실계좌 자산 운용과는 분리되어 있습니다 — 실계좌는 운영자가 직접 운용하고, v3 는 운영자 자산을 매매하지 않습니다. LLM 도 매매 결정 라인 외부에 있습니다. 매매 결정은 결정론 코어가 하고, LLM 은 상류 데이터 생성(macro 국면·뉴스 감성)과 운영자 코파일럿 두 곳에만 남습니다. 목표는 "실계좌에 올릴 만한 alpha 가 있는가" 를 돈 리스크 없이 paper 로 증명하는 것입니다.
+
+한국투자증권 Open API 기반 KOSPI 엔진이며, v2(`prime-jennie`)의 단일 모놀리식 구조를 **느린 루프(Slow Loop) + 빠른 루프(Fast Loop)** 로 분해한 후속 세대입니다. 정체성과 경계의 ground truth 는 [`.ai/designs/2026-05-29-paper-mode-alpha-discovery.md`](./.ai/designs/2026-05-29-paper-mode-alpha-discovery.md) 입니다.
 
 ### Scout 선정 아키텍처 — 두 차례의 결정
 

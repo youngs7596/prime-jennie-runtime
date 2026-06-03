@@ -381,6 +381,59 @@ async def test_data_missing_when_entry_close_absent():
 
 
 @pytest.mark.asyncio
+async def test_window_not_closed_is_not_persisted():
+    """윈도우 미도래 시트는 영속하지 않는다 — 다음 cycle 재시도 가능하게.
+
+    예전엔 data_missing(window_not_closed) 행을 upsert 해서 _fetch_pending_sheets 의
+    NOT EXISTS 가 영영 재선택하지 않았다 — 윈도우가 닫혀도 측정 기회가 사라지는 버그
+    (2026-06-03 발견, 33건 오염). 이제 None 반환 → upsert 없음 → 재시도 가능.
+    """
+    publish = date(2026, 5, 20)
+    sheet = _make_sheet(
+        sheet_id="ps_20260520_110000_ac01",
+        generated_at=datetime(2026, 5, 20, 11, 0, tzinfo=KST),
+        time_stop_days=5,
+    )
+
+    # 발행일 + 이틀치 일봉만 존재 — hold_days=5 윈도우가 아직 안 닫힘.
+    daily = {
+        publish: _ohlc(100),
+        publish + timedelta(days=1): _ohlc(101),
+        publish + timedelta(days=2): _ohlc(102),
+    }
+
+    conn = _FakeConn(
+        daily=daily,
+        sheets_pending=[
+            {
+                "sheet_id": sheet.sheet_id,
+                "sheet_json": sheet.model_dump_json(),
+                "generated_at": sheet.generated_at,
+            }
+        ],
+    )
+    pool = _FakePool(conn)
+
+    stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=3))
+
+    # 측정도 영속도 안 됨 — window_open 으로만 집계. 행이 없으므로 다음 cycle 에
+    # NOT EXISTS 가 다시 선택한다.
+    assert stats["candidates"] == 1
+    assert stats["window_open"] == 1
+    assert stats["measured"] == 0
+    assert stats["data_missing"] == 0
+    assert len(conn.upserts) == 0
+
+    # 윈도우가 닫힌 뒤 (일봉 충분) 같은 시트가 정상 측정된다.
+    for i in range(3, 8):
+        daily[publish + timedelta(days=i)] = _ohlc(103 + i)
+    stats2 = await measure_paper_outcomes(pool, today=publish + timedelta(days=10))
+    assert stats2["measured"] == 1
+    assert stats2["window_open"] == 0
+    assert len(conn.upserts) == 1
+
+
+@pytest.mark.asyncio
 async def test_pending_filter_skips_bt_sheets():
     """sheet_id LIKE 'ps_%' 필터로 backtest 시트 (bt_) 는 측정 대상 아님."""
     publish = date(2026, 5, 20)

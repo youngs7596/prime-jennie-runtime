@@ -82,6 +82,7 @@ async def measure_paper_outcomes(pool: Any, *, today: date | None = None) -> dic
         "candidates": len(candidates),
         "measured": 0,
         "data_missing": 0,
+        "window_open": 0,
         "errors": 0,
     }
 
@@ -101,6 +102,13 @@ async def measure_paper_outcomes(pool: Any, *, today: date | None = None) -> dic
             stats["errors"] += 1
             continue
 
+        # 윈도우 미도래 (None) — 영속하지 않고 다음 cycle 재시도. 여기서 행을 박으면
+        # _fetch_pending_sheets 의 NOT EXISTS 가 영영 재선택하지 않아, 윈도우가 닫혀도
+        # 측정 기회가 사라진다 (P2.5 직후 33건이 이 경로로 data_missing 에 갇혔던 사고).
+        if outcome is None:
+            stats["window_open"] += 1
+            continue
+
         # upsert 도 시트별로 격리한다 — 한 건의 INSERT 실패(제약 위반 등)가 배치
         # 전체를 롤백해 나머지 멀쩡한 시트까지 못 들어가는 일을 막는다. 도입 초기
         # entry_price NOT NULL 제약이 data_missing 행을 거부하면서 이 격리 부재로
@@ -117,10 +125,11 @@ async def measure_paper_outcomes(pool: Any, *, today: date | None = None) -> dic
             stats["data_missing"] += 1
 
     logger.info(
-        "paper_outcomes: candidates=%d measured=%d data_missing=%d errors=%d",
+        "paper_outcomes: candidates=%d measured=%d data_missing=%d window_open=%d errors=%d",
         stats["candidates"],
         stats["measured"],
         stats["data_missing"],
+        stats["window_open"],
         stats["errors"],
     )
     return stats
@@ -162,7 +171,13 @@ async def _fetch_pending_sheets(pool: Any, *, today: date) -> list[dict]:
 # =====================================================================
 
 
-async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> dict:
+async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> dict | None:
+    """시트 1건 시뮬레이션.
+
+    Returns:
+        outcome dict — 측정 완료 (data_missing 포함, paper_outcomes 에 영속할 대상).
+        None — 측정 윈도우가 아직 안 닫힘. 영속하지 않고 다음 cycle 에서 재시도.
+    """
     publish_date = sheet.generated_at.astimezone(KST).date()
     ticker = sheet.ticker
     rules_evaluated = [r.type for r in sheet.exit.rules]
@@ -189,20 +204,9 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
     # publish_date 이후 window_bdays 거래일이 닫혀야 측정 가능.
     expected_window_end = await _add_business_days(pool, publish_date, window_bdays)
     if expected_window_end is None or expected_window_end >= today:
-        # daily_prices 가 충분히 안 들어왔거나 윈도우 아직 안 닫힘 — 다음 cycle 에서 재시도.
-        return _build_outcome(
-            sheet=sheet,
-            publish_date=publish_date,
-            entry_price=float(entry_close),
-            exit_date=None,
-            exit_price=None,
-            exit_reason="data_missing",
-            holding_days=None,
-            scale_out_legs=[],
-            rules_evaluated=rules_evaluated,
-            coverage="daily_only",
-            metadata={"reason": "window_not_closed", "window_bdays": window_bdays},
-        )
+        # daily_prices 가 충분히 안 들어왔거나 윈도우 아직 안 닫힘 — 영속하지 않고
+        # 다음 cycle 에서 재시도 (None 반환). data_missing 행을 박으면 영영 재측정 안 됨.
+        return None
 
     # 3) death_cross 가 있으면 entry 직전 MA long + 마진 만큼 일봉 history 필요.
     needs_history = any(isinstance(r, DeathCrossRule) for r in sheet.exit.rules)

@@ -3,7 +3,8 @@
 v2 원본: `/jobs/daily-asset-snapshot` (services/jobs/app.py:87-163).
 
 v3 어댑터:
-- KIS 직접 호출 → kis_gateway HTTP `/api/balance` (PortfolioState 응답).
+- 잔고: monitor 발행 Redis 스냅샷 우선 (원장 동시 조회 충돌 방지, 2026-06-03),
+  없으면 kis_gateway HTTP `/api/balance` fallback.
 - v2 trade_logs (SQLModel, 직접 INSERT) → v3 outcomes (sheet 단위 closed PnL).
   → "오늘의 실현 손익" 의미는 같으나 sheet 가 닫힌 시점 (closed_at::date = today) 기준.
 - daily_asset_snapshots UPSERT 는 PK=snapshot_date.
@@ -17,6 +18,8 @@ from datetime import date
 from typing import Any
 
 import httpx
+
+from prime_jennie_runtime.infra.balance_snapshot import read_balance_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +68,22 @@ async def _fetch_balance_with_retry(
 async def daily_asset_snapshot(
     pool: Any,
     gateway_url: str,
+    redis_client: Any | None = None,
 ) -> None:
     """v2 `/jobs/daily-asset-snapshot` 포팅.
 
-    1) KIS gateway `/api/balance` → total_asset / cash / stock_eval / positions
+    1) 잔고 — monitor 발행 Redis 스냅샷 우선, 없으면 KIS gateway `/api/balance`
        (장 마감 직후 일시 장애 대응으로 3회 retry, 공유 pool 과 격리된 전용 client 사용)
     2) 미실현 PnL = sum(current_value - total_buy_amount) over positions
     3) 실현 PnL = sum(outcomes.pnl_krw WHERE closed_at::date = today)
     4) daily_asset_snapshots UPSERT (PK=snapshot_date)
     """
-    async with httpx.AsyncClient() as http:
-        balance = await _fetch_balance_with_retry(http, gateway_url)
+    balance: dict | None = None
+    if redis_client is not None:
+        balance = await read_balance_snapshot(redis_client)
+    if balance is None:
+        async with httpx.AsyncClient() as http:
+            balance = await _fetch_balance_with_retry(http, gateway_url)
 
     positions = balance.get("positions", []) or []
     total = int(balance.get("total_asset") or 0)

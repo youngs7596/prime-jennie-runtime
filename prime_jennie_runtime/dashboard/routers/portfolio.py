@@ -3,13 +3,13 @@
 v2 원본: `prime_jennie/services/dashboard/routers/portfolio.py`
 
 v3 매핑:
-- 실시간 잔고: v3 KIS Gateway HTTP `/balance` 호출 (`KIS_GATEWAY_URL`)
+- 실시간 잔고: monitor 발행 Redis 스냅샷 구독 (없으면 KIS Gateway HTTP fallback)
 - 포지션 메타데이터: `position_sheets` (ticker/strategy_tag) + `outcomes` (closed_at IS NULL → 오픈)
 - 자산 스냅샷: `daily_asset_snapshots` (migration 009) — `job_worker.daily_asset_snapshot`
   (15:45 KST cron) 이 매일 채운다. `/history` 가 그대로 노출.
 - 성과 요약: `outcomes` 기준 집계 (pnl_pct / pnl_krw).
 
-Redis 실시간 스냅샷 키(v2 `monitoring:live_positions`)는 v3 monitor 포팅 이후 연동.
+잔고의 단일 발행자는 monitor (infra/balance_snapshot.py 참조) — 원장 동시 조회 충돌 방지.
 """
 
 from __future__ import annotations
@@ -19,12 +19,13 @@ import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-import httpx
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from prime_jennie_runtime.infra.balance_snapshot import get_balance_snapshot_or_fetch
 
 from ..deps import get_redis, get_session
 
@@ -114,16 +115,13 @@ def _kis_gateway_url() -> str:
     return os.getenv("KIS_GATEWAY_URL", "http://localhost:8080")
 
 
-async def _fetch_kis_balance() -> dict[str, Any] | None:
-    """v3 KIS Gateway REST `/api/balance` 호출. 실패 시 None."""
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{_kis_gateway_url()}/api/balance")
-            resp.raise_for_status()
-            return resp.json()
-    except Exception:
-        logger.warning("KIS Gateway balance fetch failed", exc_info=True)
-        return None
+async def _fetch_kis_balance(redis_client: aioredis.Redis | None = None) -> dict[str, Any] | None:
+    """잔고 조회 — monitor 발행 스냅샷 우선, 없으면 gateway HTTP fallback.
+
+    각 소비자가 직접 KIS 를 부르면 원장 동시 조회 충돌이 나므로 (2026-06-03 학습)
+    스냅샷 구독이 기본 경로다. 실패 시 None.
+    """
+    return await get_balance_snapshot_or_fetch(redis_client, _kis_gateway_url())
 
 
 async def _open_sheet_meta(session: AsyncSession) -> dict[str, dict]:
@@ -146,9 +144,12 @@ async def _open_sheet_meta(session: AsyncSession) -> dict[str, dict]:
 
 
 @router.get("/summary", response_model=PortfolioState)
-async def get_summary(session: AsyncSession = Depends(get_session)) -> PortfolioState:
-    """포트폴리오 전체 요약. v3 KIS Gateway 실시간 잔고 우선."""
-    balance = await _fetch_kis_balance()
+async def get_summary(
+    session: AsyncSession = Depends(get_session),
+    redis_client: aioredis.Redis = Depends(get_redis),
+) -> PortfolioState:
+    """포트폴리오 전체 요약. monitor 잔고 스냅샷 우선 (없으면 gateway fallback)."""
+    balance = await _fetch_kis_balance(redis_client)
     meta = await _open_sheet_meta(session)
 
     positions: list[Position] = []
@@ -206,7 +207,7 @@ async def get_live_positions(
     except Exception:
         logger.debug("Redis live_positions read failed", exc_info=True)
 
-    summary = await get_summary(session)
+    summary = await get_summary(session, redis_client)
     return {
         "positions": [p.model_dump() for p in summary.positions],
         "updated_at": summary.timestamp.isoformat(),

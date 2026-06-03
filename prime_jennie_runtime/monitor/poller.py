@@ -34,11 +34,11 @@ import redis.asyncio as aioredis
 
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.fast_loop.schemas import GenericAlertNotification
+from prime_jennie_runtime.infra.balance_snapshot import LIVE_POSITIONS_KEY
 from prime_jennie_runtime.kis_gateway.market_hours import MarketCalendar
 
 logger = logging.getLogger(__name__)
 
-LIVE_POSITIONS_KEY = "monitoring:live_positions"
 MONITOR_STATUS_KEY = "monitoring:price_monitor"
 HEARTBEAT_KEY = "monitor:heartbeat"
 HEARTBEAT_TTL_SEC = 180  # 하한 — 실제 TTL 은 현재 polling 주기에 맞춰 늘어남
@@ -189,7 +189,11 @@ class LivePositionsPoller:
             "stock_eval_amount": payload.get("stock_eval_amount"),
         }
         try:
-            await self._redis.setex(LIVE_POSITIONS_KEY, 120, json.dumps(snapshot))
+            # 스냅샷 TTL 은 polling 주기보다 충분히 길게 — 장외 느린 주기 (300s) 에도
+            # 구독자 (dashboard/telegram/briefing 등, infra/balance_snapshot.py) 가
+            # 스냅샷을 잃지 않도록. 이 스냅샷이 잔고의 단일 발행 지점이다.
+            snapshot_ttl = int(self._current_interval()) + 120
+            await self._redis.setex(LIVE_POSITIONS_KEY, snapshot_ttl, json.dumps(snapshot))
             await self._redis.setex(
                 MONITOR_STATUS_KEY,
                 60,

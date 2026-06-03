@@ -175,3 +175,52 @@ async def test_performance_from_outcomes(app, session_factory):
         assert body["win_trades"] == 1
         assert body["loss_trades"] == 1
         assert body["total_profit"] == 0
+
+
+async def test_summary_prefers_monitor_snapshot_over_http(app, redis_client):
+    """monitor 발행 Redis 스냅샷이 있으면 gateway HTTP 를 부르지 않는다.
+
+    잔고 단일 발행/다중 구독 구조 (2026-06-03) — 원장 동시 조회 충돌 방지의 핵심.
+    """
+    import json
+
+    from prime_jennie_runtime.infra.balance_snapshot import LIVE_POSITIONS_KEY
+
+    # monitor 가 발행했을 스냅샷을 fakeredis 에 심는다.
+    await redis_client.set(
+        LIVE_POSITIONS_KEY,
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "stock_code": "069500",
+                        "stock_name": "KODEX 200",
+                        "quantity": 1568,
+                        "average_buy_price": 116139.0,
+                        "total_buy_amount": 182_105_952.0,
+                        "current_price": 117000.0,
+                        "current_value": 183_456_000.0,
+                        "profit_pct": 0.74,
+                    }
+                ],
+                "updated_at": datetime.now(UTC).isoformat(),
+                "cash_balance": 5_000_000,
+                "total_asset": 188_456_000,
+                "stock_eval_amount": 183_456_000,
+            }
+        ),
+    )
+
+    with respx.mock(assert_all_called=False) as mock:
+        http_route = mock.get(url__regex=r".*/balance$").mock(
+            return_value=Response(500, json={"error": "should not be called"})
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/api/portfolio/summary")
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+
+    # 스냅샷 데이터가 그대로 나오고, HTTP 는 호출되지 않았다.
+    assert body["cash_balance"] == 5_000_000
+    assert body["positions"][0]["stock_code"] == "069500"
+    assert http_route.call_count == 0

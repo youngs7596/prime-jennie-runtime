@@ -21,26 +21,27 @@ import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from prime_jennie_runtime.briefing.reporter import LLMCaller, generate_briefing
+from prime_jennie_runtime.infra.balance_snapshot import get_balance_snapshot_or_fetch
 from prime_jennie_runtime.infra.config import TelegramConfig
 from prime_jennie_runtime.telegram_bot.bot import TelegramBot
 
 logger = logging.getLogger(__name__)
 
 
-async def _fetch_kis_balance(http: httpx.AsyncClient) -> list[dict] | None:
-    """KIS gateway /api/balance 응답의 positions 리스트. 실패 시 None — context_builder
-    가 DB fallback 으로 우회한다."""
+async def _fetch_kis_balance(
+    http: httpx.AsyncClient,
+    redis_client: aioredis.Redis | None = None,
+) -> list[dict] | None:
+    """잔고 positions 리스트 — monitor 스냅샷 우선, 없으면 gateway HTTP fallback.
+
+    실패 시 None — context_builder 가 DB fallback 으로 우회한다.
+    """
     url = os.environ.get("KIS_GATEWAY_URL", "http://kis-gateway:8080")
-    try:
-        resp = await http.get(f"{url.rstrip('/')}/api/balance", timeout=5.0)
-        resp.raise_for_status()
-        positions = resp.json().get("positions") or []
-        return list(positions)
-    except Exception:
-        logger.warning(
-            "daily_briefing: KIS balance fetch failed — falling back to DB", exc_info=True
-        )
+    balance = await get_balance_snapshot_or_fetch(redis_client, url, http=http)
+    if balance is None:
+        logger.warning("daily_briefing: KIS balance fetch failed — falling back to DB")
         return None
+    return list(balance.get("positions") or [])
 
 
 async def daily_briefing_report(
@@ -64,7 +65,7 @@ async def daily_briefing_report(
     # 지연 import: briefing.context_builder 가 없는 환경 (테스트) 에서 import 실패 방지.
     from prime_jennie_runtime.briefing.context_builder import collect_briefing_data
 
-    kis_balance = await _fetch_kis_balance(http)
+    kis_balance = await _fetch_kis_balance(http, redis_client)
     data = await collect_briefing_data(
         engine, as_of=as_of, redis_client=redis_client, kis_balance=kis_balance
     )

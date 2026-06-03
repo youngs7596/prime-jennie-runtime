@@ -189,7 +189,8 @@ def build_handlers(
 
     async def h_daily_asset_snapshot() -> None:
         # 전용 httpx.AsyncClient 는 함수 내부에서 생성 — stale keepalive 격리.
-        await daily_asset_snapshot(pool, kis_gateway_url)
+        # redis_client 주입 → monitor 잔고 스냅샷 우선 사용 (원장 충돌 방지).
+        await daily_asset_snapshot(pool, kis_gateway_url, redis_client)
 
     async def h_sync_positions(dry_run: bool = True, stop_loss_pct: float = 6.0) -> None:
         await sync_positions(

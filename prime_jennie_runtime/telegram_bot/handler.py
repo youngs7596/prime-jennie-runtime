@@ -453,6 +453,14 @@ class CommandHandler:
     # ----- KIS gateway proxy -----
 
     async def _handle_balance(self, args: str, **_: object) -> CommandResult:
+        # monitor 발행 잔고 스냅샷 우선 — 원장 동시 조회 충돌 방지 (2026-06-03 학습).
+        # 스냅샷이 없을 때만 KIS 클라이언트 (gateway HTTP, 잔고 캐시가 보호) fallback.
+        from prime_jennie_runtime.infra.balance_snapshot import read_balance_snapshot
+
+        snap = await read_balance_snapshot(self._redis)
+        if snap is not None and snap.get("cash_balance") is not None:
+            return CommandResult(reply=f"현금 잔고: <b>{int(snap['cash_balance']):,}원</b>")
+
         if self._kis is None:
             return CommandResult(reply="KIS 클라이언트 미설정 — /balance 사용 불가")
         try:

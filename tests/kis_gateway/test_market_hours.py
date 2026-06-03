@@ -77,3 +77,43 @@ def test_streaming_hours_holiday():
     cal = MarketCalendar(trading_day_checker=lambda _d: False)
     cal.set_clock(_clock(datetime(2026, 4, 17, 10, 0, tzinfo=_KST)))
     assert cal.is_streaming_hours() is False
+
+
+def test_prime_trading_day_overrides_weekday_assumption():
+    """외부 (KIS chk-holiday) 판정이 '평일=거래일' 가정 캐시를 덮어쓴다.
+
+    2026-06-03 (수, 지방선거 휴장일) 사고: 체커 없는 calendar 가 'regular' 를 반환해
+    휴장일 가드 전체가 무력했다. prime 후에는 holiday 로 정정되어야 한다.
+    """
+    cal = MarketCalendar()  # 체커 없음 (운영 gateway 와 동일)
+    election_day = datetime(2026, 6, 3, 10, 0, tzinfo=_KST)
+    cal.set_clock(_clock(election_day))
+
+    # 가정 경로가 먼저 캐시를 채워도 (streamer 등이 먼저 조회한 상황),
+    assert cal.is_trading_day() is True
+    # 외부 판정 주입이 우선한다.
+    cal.prime_trading_day(election_day.date(), False)
+    assert cal.is_trading_day() is False
+    assert cal.is_market_open() == (False, "holiday")
+
+
+def test_needs_external_trading_day():
+    weekday = datetime(2026, 6, 3, 10, 0, tzinfo=_KST)
+
+    # 체커 없는 평일 — 외부 판정 필요.
+    cal = MarketCalendar()
+    cal.set_clock(_clock(weekday))
+    assert cal.needs_external_trading_day(weekday.date()) is True
+
+    # prime 후에는 불필요 (하루 1회만 KIS 조회).
+    cal.prime_trading_day(weekday.date(), True)
+    assert cal.needs_external_trading_day(weekday.date()) is False
+
+    # 체커가 주입돼 있으면 불필요.
+    cal2 = MarketCalendar(trading_day_checker=lambda _d: True)
+    assert cal2.needs_external_trading_day(weekday.date()) is False
+
+    # 주말은 불필요 (달력만으로 판정 가능).
+    cal3 = MarketCalendar()
+    saturday = datetime(2026, 6, 6, 10, 0, tzinfo=_KST)
+    assert cal3.needs_external_trading_day(saturday.date()) is False

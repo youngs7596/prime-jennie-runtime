@@ -188,7 +188,7 @@ class KISApi:
 
         재시도 정책:
           - 연결 오류 (RemoteProtocol/Connect/Read): 1회 짧게 재시도
-          - 500 EGW00201 (rate throttle): 1초 backoff 후 1회 재시도
+          - 500 EGW00201 (rate throttle): backoff 1s/2s 로 최대 2회 재시도
           - 503 및 일반 5xx (서버 일시 장애): 지수 백오프 3회 (1s/2s/4s)
           - 401/403 (인증 오류): 토큰 재발급 후 1회 재시도
 
@@ -212,19 +212,19 @@ class KISApi:
                 method, path, headers=headers, params=params, json_data=json_data
             )
 
-        # 500 throttling (EGW00201 초당 거래건수 초과): 짧게 backoff 후 재시도, 재인증 금지.
-        # Paper 는 초당 2건 제한이라 쉽게 걸림.
-        if resp.status_code == 500:
-            try:
-                body = resp.json()
-            except ValueError:
-                body = {}
-            if body.get("msg_cd") == "EGW00201":
-                logger.warning("KIS %s %s -> 500 EGW00201 throttle, backoff 1s", method, path)
-                await asyncio.sleep(1.0)
-                resp = await self._send(
-                    method, path, headers=headers, params=params, json_data=json_data
-                )
+        # 500 throttling (EGW00201 초당 거래건수 초과): backoff 후 재시도, 재인증 금지.
+        # 최대 2회 (1s/2s) — 계좌가 KIS 측 민감 상태면 저속 호출도 간헐 거부되는 것을
+        # 실측 (2026-06-03). 1회 재시도로는 흡수가 안 돼 monitor 연속 실패 alert 로 번짐.
+        for backoff in (1.0, 2.0):
+            if not _is_egw_throttle(resp):
+                break
+            logger.warning(
+                "KIS %s %s -> 500 EGW00201 throttle, backoff %.0fs", method, path, backoff
+            )
+            await asyncio.sleep(backoff)
+            resp = await self._send(
+                method, path, headers=headers, params=params, json_data=json_data
+            )
 
         # 5xx (502/503/504 + EGW00201 이 아닌 500): 일시 장애로 간주하고 지수 백오프 재시도.
         # 2026-05-11 운영 중 503 (Service Unavailable) 다발 — KIS 점검 또는 자체 게이트웨이

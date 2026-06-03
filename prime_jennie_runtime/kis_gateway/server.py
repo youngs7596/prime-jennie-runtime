@@ -277,6 +277,16 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
     @app.get("/api/market/is-market-open")
     async def api_is_market_open() -> dict[str, Any]:
         gw = _gw(app.state)
+        # MarketCalendar 는 체커 미주입 시 "평일=거래일" 로 가정해 선거일·임시공휴일을
+        # 모른다 — 이 상태로는 slow_loop/job_worker 의 휴장일 가드 전체가 무력하다
+        # (2026-06-03 지방선거일에 분봉 수집·scout 가 그대로 돌던 실측). 평일이고
+        # 아직 외부 판정이 없으면 KIS chk-holiday 로 하루 1회 채운다.
+        today_kst = gw.calendar.today_kst()
+        if gw.calendar.needs_external_trading_day(today_kst):
+            # KISApi.is_trading_day 는 내부에 실패 fallback (주말만 체크) 이 있어
+            # KIS 장애 시에도 거래일 가정으로 안전하게 동작한다.
+            is_trading = await gw.kis_api.is_trading_day(today_kst)
+            gw.calendar.prime_trading_day(today_kst, is_trading)
         open_flag, session_str = gw.calendar.is_market_open()
         return {"is_open": open_flag, "session": session_str}
 

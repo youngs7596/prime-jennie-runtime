@@ -98,12 +98,16 @@ class KISConfig(BaseSettings):
     rate_limit_trade_per_sec: int = 5
 
     # 전역 합산 rate limit — KIS 는 시세/매매 구분 없이 앱키 단위로 초당 호출을
-    # 합산해 세므로 (실전 20/sec), 모든 KIS 호출 (재시도 포함) 이 공유하는 한도가
-    # 따로 필요하다. 위 시세/매매 분리 버킷만으로는 19 + 5 = 24/sec 까지 허용되어
-    # 합산 한도를 넘는다 (2026-06-02 EGW00201 연쇄 사고 원인).
-    # 한 1초 윈도우 최대치 = burst + rate = 4 + 14 = 18 < 20 으로 안전 마진 확보.
-    rate_limit_global_per_sec: int = 14
-    rate_limit_global_burst: int = 4
+    # 합산해 세므로, 모든 KIS 호출 (재시도 포함) 이 공유하는 한도가 따로 필요하다.
+    # 위 시세/매매 분리 버킷만으로는 19 + 5 = 24/sec 까지 허용되어 합산 한도를
+    # 넘는다 (2026-06-02 EGW00201 연쇄 사고 원인).
+    #
+    # 기본값이 문서상 한도 (실전 20/sec) 보다 훨씬 보수적인 이유: 2026-06-03 실측에서
+    # 이 계좌는 초당 4~6건 수준에서도 간헐 거부됐다. 장기간 한도 위반 누적 (v2 시절
+    # WebSocket 차단 전력 포함) 으로 KIS 측이 민감 상태로 보이며, 위반 0 을 유지해
+    # 상태가 풀리는 것을 확인한 뒤에 env 로 올린다.
+    rate_limit_global_per_sec: int = 3
+    rate_limit_global_burst: int = 1
 
     # Circuit breaker
     circuit_fail_max: int = 20

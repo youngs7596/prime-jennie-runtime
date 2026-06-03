@@ -37,6 +37,8 @@ class MarketCalendar:
     def __init__(self, trading_day_checker: Callable[[date_cls], bool] | None = None):
         self._checker = trading_day_checker
         self._cache: dict[str, bool] = {}
+        # 외부 (KIS chk-holiday) 판정으로 채워진 날짜 — "평일=거래일" 가정 캐시와 구분.
+        self._primed: set[str] = set()
         self._now: Callable[[], datetime] = lambda: datetime.now(_KST)
 
     def _clock_now(self) -> datetime:
@@ -74,6 +76,33 @@ class MarketCalendar:
         # 체커 없으면 평일=거래일 가정
         self._cache[key] = True
         return True
+
+    def today_kst(self) -> date_cls:
+        """현재 시각 (주입 가능한 clock 기준) 의 KST 날짜."""
+        return self._clock_now().date()
+
+    def prime_trading_day(self, d: date_cls, is_trading: bool) -> None:
+        """외부 (KIS chk-holiday 등) 에서 판정한 거래일 여부를 주입.
+
+        체커가 없을 때 "평일=거래일" 가정으로 캐시된 값보다 우선한다 — 선거일·임시공휴일
+        같은 KIS 휴장일을 달력이 모르는 채 'regular' 를 반환하던 문제의 보완 경로
+        (2026-06-03 지방선거일 실측).
+        """
+        self._cache[d.isoformat()] = is_trading
+        self._primed.add(d.isoformat())
+        if not is_trading:
+            logger.info("Non-trading day primed (external): %s", d.isoformat())
+
+    def needs_external_trading_day(self, d: date_cls) -> bool:
+        """KIS chk-holiday 외부 판정이 필요한지.
+
+        체커가 주입돼 있거나, 이미 외부 판정으로 채워졌거나, 주말이면 불필요.
+        """
+        if self._checker is not None:
+            return False
+        if d.isoformat() in self._primed:
+            return False
+        return d.weekday() < 5
 
     def is_market_open(self) -> tuple[bool, str]:
         """장 운영 상태 반환 (is_open, session).

@@ -317,8 +317,79 @@ async def test_egw00201_not_re_retried_by_5xx_loop(kis_config, monkeypatch):
             await api.close()
 
     assert snap.price == 70000
-    # 정확히 2회 호출 — EGW00201 backoff 후 재시도 1회만
+    # 정확히 2회 호출 — EGW00201 backoff 후 첫 재시도에서 성공하면 추가 재시도 없음
     assert calls["n"] == 2
+
+
+async def test_egw00201_retries_twice_then_succeeds(kis_config, monkeypatch):
+    """연속 throttle 2회 → 세 번째 시도에서 성공.
+
+    계좌가 KIS 측 민감 상태면 저속 호출도 간헐 거부가 이어지는 것을 실측 (2026-06-03)
+    — 재시도 1회로는 흡수가 안 돼 monitor 연속 실패 alert 로 번지므로 2회로 늘림.
+    """
+    calls = {"n": 0}
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(
+                500, json={"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "throttle"}
+            )
+        return httpx.Response(
+            200, json={"rt_cd": "0", "msg1": "", "output": {"stck_prpr": "70000"}}
+        )
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config)
+        try:
+            snap = await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    assert snap.price == 70000
+    # 1차 throttle + 2차 throttle + 3차 성공 = 3회 호출, backoff 1s/2s
+    assert calls["n"] == 3
+    assert [s for s in sleeps if s >= 1.0] == [1.0, 2.0]
+
+
+async def test_egw00201_gives_up_after_two_retries(kis_config, monkeypatch):
+    """throttle 이 3회 연속이면 500 으로 전파 — 무한 재시도 없음."""
+    calls = {"n": 0}
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, json={"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "throttle"})
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config)
+        try:
+            with pytest.raises(httpx.HTTPStatusError):
+                await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    # 초기 1회 + 재시도 2회 = 3회에서 멈춤
+    assert calls["n"] == 3
 
 
 async def test_global_rate_limiter_covers_initial_and_retry_calls(kis_config, monkeypatch):

@@ -20,6 +20,13 @@ class FakeKisApi:
         self.snapshot_result: StockSnapshot | None = None
         self.snapshot_error: Exception | None = None
         self.balance_result: dict | None = None
+        # KIS chk-holiday 응답 (is-market-open 엔드포인트의 외부 판정 경로).
+        self.trading_day_result: bool = True
+        self.trading_day_calls: int = 0
+
+    async def is_trading_day(self, target_date=None) -> bool:
+        self.trading_day_calls += 1
+        return self.trading_day_result
 
     async def get_snapshot(self, stock_code: str) -> StockSnapshot:
         if self.snapshot_error is not None:
@@ -187,3 +194,39 @@ def test_is_market_open_endpoint(kis_config):
     resp = client.get("/api/market/is-market-open")
     assert resp.status_code == 200
     assert resp.json() == {"is_open": True, "session": "regular"}
+    # 체커가 주입된 calendar 면 KIS chk-holiday 외부 판정을 호출하지 않는다.
+    assert fake.trading_day_calls == 0
+
+
+def test_is_market_open_kis_holiday_detected(kis_config):
+    """체커 없는 calendar (운영 기본) 에서 KIS chk-holiday 가 휴장일을 잡아낸다.
+
+    2026-06-03 지방선거일 사고 재발 방지 — 평일인데 KIS 휴장일이면 'holiday' 를
+    반환해야 slow_loop/job_worker 의 휴장일 가드가 동작한다.
+    """
+    from datetime import timedelta, timezone
+
+    kst = timezone(timedelta(hours=9))
+    fake = FakeKisApi()
+    fake.trading_day_result = False  # KIS: 오늘은 휴장일
+
+    state = GatewayState(
+        config=kis_config,
+        kis_api=fake,  # type: ignore[arg-type]
+        calendar=MarketCalendar(),  # 체커 없음 — 운영 lifespan 과 동일
+    )
+    # 2026-06-03 수요일 (지방선거 휴장일) 장중 시각
+    state.calendar.set_clock(lambda: datetime(2026, 6, 3, 10, 0, tzinfo=kst))
+
+    app = create_app(state=state)
+    client = TestClient(app)
+
+    resp = client.get("/api/market/is-market-open")
+    assert resp.status_code == 200
+    assert resp.json() == {"is_open": False, "session": "holiday"}
+    assert fake.trading_day_calls == 1
+
+    # 같은 날 두 번째 조회는 캐시 — KIS 재호출 없음.
+    resp2 = client.get("/api/market/is-market-open")
+    assert resp2.json() == {"is_open": False, "session": "holiday"}
+    assert fake.trading_day_calls == 1

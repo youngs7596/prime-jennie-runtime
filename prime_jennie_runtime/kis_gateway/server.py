@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import deque
@@ -91,11 +92,40 @@ class GatewayState:
             if price_repo is not None
             else None
         )
+        # 잔고 (원장) 조회 캐시 + 단일 비행 — KIS 원장은 같은 계좌에 대한 근접/동시
+        # 조회를 EGW00201 로 거부한다 (2026-06-03 직접 호출 실측: 동시 2건은 둘 다 거부,
+        # 시차 있으면 통과). monitor(30s)·slow-loop(2min)·UI 폴링이 각자 잔고를 물으면
+        # 충돌이 불가피하므로, gateway 가 응답을 짧게 캐싱해 KIS 로 가는 잔고 조회를
+        # TTL 당 1건으로 합친다.
+        self.balance_cache_ttl = config.balance_cache_ttl_sec
+        self._balance_cache: tuple[float, dict[str, Any]] | None = None
+        self._balance_lock = asyncio.Lock()
 
     def record_request(self, endpoint: str, detail: str) -> None:
         self.request_history.append(
             {"endpoint": endpoint, "detail": detail, "timestamp": time.time()}
         )
+
+    async def get_balance_cached(self) -> dict[str, Any]:
+        """잔고 조회 — TTL 캐시 + 단일 비행 (동시 요청은 한 번의 KIS 호출을 공유).
+
+        circuit breaker 는 실제 KIS 호출에만 적용. 캐시 hit 은 breaker 상태와 무관.
+        """
+        now = time.monotonic()
+        cached = self._balance_cache
+        if cached is not None and now - cached[0] < self.balance_cache_ttl:
+            return cached[1]
+
+        async with self._balance_lock:
+            # double-check — lock 대기 중에 다른 요청이 채웠으면 그것을 쓴다 (단일 비행).
+            now = time.monotonic()
+            cached = self._balance_cache
+            if cached is not None and now - cached[0] < self.balance_cache_ttl:
+                return cached[1]
+
+            data = await self.circuit_breaker.call(self.kis_api.get_balance)
+            self._balance_cache = (time.monotonic(), data)
+            return data
 
 
 def create_app(state: GatewayState | None = None, *, config: KISConfig | None = None) -> FastAPI:
@@ -350,7 +380,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         gw.record_request("balance", "account")
         await gw.trade_limiter.acquire()
         try:
-            data = await gw.circuit_breaker.call(gw.kis_api.get_balance)
+            data = await gw.get_balance_cached()
             positions = [
                 Position(
                     stock_code=p["stock_code"],
@@ -383,7 +413,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         gw.record_request("cash", "account")
         await gw.trade_limiter.acquire()
         try:
-            data = await gw.circuit_breaker.call(gw.kis_api.get_balance)
+            data = await gw.get_balance_cached()
             return {"cash_balance": data.get("cash_balance", 0)}
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err

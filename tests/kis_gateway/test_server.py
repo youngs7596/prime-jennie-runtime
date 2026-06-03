@@ -20,6 +20,7 @@ class FakeKisApi:
         self.snapshot_result: StockSnapshot | None = None
         self.snapshot_error: Exception | None = None
         self.balance_result: dict | None = None
+        self.balance_calls: int = 0
         # KIS chk-holiday 응답 (is-market-open 엔드포인트의 외부 판정 경로).
         self.trading_day_result: bool = True
         self.trading_day_calls: int = 0
@@ -50,6 +51,7 @@ class FakeKisApi:
         return {"filled": True, "filled_qty": 10, "avg_price": 71000.0}
 
     async def get_balance(self) -> dict:
+        self.balance_calls += 1
         return self.balance_result or {
             "positions": [
                 {
@@ -151,6 +153,48 @@ def test_cash_endpoint(kis_config):
     resp = client.get("/api/cash")
     assert resp.status_code == 200
     assert resp.json()["cash_balance"] == 1_500_000
+
+
+def test_balance_cached_within_ttl(kis_config):
+    """TTL 안의 연속 잔고 조회는 KIS 호출 1번을 공유한다 — 원장 충돌 방지의 핵심.
+
+    KIS 원장은 같은 계좌의 근접/동시 조회를 EGW00201 로 거부한다 (2026-06-03 실측).
+    monitor/slow-loop/UI 가 각자 물어도 gateway 가 캐시로 합쳐 KIS 로는 1건만 나간다.
+    """
+    fake = FakeKisApi()
+    client = _build_client(kis_config, fake)
+
+    # 연속 3회 (balance 2 + cash 1) — 모두 같은 KIS 호출 결과를 공유.
+    r1 = client.get("/api/balance")
+    r2 = client.get("/api/balance")
+    r3 = client.get("/api/cash")
+    assert r1.status_code == r2.status_code == r3.status_code == 200
+    assert fake.balance_calls == 1
+
+    # 같은 데이터가 돌아온다.
+    assert r1.json()["cash_balance"] == r3.json()["cash_balance"]
+
+
+def test_balance_cache_expires_after_ttl(kis_config, monkeypatch):
+    """TTL 이 지나면 KIS 를 다시 부른다."""
+    fake = FakeKisApi()
+    state = GatewayState(
+        config=kis_config,
+        kis_api=fake,  # type: ignore[arg-type]
+        calendar=MarketCalendar(trading_day_checker=lambda _d: True),
+    )
+    app = create_app(state=state)
+    client = TestClient(app)
+
+    client.get("/api/balance")
+    assert fake.balance_calls == 1
+
+    # 캐시 시각을 TTL 너머로 되돌려 만료 상황 재현.
+    fetched_at, data = state._balance_cache
+    state._balance_cache = (fetched_at - state.balance_cache_ttl - 1.0, data)
+
+    client.get("/api/balance")
+    assert fake.balance_calls == 2
 
 
 def test_executions_endpoint(kis_config):

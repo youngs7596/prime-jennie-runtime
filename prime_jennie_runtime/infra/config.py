@@ -100,14 +100,19 @@ class KISConfig(BaseSettings):
     # 전역 합산 rate limit — KIS 는 시세/매매 구분 없이 앱키 단위로 초당 호출을
     # 합산해 세므로, 모든 KIS 호출 (재시도 포함) 이 공유하는 한도가 따로 필요하다.
     # 위 시세/매매 분리 버킷만으로는 19 + 5 = 24/sec 까지 허용되어 합산 한도를
-    # 넘는다 (2026-06-02 EGW00201 연쇄 사고 원인).
+    # 넘는다 (2026-06-02 EGW00201 연쇄 사고의 시세 측 원인).
     #
-    # 기본값이 문서상 한도 (실전 20/sec) 보다 훨씬 보수적인 이유: 2026-06-03 실측에서
-    # 이 계좌는 초당 4~6건 수준에서도 간헐 거부됐다. 장기간 한도 위반 누적 (v2 시절
-    # WebSocket 차단 전력 포함) 으로 KIS 측이 민감 상태로 보이며, 위반 0 을 유지해
-    # 상태가 풀리는 것을 확인한 뒤에 env 로 올린다.
-    rate_limit_global_per_sec: int = 3
-    rate_limit_global_burst: int = 1
+    # 2026-06-03 스택 전체 정지 후 직접 호출 실측: 이 계좌의 시세 한도는 문서대로
+    # ~18-20/sec 에서 정상 동작 (17.6/sec 연속 30건 무사 통과). 한 윈도우 최대치
+    # = burst + rate = 4 + 10 = 14 < 18 로 여유를 둔다.
+    rate_limit_global_per_sec: int = 10
+    rate_limit_global_burst: int = 4
+
+    # 잔고 (원장) 조회 캐시 TTL — KIS 원장은 같은 계좌의 근접/동시 조회를 EGW00201
+    # 로 거부한다 (2026-06-03 실측: 동시 2건은 둘 다 거부). 여러 소비자 (monitor /
+    # slow-loop / UI) 의 잔고 조회를 gateway 가 캐시로 합쳐 KIS 로는 TTL 당 1건만
+    # 나가게 한다. 잔고는 체결 시에만 바뀌므로 짧은 staleness 는 무해.
+    balance_cache_ttl_sec: float = 5.0
 
     # Circuit breaker
     circuit_fail_max: int = 20

@@ -25,6 +25,7 @@ import httpx
 from prime_jennie_runtime.infra.config import KISConfig
 
 from .order_client import OrderClient
+from .rate_limiter import AsyncRateLimiter
 from .schemas import DailyPrice, MinutePrice, StockSnapshot
 from .token_manager import TokenRecord, load_token, save_token
 
@@ -67,6 +68,7 @@ class KISApi:
         config: KISConfig,
         *,
         client: httpx.AsyncClient | None = None,
+        rate_limiter: AsyncRateLimiter | None = None,
     ):
         self._config = config
         self._client = client or httpx.AsyncClient(
@@ -78,6 +80,13 @@ class KISApi:
         self._token_expires_at: float = 0.0
         self._token_lock = asyncio.Lock()
         self._load_cached_token()
+        # 전역 합산 rate limiter — KIS 는 앱키 단위로 모든 호출을 합산해 초당 한도를
+        # 적용하므로, server.py 의 시세/매매 분리 버킷과 별개로 실제 KIS 로 나가는
+        # 모든 HTTP 호출 (재시도 포함) 이 이 limiter 를 거쳐야 한다.
+        self._rate_limiter = rate_limiter or AsyncRateLimiter(
+            rate=config.rate_limit_global_per_sec,
+            capacity=config.rate_limit_global_burst,
+        )
         # 주문 로직은 별도 모듈 — KISApi 는 thin wrapper 로 위임 (단일 책임 분리)
         self._order_client = OrderClient(self)
 
@@ -92,6 +101,9 @@ class KISApi:
             if not force and self._access_token and time.time() < self._token_expires_at - 60:
                 return self._access_token
 
+            # 토큰 발급도 KIS 합산 한도에 포함 — 수집 burst 중 토큰 만료가 겹치면
+            # 발급 호출이 한도 초과로 거부될 수 있어 같은 limiter 를 거친다.
+            await self._rate_limiter.acquire()
             resp = await self._client.post(
                 "/oauth2/tokenP",
                 json={
@@ -130,6 +142,25 @@ class KISApi:
 
     # ─── Common Request ──────────────────────────────────────────
 
+    async def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, Any] | None,
+        json_data: dict[str, Any] | None,
+    ) -> httpx.Response:
+        """전역 rate limiter 를 거쳐 KIS 로 HTTP 1회 전송.
+
+        ``_request`` 의 초기 호출과 모든 재시도가 이 메서드를 거친다 — 재시도가
+        limiter 를 우회하면 KIS 측 합산 한도 위반이 재시도에서 또 발생한다.
+        """
+        await self._rate_limiter.acquire()
+        return await self._client.request(
+            method, path, headers=headers, params=params, json=json_data
+        )
+
     async def _headers(self, tr_id: str) -> dict[str, str]:
         """KIS API 공통 헤더 구성."""
         token = await self.authenticate()
@@ -153,6 +184,8 @@ class KISApi:
     ) -> dict[str, Any]:
         """KIS API 공통 요청.
 
+        모든 호출 (초기 + 재시도) 은 ``_send`` 를 거치며 전역 rate limiter 가 적용된다.
+
         재시도 정책:
           - 연결 오류 (RemoteProtocol/Connect/Read): 1회 짧게 재시도
           - 500 EGW00201 (rate throttle): 1초 backoff 후 1회 재시도
@@ -168,15 +201,15 @@ class KISApi:
         headers = await self._headers(tr_id)
 
         try:
-            resp = await self._client.request(
-                method, path, headers=headers, params=params, json=json_data
+            resp = await self._send(
+                method, path, headers=headers, params=params, json_data=json_data
             )
         except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
             stock = (params or {}).get("FID_INPUT_ISCD", "")
             logger.warning("KIS %s %s [%s] connection error: %s, retrying", method, path, stock, e)
             await asyncio.sleep(0.5)
-            resp = await self._client.request(
-                method, path, headers=headers, params=params, json=json_data
+            resp = await self._send(
+                method, path, headers=headers, params=params, json_data=json_data
             )
 
         # 500 throttling (EGW00201 초당 거래건수 초과): 짧게 backoff 후 재시도, 재인증 금지.
@@ -189,8 +222,8 @@ class KISApi:
             if body.get("msg_cd") == "EGW00201":
                 logger.warning("KIS %s %s -> 500 EGW00201 throttle, backoff 1s", method, path)
                 await asyncio.sleep(1.0)
-                resp = await self._client.request(
-                    method, path, headers=headers, params=params, json=json_data
+                resp = await self._send(
+                    method, path, headers=headers, params=params, json_data=json_data
                 )
 
         # 5xx (502/503/504 + EGW00201 이 아닌 500): 일시 장애로 간주하고 지수 백오프 재시도.
@@ -209,8 +242,8 @@ class KISApi:
                     _RETRY_5XX_MAX,
                 )
                 await asyncio.sleep(delay)
-                resp = await self._client.request(
-                    method, path, headers=headers, params=params, json=json_data
+                resp = await self._send(
+                    method, path, headers=headers, params=params, json_data=json_data
                 )
                 if resp.status_code < 500 or _is_egw_throttle(resp):
                     break
@@ -227,8 +260,8 @@ class KISApi:
             )
             await self.authenticate(force=True)
             headers = await self._headers(tr_id)
-            resp = await self._client.request(
-                method, path, headers=headers, params=params, json=json_data
+            resp = await self._send(
+                method, path, headers=headers, params=params, json_data=json_data
             )
 
         resp.raise_for_status()

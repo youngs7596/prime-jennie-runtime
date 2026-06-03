@@ -210,6 +210,11 @@ def build_handlers(
         await weekly_factor_analysis(pool, redis_client, period_days=period_days)
 
     async def h_collect_minute_chart(top_n: int = 30) -> None:
+        # 휴장일엔 분봉이 갱신되지 않는데 수집이 돌면 KIS 호출 ~50건/5분 이 그대로
+        # 나간다 (2026-06-03 휴장일에 실측 — 합산 rate limit 위반의 공범).
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("collect_minute_chart skipped: non-trading day")
+            return
         await collect_minute_chart(pool, http, kis_gateway_url, top_n=top_n)
 
     async def h_collect_full_market_data(top_n: int = 300, days: int = 30) -> None:

@@ -321,6 +321,54 @@ async def test_egw00201_not_re_retried_by_5xx_loop(kis_config, monkeypatch):
     assert calls["n"] == 2
 
 
+async def test_global_rate_limiter_covers_initial_and_retry_calls(kis_config, monkeypatch):
+    """모든 KIS 호출 (초기 + EGW00201 재시도 + 토큰 발급) 이 전역 limiter 를 거친다.
+
+    2026-06-02 사고 재발 방지: 재시도가 limiter 를 우회하면 KIS 앱키 합산 한도
+    (실전 20/sec) 위반이 재시도에서 또 발생해 throttle 이 연쇄된다.
+    """
+
+    class CountingLimiter:
+        def __init__(self) -> None:
+            self.acquired = 0
+
+        async def acquire(self) -> None:
+            self.acquired += 1
+
+    limiter = CountingLimiter()
+    calls = {"n": 0}
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                500, json={"rt_cd": "1", "msg_cd": "EGW00201", "msg1": "throttle"}
+            )
+        return httpx.Response(
+            200, json={"rt_cd": "0", "msg1": "", "output": {"stck_prpr": "70000"}}
+        )
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config, rate_limiter=limiter)  # type: ignore[arg-type]
+        try:
+            snap = await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    assert snap.price == 70000
+    # 토큰 발급 1 + 초기 호출 1 + EGW00201 재시도 1 = limiter 통과 3회
+    assert limiter.acquired == 3
+
+
 async def test_place_order_success(kis_config):
     with respx.mock(base_url=kis_config.base_url, assert_all_called=True) as mock:
         _token_route(mock, kis_config.base_url)

@@ -114,3 +114,41 @@ async def test_steady_state_average_rate():
     clock.tick(1.0)
     for _ in range(5):
         await limiter.acquire()
+
+
+async def test_capacity_smaller_than_rate_limits_burst(monkeypatch):
+    """capacity < rate 면 순간 burst 가 capacity 로 묶인다.
+
+    KIS 합산 한도 (실전 20/sec) 대응 — capacity=rate 토큰 bucket 은 "가득 찬 bucket
+    소진 + 같은 1초 refill" 로 한 윈도우에 2×rate 까지 나갈 수 있어, 한 윈도우 최대치
+    (capacity + rate) 를 상대 한도 아래로 묶으려면 capacity 를 따로 줄여야 한다.
+    """
+    clock = FakeClock()
+    limiter = AsyncRateLimiter(rate=14, window_sec=1.0, capacity=4, clock=clock)
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+        clock.tick(delay)
+
+    import prime_jennie_runtime.kis_gateway.rate_limiter as rl
+
+    monkeypatch.setattr(rl.asyncio, "sleep", fake_sleep)
+
+    # 첫 4건 (capacity) 은 즉시 통과
+    for _ in range(4):
+        await limiter.acquire()
+    assert sleep_calls == []
+
+    # 5번째부터는 refill (1/14초) 대기 — burst 가 capacity 에서 멈춤을 검증
+    await limiter.acquire()
+    assert len(sleep_calls) >= 1
+    assert sleep_calls[0] == pytest.approx(1.0 / 14, abs=0.01)
+
+
+async def test_capacity_validation():
+    with pytest.raises(ValueError):
+        AsyncRateLimiter(rate=5, capacity=0)
+    with pytest.raises(ValueError):
+        AsyncRateLimiter(rate=5, capacity=-1)

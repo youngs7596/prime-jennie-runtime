@@ -7,7 +7,13 @@ KIS 계정 글로벌 레이트 리밋 (시세 19/sec, 매매 5/sec) 강제. v2 s
 (평균 rate/sec 유지).
 
 생성자 시그니처는 기존 sliding-window 와 호환 (rate, window_sec, clock).
-``capacity`` = ``rate`` (별도 인자 없음) — KIS 한도 그대로 burst 한도로 사용.
+``capacity`` 기본값은 ``rate`` — KIS 한도 그대로 burst 한도로 사용.
+
+2026-06-03 추가: ``capacity`` 를 rate 보다 작게 주면 순간 burst 를 더 좁게 묶을 수
+있다. capacity=rate 이면 "가득 찬 bucket 에서 rate 만큼 즉시 소진 + 같은 1초 안에
+refill 로 rate 만큼 더" = 한 윈도우에 최대 2×rate 가 나가는 구조라, KIS 처럼 측정
+윈도우가 빡빡한 상대에는 capacity 를 줄여야 한 윈도우 최대치 (capacity + rate) 를
+상대 한도 아래로 보장할 수 있다.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ logger = logging.getLogger(__name__)
 class AsyncRateLimiter:
     """Token bucket 기반 async 리미터.
 
-    - ``capacity`` = ``rate`` (생성자 인자로 별도 노출 안 함)
+    - ``capacity`` 기본값 = ``rate``. 작게 주면 순간 burst 한도를 좁힘
     - refill: ``rate / window_sec`` tokens/sec — 평균 rate 유지
     - acquire: 토큰 1개 소비. 부족하면 1개가 채워질 때까지 sleep
     """
@@ -33,17 +39,20 @@ class AsyncRateLimiter:
         rate: int,
         *,
         window_sec: float = 1.0,
+        capacity: int | None = None,
         clock: Callable[[], float] | None = None,
     ):
         if rate <= 0:
             raise ValueError("rate must be positive")
         if window_sec <= 0:
             raise ValueError("window_sec must be positive")
+        if capacity is not None and capacity <= 0:
+            raise ValueError("capacity must be positive")
         self._rate = rate
         self._window = window_sec
-        self._capacity = float(rate)
+        self._capacity = float(capacity if capacity is not None else rate)
         self._refill_per_sec = rate / window_sec
-        self._tokens = float(rate)
+        self._tokens = self._capacity
         self._clock = clock or time.monotonic
         self._last_refill = self._clock()
         self._lock = asyncio.Lock()

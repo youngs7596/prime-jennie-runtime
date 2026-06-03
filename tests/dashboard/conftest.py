@@ -201,6 +201,40 @@ _SCHEMA_STATEMENTS = [
         realized_profit_loss BIGINT
     )
     """,
+    # paper_outcomes (migration 022/023) — /paper 라우터
+    """
+    CREATE TABLE IF NOT EXISTS paper_outcomes (
+        sheet_id TEXT PRIMARY KEY,
+        simulator_version TEXT NOT NULL,
+        entry_model TEXT NOT NULL,
+        coverage TEXT NOT NULL,
+        entry_date DATE NOT NULL,
+        entry_price NUMERIC,
+        exit_date DATE,
+        exit_price NUMERIC,
+        exit_reason TEXT,
+        holding_days INT,
+        pnl_pct NUMERIC,
+        scale_out_legs TEXT DEFAULT '[]',
+        rules_evaluated TEXT DEFAULT '[]',
+        metadata_json TEXT DEFAULT '{}',
+        computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # daily_prices (migration 003) — /paper 벤치마크 (KODEX200) 조회
+    """
+    CREATE TABLE IF NOT EXISTS daily_prices (
+        stock_code TEXT NOT NULL,
+        price_date DATE NOT NULL,
+        open_price INT NOT NULL,
+        high_price INT NOT NULL,
+        low_price INT NOT NULL,
+        close_price INT NOT NULL,
+        volume BIGINT NOT NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (stock_code, price_date)
+    )
+    """,
 ]
 
 

@@ -35,6 +35,7 @@ from .routers import (
     logs,
     macro,
     news,
+    paper,
     portfolio,
     scout,
     system,
@@ -97,6 +98,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(logs.router, prefix="/api")
     app.include_router(control.router, prefix="/api")
     app.include_router(news.router, prefix="/api")
+    app.include_router(paper.router, prefix="/api")
 
     @app.get("/health")
     async def health() -> dict:

@@ -265,6 +265,17 @@ async def run_slow_loop(
         except Exception:
             logger.exception("risk throttle refresh failed — using last known multiplier")
 
+    # --- 0.7. control.state 스냅샷 (run 전체에서 한 번만 읽음) ---
+    # paper 모드 (STOP) 여부를 두 곳에서 쓴다: (a) macro 후처리의 reversal guard paper
+    # 완화 (P2.7), (b) 섹션 5 의 fast_loop stream emit 차단. 한 번만 읽어 run 안에서
+    # 같은 상태를 보게 한다 — 중간에 /resume 이 끼어들어도 반쪽 적용이 안 되도록.
+    sys_snap = None
+    if comp.system_state is not None:
+        try:
+            sys_snap = await comp.system_state.snapshot()
+        except Exception:
+            logger.exception("control.state snapshot failed — 비-paper (latch 유지) 로 진행")
+
     # --- 1. Macro phase ---
     macro_ctx = await comp.macro_builder.build(
         as_of=as_of_dt,
@@ -330,6 +341,8 @@ async def run_slow_loop(
         engine=comp.db_engine,
         macro_run_id=macro_run_id,
         as_of=as_of_dt,
+        # paper 모드 (STOP) 에서는 reversal latch 를 완화 — 메타만 기록 (P2.7).
+        paper_mode=bool(sys_snap is not None and sys_snap.stopped),
     )
 
     # DB 기록 (engine=None 이면 no-op). prompt_chars 는 비용 추정용.
@@ -642,10 +655,10 @@ async def run_slow_loop(
     # macro_runs/scout_runs/screening_candidates 가 STOP 중에도 남는다.
     # fast_loop entry path 가 control.state 를 독립 확인하므로 만에 하나 stream
     # 으로 샜더라도 진입은 0 (defense-in-depth).
+    # 스냅샷은 섹션 0.7 에서 읽은 것을 재사용 — run 안에서 상태 일관성 유지.
     emit_to_fast_loop = True
     control_reason: str | None = None
-    if comp.system_state is not None:
-        sys_snap = await comp.system_state.snapshot()
+    if sys_snap is not None:
         if sys_snap.stopped:
             emit_to_fast_loop, control_reason = False, "control_stopped"
         elif sys_snap.paused:

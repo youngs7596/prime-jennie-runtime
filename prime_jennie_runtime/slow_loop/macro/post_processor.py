@@ -46,7 +46,10 @@ class MacroPostResult:
     closed_triggers: tuple[str, ...] = ()
     reversal_latched: bool = False
     # latch 메타 — persistence 가 macro_runs.metadata_json 에 병합 저장.
-    # 키: reversal_guard / original_gate / latched_from_macro_run_id / latched_from_generated_at
+    # latch 발동 시 키: reversal_guard / original_gate / latched_from_macro_run_id /
+    #   latched_from_generated_at
+    # paper 완화 시 키 (P2.7): paper_relaxed / would_have_been_gate / original_gate /
+    #   latched_from_macro_run_id / latched_from_generated_at
     reversal_meta: dict[str, Any] | None = None
 
 
@@ -95,11 +98,18 @@ async def run_post_processing(
     engine: AsyncEngine | None = None,
     macro_run_id: str | None = None,
     as_of: datetime | None = None,
+    paper_mode: bool = False,
 ) -> MacroPostResult:
     """LLM 원본을 받아 auto_override + reversal_guard + discretize + 이벤트 발행까지 수행.
 
     engine/macro_run_id/as_of 셋 다 있어야 reversal_guard 가 동작한다 (DB 조회 필요).
     smoke/unit test 등에서 일부가 None 이면 latch skip — auto_override 와 discretize 는 정상.
+
+    paper_mode (P2.7, 2026-06-03): 매매가 없는 paper 모드 (control STOP) 에서는
+    reversal latch 로 게이트를 닫지 않는다 — latch 가 시트 발행을 막으면 alpha 측정
+    데이터가 줄기 때문. 대신 "실거래였으면 closed 였음" 을 메타로 남겨 latch 가 alpha
+    에 주는 영향을 나중에 측정한다. auto_override (결정론 closed 조건) 는 paper 모드
+    에서도 그대로 동작한다 — 정당한 국면 신호는 유지.
     """
     triggers = tuple(check_closed_conditions(snapshot))
     auto_override_applied = False
@@ -155,34 +165,55 @@ async def run_post_processing(
             latched_id = row["macro_run_id"]
             latched_at = row["generated_at"]
             original_gate = current.gate
-            current = current.model_copy(
-                update={
-                    "gate": "closed",
-                    "size_multiplier": 0.0,
-                    "reasoning": (
-                        f"[REVERSAL-GUARD] 같은 KST 거래일 closed latch "
-                        f"(from {latched_id}). 원본 LLM 판단: {current.reasoning}"
-                    ),
+            latched_at_str = (
+                latched_at.isoformat() if isinstance(latched_at, datetime) else str(latched_at)
+            )
+            if paper_mode:
+                # P2.7 paper 완화 — 게이트는 open 유지 (시트 발행 허용), 메타만 기록.
+                # reversal_latched 는 False 로 둔다 (실제로 latch 가 게이트를 바꾸지 않았으므로).
+                reversal_meta = {
+                    "paper_relaxed": True,
+                    "would_have_been_gate": "closed",
+                    "original_gate": original_gate,
+                    "latched_from_macro_run_id": latched_id,
+                    "latched_from_generated_at": latched_at_str,
                 }
-            )
-            reversal_latched = True
-            reversal_meta = {
-                "reversal_guard": True,
-                "original_gate": original_gate,
-                "latched_from_macro_run_id": latched_id,
-                "latched_from_generated_at": (
-                    latched_at.isoformat() if isinstance(latched_at, datetime) else str(latched_at)
-                ),
-            }
-            await observer.emit(
-                pj_event(
-                    "pj.macro.reversal_guard",
-                    role="macro_gate",
-                    ok=True,
-                    original_gate=original_gate,
-                    latched_from_macro_run_id=latched_id,
+                await observer.emit(
+                    pj_event(
+                        "pj.macro.reversal_guard_paper_relaxed",
+                        role="macro_gate",
+                        ok=True,
+                        original_gate=original_gate,
+                        latched_from_macro_run_id=latched_id,
+                    )
                 )
-            )
+            else:
+                current = current.model_copy(
+                    update={
+                        "gate": "closed",
+                        "size_multiplier": 0.0,
+                        "reasoning": (
+                            f"[REVERSAL-GUARD] 같은 KST 거래일 closed latch "
+                            f"(from {latched_id}). 원본 LLM 판단: {current.reasoning}"
+                        ),
+                    }
+                )
+                reversal_latched = True
+                reversal_meta = {
+                    "reversal_guard": True,
+                    "original_gate": original_gate,
+                    "latched_from_macro_run_id": latched_id,
+                    "latched_from_generated_at": latched_at_str,
+                }
+                await observer.emit(
+                    pj_event(
+                        "pj.macro.reversal_guard",
+                        role="macro_gate",
+                        ok=True,
+                        original_gate=original_gate,
+                        latched_from_macro_run_id=latched_id,
+                    )
+                )
 
     # 2. size 이산화 (open+0.0 모순 플래그 수집)
     inconsistent_flag = {"fired": False}

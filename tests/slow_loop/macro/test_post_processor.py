@@ -419,3 +419,141 @@ async def test_reversal_guard_after_auto_override_no_double_latch(monkeypatch):
     assert result.auto_override_applied is True
     assert result.reversal_latched is False  # auto_override 가 이미 처리
     assert result.output.gate == "closed"
+
+
+# =====================================================================
+# P2.7: reversal_guard paper 완화 — STOP(paper) 모드에서는 latch 대신 메타 기록
+# =====================================================================
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_paper_mode_relaxes_latch_with_meta(monkeypatch):
+    """paper 모드: closed row 가 있어도 게이트는 open 유지, '실거래였으면 closed' 메타 기록.
+
+    P2.7 (2026-06-03) — 매매가 없는 paper 모드에서 latch 가 시트 발행을 막으면 alpha
+    측정 데이터가 줄어든다. 게이트는 열어두되 latch 의 영향을 나중에 측정할 수 있게
+    메타를 남긴다 (민지 검토 §3-5 결정).
+    """
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    latched_at = datetime(2026, 6, 4, 10, 30, tzinfo=UTC)
+    monkeypatch.setattr(
+        pp,
+        "_fetch_closed_row_today",
+        _stub_fetch({"macro_run_id": "mr_20260604_1030_abc", "generated_at": latched_at}),
+    )
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_20260604_1342_xyz",
+        as_of=datetime(2026, 6, 4, 13, 42, tzinfo=UTC),
+        paper_mode=True,
+    )
+
+    # 게이트는 latch 안 됨 — open + size 유지 (discretize 만 적용).
+    assert result.reversal_latched is False
+    assert result.output.gate == "open"
+    assert result.output.size_multiplier > 0.0
+
+    # "실거래였으면 closed 였음" 메타는 기록 — persistence 가 macro_runs.metadata_json
+    # 의 reversal_guard 키 아래로 병합해 나중에 latch 의 alpha 영향을 측정할 수 있다.
+    assert result.reversal_meta is not None
+    assert result.reversal_meta["paper_relaxed"] is True
+    assert result.reversal_meta["would_have_been_gate"] == "closed"
+    assert result.reversal_meta["latched_from_macro_run_id"] == "mr_20260604_1030_abc"
+
+    # 완화 전용 이벤트 발행, 기존 latch 이벤트는 미발행.
+    assert _find_events(obs, "pj.macro.reversal_guard_paper_relaxed")
+    assert _find_events(obs, "pj.macro.reversal_guard") == []
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_paper_mode_noop_when_no_closed_today(monkeypatch):
+    """paper 모드여도 closed row 가 없으면 메타 없이 그대로 통과."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    monkeypatch.setattr(pp, "_fetch_closed_row_today", _stub_fetch(None))
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_test",
+        as_of=datetime(2026, 6, 4, 13, 42, tzinfo=UTC),
+        paper_mode=True,
+    )
+
+    assert result.reversal_latched is False
+    assert result.reversal_meta is None
+    assert result.output.gate == "open"
+    assert _find_events(obs, "pj.macro.reversal_guard_paper_relaxed") == []
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_paper_mode_keeps_auto_override(monkeypatch):
+    """paper 모드 완화는 latch 만 — 결정론 closed 조건 (auto_override) 은 그대로 동작.
+
+    민지 검토 §3-5: "5-28 같은 정당한 closed 는 국면 신호로 유지". paper 완화가
+    결정론 위험 신호까지 풀어버리면 안 된다.
+    """
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    monkeypatch.delenv("MACRO_AUTO_OVERRIDE_DISABLED", raising=False)
+    monkeypatch.setattr(pp, "_fetch_closed_row_today", _stub_fetch(None))
+
+    # fx_shock 결정론 트리거 발동 상황.
+    snap = _normal_snapshot().model_copy(update={"usd_krw_change_pct": 0.035})
+    assert "fx_shock" in check_closed_conditions(snap)
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        snap,
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_test",
+        as_of=datetime(2026, 6, 4, 13, 42, tzinfo=UTC),
+        paper_mode=True,
+    )
+
+    # paper 모드여도 결정론 closed 는 유지된다.
+    assert result.auto_override_applied is True
+    assert result.output.gate == "closed"
+    assert result.output.size_multiplier == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reversal_guard_default_non_paper_still_latches(monkeypatch):
+    """paper_mode 미지정 (default False) 이면 기존 latch 동작 그대로 — 회귀 방지."""
+    monkeypatch.delenv("MACRO_REVERSAL_GUARD_DISABLED", raising=False)
+    monkeypatch.setattr(
+        pp,
+        "_fetch_closed_row_today",
+        _stub_fetch({"macro_run_id": "mr_prev", "generated_at": datetime.now(UTC)}),
+    )
+
+    obs = CollectingObserver()
+    raw = _output(gate="open", size=0.75)
+    result = await run_post_processing(
+        raw,
+        _normal_snapshot(),
+        [],
+        obs,
+        engine=_FakeEngine(),
+        macro_run_id="mr_test",
+        as_of=datetime(2026, 6, 4, 13, 42, tzinfo=UTC),
+    )
+
+    assert result.reversal_latched is True
+    assert result.output.gate == "closed"
+    assert result.reversal_meta is not None
+    assert result.reversal_meta.get("paper_relaxed") is None

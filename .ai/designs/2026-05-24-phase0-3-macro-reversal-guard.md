@@ -106,3 +106,22 @@ closed 전환 뒤 open 으로 풀리려면 KOSPI 가 closed 시점 대비 X% 이
 - 1 차 분석: `.ai/analyses/2026-05-23-phase0-2-3-initial.md` §3.3 (5-15 사례)
 - 시작점 doc: `.ai/designs/2026-05-15-scout-overextension-guards.md` (모든 enforcement 는 결정론 layer 원칙 출처)
 - 학습: `feedback_prompt_control_limit.md`, `feedback_single_day_overfit.md`, `feedback_audit_layers.md`
+
+## 9. P2.7 — paper 모드 완화 (2026-06-03 추가)
+
+paper 모드 전환 (2026-05-29 결정) 으로 이 가드의 운영 환경이 달라졌다. 매매가 없는 paper
+모드에서 latch 가 게이트를 닫으면 그 시각 이후 시트 발행이 멈추고, alpha 측정 데이터가
+줄어든다. 5-29 에 실제로 macro 가 open 을 재판단했는데 latch 가 막은 사례가 있었고, 민지
+검토 (§3-5) 로 다음과 같이 정리됐다.
+
+- 결정론 closed 조건 (auto_override) 은 paper 모드에서도 그대로 — 정당한 국면 신호 유지
+- latch 만 paper 한정 완화 — 게이트를 닫지 않고 시트 발행을 허용
+- 대신 "실거래였으면 closed 였음" 을 macro_runs.metadata_json 의 reversal_guard 키 아래
+  `paper_relaxed: true` + `would_have_been_gate: closed` 로 남긴다. 이 메타와 그 run 에서
+  발행된 시트들의 paper 측정 결과를 비교하면 latch 가 alpha 에 주는 영향을 정량화할 수 있다.
+
+paper 모드 판정은 control STOP 상태 (slow_loop pipeline 이 run 시작 시 한 번 읽음).
+실거래로 복귀해 STOP 을 풀면 자동으로 원래 latch 동작으로 돌아간다 — 별도 env 없음.
+
+구현: `post_processor.run_post_processing(paper_mode=...)` + pipeline 의 control 스냅샷
+전달. commit 은 git log 의 "P2.7" 참조.

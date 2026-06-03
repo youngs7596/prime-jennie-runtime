@@ -1,14 +1,15 @@
-"""paper_outcomes simulator v0 — 일봉 simulator 기본 시나리오."""
+"""paper_outcomes simulator — v0 일봉 + v1 분봉 hybrid 시나리오."""
 
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import pytest
 
 from prime_jennie_runtime.jobs.paper_outcomes import (
+    _weighted_exit_price,
     measure_paper_outcomes,
 )
 from prime_jennie_runtime.position_sheet.schema import (
@@ -18,6 +19,7 @@ from prime_jennie_runtime.position_sheet.schema import (
     FixedSlRule,
     FixedTpRule,
     MacroStateSnapshot,
+    OverextensionExitRule,
     PositionSheet,
     ProvenanceSection,
     SizeSection,
@@ -37,6 +39,7 @@ def _make_sheet(
     fixed_sl_pct: float = 0.05,
     fixed_tp_pct: float = 0.08,
     time_stop_days: int = 5,
+    extra_rules: list | None = None,
 ) -> PositionSheet:
     gen = generated_at or datetime(2026, 5, 20, 11, 0, tzinfo=KST)
     return PositionSheet(
@@ -62,6 +65,7 @@ def _make_sheet(
                 FixedSlRule(pct=fixed_sl_pct),
                 FixedTpRule(pct=fixed_tp_pct),
                 TimeStopRule(mode="hold_days", value=time_stop_days),
+                *(extra_rules or []),
             ],
         ),
         provenance=ProvenanceSection(
@@ -94,6 +98,7 @@ class _FakeConn:
         daily: dict[date, dict],
         sheets_pending: list[dict],
         fail_upsert_for: set[str] | None = None,
+        minute: dict[date, list[dict]] | None = None,
     ) -> None:
         # daily: price_date -> {open, high, low, close}
         self.daily = daily
@@ -101,10 +106,15 @@ class _FakeConn:
         self.upserts: list[tuple] = []
         # 특정 sheet_id 의 upsert 가 제약 위반 등으로 터지는 상황 재현용.
         self.fail_upsert_for = fail_upsert_for or set()
+        # minute: KST 달력일 -> 분봉 dict 목록 (v1 simulator 경로)
+        self.minute = minute or {}
 
     async def fetch(self, sql: str, *args: Any) -> list[dict]:
         if "FROM position_sheets ps" in sql:
             return self.sheets_pending
+        if "FROM minute_prices" in sql:
+            _ticker, start_kst, _end_kst = args
+            return self.minute.get(start_kst.date(), [])
         if "FROM daily_prices" in sql and "BETWEEN" in sql:
             _ticker, start, end = args
             out = []
@@ -233,7 +243,7 @@ async def test_fixed_tp_hit_on_high():
     # entry_date, entry_price, exit_date, exit_price,
     # exit_reason, holding_days, pnl_pct, ...
     assert args[0] == sheet.sheet_id
-    assert args[1] == "v0"
+    assert args[1] == "v1"
     assert args[3] == "daily_only"
     assert args[5] == 100.0
     assert args[8] == "fixed_tp"
@@ -508,3 +518,153 @@ async def test_upsert_failure_isolated_per_sheet():
     # 성공한 시트만 적재됐다.
     assert len(conn.upserts) == 1
     assert conn.upserts[0][0] == s_ok.sheet_id
+
+
+# =====================================================================
+# P3 (v1): 분봉 hybrid simulator
+# =====================================================================
+
+
+def _minute_series(
+    day: date,
+    *,
+    start_price: float,
+    step: float,
+    count: int,
+    start_hhmm: tuple[int, int] = (9, 0),
+) -> list[dict]:
+    """분봉 시리즈 생성 — start_price 에서 매 분 step 씩 변하는 단순 시리즈."""
+    bars = []
+    base = datetime.combine(day, time(*start_hhmm, tzinfo=KST))
+    price = start_price
+    for i in range(count):
+        price = start_price + step * i
+        bars.append(
+            {
+                "price_datetime": base + timedelta(minutes=i),
+                "open_price": price,
+                "high_price": price,
+                "low_price": price,
+                "close_price": price,
+                "volume": 1000,
+            }
+        )
+    return bars
+
+
+def test_weighted_exit_price_no_legs():
+    assert _weighted_exit_price([], 105.0) == 105.0
+
+
+def test_weighted_exit_price_with_legs():
+    """scale_out 50% @110 + 잔여 50% @100 → 가중 평균 105."""
+    legs = [{"price": 110.0, "portion": 0.5}]
+    assert _weighted_exit_price(legs, 100.0) == 105.0
+
+
+def test_weighted_exit_price_clamps_oversold_portion():
+    """portion 합이 1 을 넘는 비정상 legs 도 1 로 clamp — 가격이 음수 가중치로 안 깨짐."""
+    legs = [{"price": 110.0, "portion": 0.7}, {"price": 120.0, "portion": 0.6}]
+    # sold=1.3 → clamp 1.0, remaining 0 → 가중 합만
+    assert _weighted_exit_price(legs, 100.0) == 110.0 * 0.7 + 120.0 * 0.6
+
+
+@pytest.mark.asyncio
+async def test_minute_simulation_activates_overextension_exit():
+    """분봉이 충분한 날은 RSI 가 계산돼 overextension_exit 이 발동한다 (v1 핵심).
+
+    매 분 +0.01 씩 오르는 시리즈 → RSI=100 (손실 0) → threshold 80 초과.
+    가격 상승폭은 미미해 fixed_tp(8%) 는 발동 안 함 → overextension 이 먼저 잡혀야 v1.
+    v0 (일봉 4-tick) 이었다면 rsi_1m=None 이라 절대 발동 못 한다.
+    """
+    publish = date(2026, 6, 1)
+    sheet = _make_sheet(
+        sheet_id="ps_20260601_110000_ab01",
+        generated_at=datetime(2026, 6, 1, 11, 0, tzinfo=KST),
+        time_stop_days=5,
+        extra_rules=[OverextensionExitRule(rsi_threshold=80.0)],
+    )
+
+    sim_day = publish + timedelta(days=1)
+    daily = {
+        publish: _ohlc(100),
+        sim_day: _ohlc(101),
+        publish + timedelta(days=2): _ohlc(102),
+        publish + timedelta(days=3): _ohlc(103),
+        publish + timedelta(days=4): _ohlc(104),
+        publish + timedelta(days=5): _ohlc(105),
+        publish + timedelta(days=6): _ohlc(106),
+    }
+    # 320 분봉 (>= MIN_MINUTE_BARS_PER_DAY) — 100.00 에서 매 분 +0.01.
+    minute = {sim_day: _minute_series(sim_day, start_price=100.0, step=0.01, count=320)}
+
+    conn = _FakeConn(
+        daily=daily,
+        minute=minute,
+        sheets_pending=[
+            {
+                "sheet_id": sheet.sheet_id,
+                "sheet_json": sheet.model_dump_json(),
+                "generated_at": sheet.generated_at,
+            }
+        ],
+    )
+    pool = _FakePool(conn)
+
+    stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=10))
+
+    assert stats["measured"] == 1
+    args = conn.upserts[0]
+    # exit_reason = overextension_exit (v0 에서는 불가능한 결과)
+    assert args[8] == "overextension_exit"
+    # 첫 시뮬 날이 분봉이라 coverage 는 partial 또는 full — daily fallback 으로 안 떨어짐
+    assert args[3] in ("full", "partial")
+    meta = json.loads(args[13])
+    assert meta["minute_days"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_minute_too_sparse_falls_back_to_daily():
+    """분봉이 MIN_MINUTE_BARS_PER_DAY 미만이면 일봉 4-tick fallback → coverage daily_only."""
+    publish = date(2026, 6, 1)
+    sheet = _make_sheet(
+        sheet_id="ps_20260601_110000_ab02",
+        generated_at=datetime(2026, 6, 1, 11, 0, tzinfo=KST),
+        fixed_tp_pct=0.08,
+        time_stop_days=5,
+    )
+
+    daily = {}
+    d = publish
+    for p in [100, 101, 102, 101, 102, 103, 104]:
+        daily[d] = _ohlc(p)
+        d += timedelta(days=1)
+
+    # 분봉이 있긴 한데 30개뿐 — 사용하면 안 됨.
+    minute = {
+        publish + timedelta(days=1): _minute_series(
+            publish + timedelta(days=1), start_price=100.0, step=0.01, count=30
+        )
+    }
+
+    conn = _FakeConn(
+        daily=daily,
+        minute=minute,
+        sheets_pending=[
+            {
+                "sheet_id": sheet.sheet_id,
+                "sheet_json": sheet.model_dump_json(),
+                "generated_at": sheet.generated_at,
+            }
+        ],
+    )
+    pool = _FakePool(conn)
+
+    stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=10))
+
+    assert stats["measured"] == 1
+    args = conn.upserts[0]
+    assert args[3] == "daily_only"
+    meta = json.loads(args[13])
+    assert meta["minute_days"] == 0
+    assert meta["daily_days"] >= 1

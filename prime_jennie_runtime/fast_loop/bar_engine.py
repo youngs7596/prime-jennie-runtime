@@ -201,7 +201,7 @@ class BarEngine:
             if hist is None or len(hist) < period + 1:
                 return None
             closes = [b.close for b in hist]
-        return _compute_rsi(closes, period)
+        return compute_rsi(closes, period)
 
     def recent_high(self, ticker: str, *, lookback: int = 5) -> float | None:
         """최근 ``lookback`` 개 완성 분봉의 최고 high. 부족하면 None.
@@ -220,8 +220,12 @@ class BarEngine:
             return len(self._completed.get(ticker, []))
 
 
-def _compute_rsi(closes: list[float], period: int = 14) -> float | None:
-    """Wilder smoothing RSI. v2 ``strategies._compute_rsi`` 와 등가."""
+def compute_rsi(closes: list[float], period: int = 14) -> float | None:
+    """Wilder smoothing RSI. v2 ``strategies._compute_rsi`` 와 등가.
+
+    paper outcomes v1 simulator 도 이 함수를 그대로 쓴다 — fast_loop 와의 RSI 산식
+    drift 방지 (v0 의 evaluate() 재사용과 같은 원칙).
+    """
     if len(closes) < period + 1:
         return None
 

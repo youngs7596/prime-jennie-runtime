@@ -1,4 +1,4 @@
-"""STOP 상태에서 발행된 시트의 paper PnL 측정 (v0 — 일봉 simulator).
+"""STOP 상태에서 발행된 시트의 paper PnL 측정 (v1 — 분봉 hybrid simulator).
 
 v3 control STOP 은 fast_loop 스트림 emit 만 차단하고 시트 자체는
 `position_sheets` 에 그대로 영속된다 (slow_loop/strategy/publisher.py 의
@@ -13,28 +13,27 @@ v3 control STOP 은 fast_loop 스트림 emit 만 차단하고 시트 자체는
   진입한다는 모델과 시간 갭이 4-5 시간 있지만 단일 항목으로 단순화.
 - exit 평가: ``fast_loop.exit_evaluator.evaluate`` 를 그대로 호출 → 9 룰 충실
   재현, fast_loop 와의 drift 방지.
-- v0 은 일봉만 사용해 일중 [open, high, low, close] 4-tick 으로 흘려보낸다.
-  ``overextension_exit`` (1분봉 RSI) 는 ``tick.rsi_1m=None`` 이라 evaluator 가
-  자동 skip. coverage='daily_only' 로 메타 기록.
-- ``scale_out`` 은 발생 시 legs 에 day/price/portion/rule 기록 + 잔여 portion
-  은 계속 보유 (state.scale_out_executed 가 갱신되어 같은 level 재발 안 함).
-  portion 별 weighted PnL 정밀 처리는 v1 으로 미룸 — exit_price 는 전량 청산
-  시점의 가격으로 계산.
 
-v1 (다음 commit) 계획
--------------------
-- minute_prices 어댑터 + 1분봉 RSI(14) 계산 → overextension_exit 활성화
-- scale_out 부분 청산 weighted exit_price
-- corner case 테스트 (death_cross, breakeven 상향 후 SL hit 등)
+v1 (2026-06-03) — 분봉 hybrid
+-----------------------------
+- 거래일별로 minute_prices 에 분봉이 충분히 (>= ``MIN_MINUTE_BARS_PER_DAY``) 있으면
+  분봉 close 를 1분 1-tick 으로 흘려보내고 RSI(14) (fast_loop bar_engine 의 산식
+  재사용) 를 부착 → ``overextension_exit`` 활성화.
+- 분봉이 없거나 부족한 날은 v0 의 일봉 [open, high, low, close] 4-tick 으로 fallback.
+- coverage: 모든 시뮬 날이 분봉이면 'full', 섞이면 'partial', 전부 일봉이면
+  'daily_only'. metadata 에 minute_days/daily_days 기록.
+- ``scale_out`` 부분 청산: 전량 청산 시 exit_price 를 leg 가중 평균으로 계산
+  (leg price × portion 합 + 최종가 × 잔여 portion).
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
+from prime_jennie_runtime.fast_loop.bar_engine import compute_rsi
 from prime_jennie_runtime.fast_loop.domain import PositionState, TickData
 from prime_jennie_runtime.fast_loop.exit_evaluator import evaluate
 from prime_jennie_runtime.position_sheet.schema import (
@@ -46,11 +45,15 @@ from prime_jennie_runtime.position_sheet.schema import (
 
 logger = logging.getLogger(__name__)
 
-SIMULATOR_VERSION = "v0"
+SIMULATOR_VERSION = "v1"
 ENTRY_MODEL = "close_on_publish_date"
 DEFAULT_WINDOW_BDAYS = 20  # time_stop 없는 시트 (validator 가 막지만 안전망)
 MA_HISTORY_MARGIN_BDAYS = 5  # death_cross MA long lookback 마진
 MAX_BATCH_SHEETS = 500  # 한 cycle 안전망
+# 분봉 simulator 를 쓰기 위한 하루 최소 분봉 수. 정규장은 약 380 분봉 — 일부만 있는
+# 날을 분봉으로 시뮬하면 빠진 시간대의 가격 움직임을 놓치므로, 거의 온전한 날만
+# 분봉을 쓰고 나머지는 일봉 4-tick fallback (일봉은 최소한 고가/저가를 포함).
+MIN_MINUTE_BARS_PER_DAY = 300
 
 # 일봉 simulator 의 tick 시각 분포 — KST. 같은 거래일 안에서 [open, high, low,
 # close] 4-tick 을 흘려보낸다. close 가 15:30 인 이유는 evaluate 의 time_stop
@@ -254,11 +257,31 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
 
     scale_out_legs: list[dict] = []
 
-    # 6) 매 거래일 4-tick 흘려보냄.
+    # 6) 매 거래일 tick 흘려보냄 — 분봉이 충분한 날은 분봉 (RSI 포함), 아니면 일봉 4-tick.
+    minute_days = 0
+    daily_days = 0
+
+    def _coverage() -> str:
+        if daily_days == 0 and minute_days > 0:
+            return "full"
+        if minute_days > 0:
+            return "partial"
+        return "daily_only"
+
+    def _coverage_meta() -> dict:
+        return {"minute_days": minute_days, "daily_days": daily_days}
+
     for day_idx, day_row in enumerate(sim_days, start=1):
         day = day_row["price_date"]
         daily_closes = history_closes + [float(r["close_price"]) for r in sim_days[:day_idx]]
-        ticks = _build_daily_ticks(day_row, ticker)
+
+        minute_bars = await _fetch_minute_bars(pool, ticker, day)
+        if len(minute_bars) >= MIN_MINUTE_BARS_PER_DAY:
+            ticks = _build_minute_ticks(minute_bars, ticker)
+            minute_days += 1
+        else:
+            ticks = _build_daily_ticks(day_row, ticker)
+            daily_days += 1
 
         for tick in ticks:
             decision = evaluate(
@@ -273,30 +296,32 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
                 continue
 
             if decision.should_close and decision.portion >= 1.0:
-                # 전량 청산.
+                # 전량 청산. scale_out legs 가 있으면 가중 평균 exit price.
                 holding_days = (day - publish_date).days
+                exit_price = _weighted_exit_price(scale_out_legs, float(tick.price))
                 return _build_outcome(
                     sheet=sheet,
                     publish_date=publish_date,
                     entry_price=float(entry_close),
                     exit_date=day,
-                    exit_price=float(tick.price),
+                    exit_price=exit_price,
                     exit_reason=decision.matched_rule_type or decision.reason,
                     holding_days=holding_days,
                     scale_out_legs=scale_out_legs,
                     rules_evaluated=rules_evaluated,
-                    coverage="daily_only",
+                    coverage=_coverage(),
                     metadata={
                         "day_idx": day_idx,
                         "decision_metadata": _safe_metadata(decision.metadata),
                         "tick_ts": tick.ts.isoformat(),
+                        "final_tick_price": float(tick.price),
+                        **_coverage_meta(),
                     },
                 )
 
             if decision.should_close and decision.portion < 1.0:
-                # scale_out 부분 청산 — leg 기록 + 잔여 보유. v0 은 portion 별
-                # weighted PnL 처리 안 함 (다음 commit). state.scale_out_executed 가
-                # 같은 level 재발을 막아 무한 loop 없음.
+                # scale_out 부분 청산 — leg 기록 + 잔여 보유. state.scale_out_executed 가
+                # 같은 level 재발을 막아 무한 loop 없음. 전량 청산 시 가중 평균에 반영.
                 scale_out_legs.append(
                     {
                         "day": day.isoformat(),
@@ -311,7 +336,7 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
             # should_close=False — breakeven SL 상향 같은 경우. evaluate 내부에서
             # state.breakeven_sl_price/breakeven_active 가 이미 갱신됐다.
 
-    # 7) 윈도우 끝 — 마지막 거래일 종가로 강제 close.
+    # 7) 윈도우 끝 — 마지막 거래일 종가로 강제 close (scale_out 가중 평균 반영).
     last = sim_days[-1]
     last_close = float(last["close_price"])
     holding_days = (last["price_date"] - publish_date).days
@@ -320,19 +345,56 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
         publish_date=publish_date,
         entry_price=float(entry_close),
         exit_date=last["price_date"],
-        exit_price=last_close,
+        exit_price=_weighted_exit_price(scale_out_legs, last_close),
         exit_reason="window_expired",
         holding_days=holding_days,
         scale_out_legs=scale_out_legs,
         rules_evaluated=rules_evaluated,
-        coverage="daily_only",
-        metadata={"day_idx": len(sim_days)},
+        coverage=_coverage(),
+        metadata={"day_idx": len(sim_days), "final_tick_price": last_close, **_coverage_meta()},
     )
 
 
 # =====================================================================
 # Tick builders
 # =====================================================================
+
+
+def _weighted_exit_price(legs: list[dict], final_price: float) -> float:
+    """scale_out 부분 청산을 반영한 가중 평균 exit price.
+
+    legs 의 (price × portion) 합 + 최종 청산가 × 잔여 portion. legs 가 없으면
+    최종가 그대로. portion 합이 1 을 넘으면 1 로 clamp (방어).
+    """
+    if not legs:
+        return final_price
+    sold = min(sum(float(leg["portion"]) for leg in legs), 1.0)
+    remaining = max(0.0, 1.0 - sold)
+    weighted = sum(float(leg["price"]) * float(leg["portion"]) for leg in legs)
+    return weighted + final_price * remaining
+
+
+def _build_minute_ticks(bars: list[dict], ticker: str) -> list[TickData]:
+    """1분봉 목록 → 분당 1-tick (close 가격) + RSI(14) 부착.
+
+    RSI 는 그 분봉까지의 close 누적으로 계산 (lookahead 없음 — 해당 분이 닫힌 시점의
+    값). 처음 14봉은 RSI=None → overextension_exit 자동 skip (fast_loop warm-up 과 동일).
+    """
+    ticks: list[TickData] = []
+    closes: list[float] = []
+    for bar in bars:
+        close = float(bar["close_price"])
+        closes.append(close)
+        ticks.append(
+            TickData(
+                ticker=ticker,
+                price=close,
+                ts=bar["price_datetime"],
+                rsi_1m=compute_rsi(closes, period=14),
+                volume=float(bar["volume"]) if bar.get("volume") is not None else None,
+            )
+        )
+    return ticks
 
 
 def _build_daily_ticks(day_row: dict, ticker: str) -> list[TickData]:
@@ -364,6 +426,26 @@ def _build_daily_ticks(day_row: dict, ticker: str) -> list[TickData]:
 # =====================================================================
 # DB helpers
 # =====================================================================
+
+
+async def _fetch_minute_bars(pool: Any, ticker: str, day: date) -> list[dict]:
+    """해당 KST 거래일의 1분봉 전체 (시각 오름차순).
+
+    minute_prices.price_datetime 은 TIMESTAMPTZ — KST 달력일 [00:00, 24:00) 범위로 조회.
+    """
+    start_kst = datetime.combine(day, time(0, 0, tzinfo=KST))
+    end_kst = start_kst + timedelta(days=1)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT price_datetime, open_price, high_price, low_price, close_price, volume "
+            "FROM minute_prices "
+            "WHERE stock_code = $1 AND price_datetime >= $2 AND price_datetime < $3 "
+            "ORDER BY price_datetime ASC",
+            ticker,
+            start_kst,
+            end_kst,
+        )
+    return [dict(r) for r in rows]
 
 
 async def _fetch_daily_close(pool: Any, ticker: str, day: date) -> float | None:

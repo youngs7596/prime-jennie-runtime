@@ -1,4 +1,4 @@
-"""5분봉 자동 수집 (시총 상위 30 + 워치리스트) — 백테스트용 보조 수집기.
+"""5분봉 자동 수집 (시총 상위 30 + 측정 대기 시트) — paper 측정용 수집기.
 
 v2 원본: `/jobs/collect-minute-chart` (services/jobs/app.py:624-699).
 
@@ -6,10 +6,14 @@ v3 어댑터:
 - v2 KIS 직접 호출 (rate-limit time.sleep 1/18s) → kis_gateway HTTP
   `/api/market/minute-prices`. asyncio.sleep 으로 동일 ~18 req/s 페이싱.
 - v2 in-line INSERT 검사 → PostgresPriceRepo.upsert_minute (executemany 일괄).
-- v2 universe = StockMasterDB top30 by market_cap + 최신 watchlist_histories.
-  v3 schema 동일 (009_v2_trading_ops.sql) → asyncpg query 로 재현.
 - 2026-05-08 부터 KIS 분봉 단일 수집자. price_scheduler.collect_minute 은 5종목
   sample placeholder 였던 잔재 잡으로 obsolete (top30 안에 모두 포함되어 100% 중복).
+
+수집 대상 (P2.6, 2026-06-03 교정):
+- stock_masters 시총 상위 N (백테스트 참고용 기본 커버리지)
+- paper 측정 윈도우가 아직 열려있는 시트의 ticker — v2 잔재 watchlist_histories
+  (4-17 동결, v3 writer 없음) 를 대체. 측정하려는 시트의 분봉이 정작 안 쌓이던
+  결함을 고침 (P3 1분봉 simulator 의 전제).
 """
 
 from __future__ import annotations
@@ -29,6 +33,19 @@ logger = logging.getLogger(__name__)
 _REQ_PER_SEC = 18  # v2 1/18s sleep → KIS rate-limit 마진.
 _MIN_INTERVAL = 1.0 / _REQ_PER_SEC
 
+# 측정 대기 시트 ticker 조회 — paper_outcomes 의 _fetch_pending_sheets 와 같은 기준.
+# 30일 안전 상한: 측정이 다시 멈추는 사고가 나도 수집 대상이 무한정 자라
+# KIS 호출량이 폭증하는 일을 막는다 (윈도우 최대 10 거래일 ≈ 14 달력일 + 여유).
+PENDING_SHEET_TICKERS_SQL = """
+    SELECT DISTINCT ps.ticker AS stock_code
+    FROM position_sheets ps
+    WHERE ps.sheet_id LIKE 'ps_%'
+    AND ps.generated_at >= NOW() - INTERVAL '30 days'
+    AND NOT EXISTS (
+        SELECT 1 FROM paper_outcomes po WHERE po.sheet_id = ps.sheet_id
+    )
+"""
+
 
 async def collect_minute_chart(
     pool: Any,
@@ -37,14 +54,14 @@ async def collect_minute_chart(
     *,
     top_n: int = 30,
 ) -> dict:
-    """v2 `/jobs/collect-minute-chart` 포팅.
+    """v2 `/jobs/collect-minute-chart` 포팅 + P2.6 수집 대상 교정.
 
     1) stock_masters 활성 + 시총 desc 상위 N (default 30)
-    2) 최신 watchlist_histories.snapshot_date 의 stock_code 추가
+    2) 측정 윈도우가 열려있는 시트 (paper_outcomes 미적재) 의 ticker 추가
     3) 각 종목 gateway `/api/market/minute-prices` POST → minute_prices upsert
-    4) ~18 req/s 페이싱 (v2 와 동일)
+    4) ~18 req/s 페이싱 (v2 와 동일; gateway 전역 limiter 가 최종 방어선)
 
-    Returns: {"target": N, "top_n": N, "watchlist_added": N, "upserted": N, "failed": N}
+    Returns: {"target": N, "top_n": N, "pending_sheets_added": N, "upserted": N, "failed": N}
     """
     async with pool.acquire() as conn:
         top_rows = await conn.fetch(
@@ -56,28 +73,20 @@ async def collect_minute_chart(
         target_codes = {r["stock_code"] for r in top_rows}
         top_count = len(target_codes)
 
-        latest_date = await conn.fetchval(
-            "SELECT snapshot_date FROM watchlist_histories ORDER BY snapshot_date DESC LIMIT 1"
-        )
-        watchlist_added = 0
-        if latest_date is not None:
-            wl_rows = await conn.fetch(
-                "SELECT stock_code FROM watchlist_histories "
-                "WHERE snapshot_date = $1 AND is_active = TRUE",
-                latest_date,
-            )
-            for r in wl_rows:
-                if r["stock_code"] not in target_codes:
-                    target_codes.add(r["stock_code"])
-                    watchlist_added += 1
+        sheet_rows = await conn.fetch(PENDING_SHEET_TICKERS_SQL)
+        pending_sheets_added = 0
+        for r in sheet_rows:
+            if r["stock_code"] not in target_codes:
+                target_codes.add(r["stock_code"])
+                pending_sheets_added += 1
 
         target_list = sorted(target_codes)
         logger.info(
-            "collect_minute_chart: targets=%d (top%d=%d + watchlist=%d)",
+            "collect_minute_chart: targets=%d (top%d=%d + pending_sheets=%d)",
             len(target_list),
             top_n,
             top_count,
-            watchlist_added,
+            pending_sheets_added,
         )
 
         repo = PostgresPriceRepo(conn=conn)
@@ -113,10 +122,10 @@ async def collect_minute_chart(
     return {
         "target": len(target_list),
         "top_n": top_count,
-        "watchlist_added": watchlist_added,
+        "pending_sheets_added": pending_sheets_added,
         "upserted": upserted,
         "failed": failed,
     }
 
 
-__all__ = ["collect_minute_chart"]
+__all__ = ["collect_minute_chart", "PENDING_SHEET_TICKERS_SQL"]

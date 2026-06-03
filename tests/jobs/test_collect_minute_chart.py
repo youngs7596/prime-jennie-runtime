@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -19,24 +19,21 @@ class _FakeConn:
         self,
         *,
         top_codes: list[str],
-        watchlist_date: date | None,
-        watchlist_codes: list[str],
+        pending_sheet_codes: list[str],
     ) -> None:
         self.top_codes = top_codes
-        self.watchlist_date = watchlist_date
-        self.watchlist_codes = watchlist_codes
+        # 측정 대기 시트 (paper_outcomes 미적재) 의 ticker.
+        self.pending_sheet_codes = pending_sheet_codes
         self.executemany_calls: list[tuple[str, list[tuple]]] = []
 
     async def fetch(self, sql: str, *args: object) -> list[dict]:
         if "FROM stock_masters" in sql:
             return [{"stock_code": c} for c in self.top_codes]
-        if "FROM watchlist_histories" in sql and "WHERE snapshot_date" in sql:
-            return [{"stock_code": c} for c in self.watchlist_codes]
+        if "FROM position_sheets" in sql:
+            return [{"stock_code": c} for c in self.pending_sheet_codes]
         return []
 
     async def fetchval(self, sql: str, *args: object):
-        if "FROM watchlist_histories" in sql:
-            return self.watchlist_date
         return None
 
     async def execute(self, sql: str, *args: object) -> str:
@@ -79,11 +76,10 @@ def _minute_payload(code: str, n: int = 3) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_collect_minute_chart_fetches_top_n_and_watchlist():
+async def test_collect_minute_chart_fetches_top_n_and_pending_sheets():
     conn = _FakeConn(
         top_codes=["005930", "000660"],
-        watchlist_date=date.today(),
-        watchlist_codes=["005930", "035720"],  # 005930 dup, 035720 추가
+        pending_sheet_codes=["005930", "035720"],  # 005930 dup, 035720 추가
     )
     pool = _FakePool(conn)
 
@@ -97,7 +93,7 @@ async def test_collect_minute_chart_fetches_top_n_and_watchlist():
             result = await collect_minute_chart(pool, client, GATEWAY, top_n=2)
 
     assert result["top_n"] == 2
-    assert result["watchlist_added"] == 1  # 035720 only
+    assert result["pending_sheets_added"] == 1  # 035720 only
     assert result["target"] == 3
     assert result["upserted"] == 9  # 3 종목 × 3 봉
     assert result["failed"] == 0
@@ -105,8 +101,8 @@ async def test_collect_minute_chart_fetches_top_n_and_watchlist():
 
 
 @pytest.mark.asyncio
-async def test_collect_minute_chart_handles_no_watchlist():
-    conn = _FakeConn(top_codes=["005930"], watchlist_date=None, watchlist_codes=[])
+async def test_collect_minute_chart_handles_no_pending_sheets():
+    conn = _FakeConn(top_codes=["005930"], pending_sheet_codes=[])
     pool = _FakePool(conn)
 
     with respx.mock(assert_all_called=False) as mock:
@@ -115,13 +111,13 @@ async def test_collect_minute_chart_handles_no_watchlist():
             result = await collect_minute_chart(pool, client, GATEWAY, top_n=1)
 
     assert result["target"] == 1
-    assert result["watchlist_added"] == 0
+    assert result["pending_sheets_added"] == 0
     assert result["upserted"] == 2
 
 
 @pytest.mark.asyncio
 async def test_collect_minute_chart_continues_on_per_stock_failure():
-    conn = _FakeConn(top_codes=["005930", "000660"], watchlist_date=None, watchlist_codes=[])
+    conn = _FakeConn(top_codes=["005930", "000660"], pending_sheet_codes=[])
     pool = _FakePool(conn)
 
     # 첫 종목은 500, 두 번째는 OK

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import date
 from pathlib import Path
@@ -390,6 +391,47 @@ async def test_egw00201_gives_up_after_two_retries(kis_config, monkeypatch):
 
     # 초기 1회 + 재시도 2회 = 3회에서 멈춤
     assert calls["n"] == 3
+
+
+async def test_egw00201_logs_kis_reject_reason(kis_config, monkeypatch, caplog):
+    """throttle 거부 시 KIS 사유(msg1)가 로그에 남는다.
+
+    raise_for_status 가 본문 없는 httpx 예외로 던지기 전에, 재시도 로그와 재시도
+    소진 로그 둘 다 사유를 보존해야 원인(초당 한도 vs 관문 혼잡 등)을 구분할 수
+    있다 (2026-06-04 진단).
+    """
+    reason = "초당 거래건수를 초과하였습니다."
+
+    def snapshot_side_effect(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"rt_cd": "1", "msg_cd": "EGW00201", "msg1": reason})
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get("/uapi/domestic-stock/v1/quotations/inquire-price").mock(
+            side_effect=snapshot_side_effect
+        )
+        api = KISApi(kis_config)
+        try:
+            with (
+                caplog.at_level(
+                    logging.WARNING, logger="prime_jennie_runtime.kis_gateway.kis_api"
+                ),
+                pytest.raises(httpx.HTTPStatusError),
+            ):
+                await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    # 재시도(warning) 로그에 사유 포함 + 재시도 소진(error) 로그에 사유 포함
+    assert reason in caplog.text
+    assert any(r.levelno == logging.ERROR and reason in r.getMessage() for r in caplog.records), (
+        "재시도 소진 시 KIS 거부 사유가 error 로그로 남아야 한다"
+    )
 
 
 async def test_global_rate_limiter_covers_initial_and_retry_calls(kis_config, monkeypatch):

@@ -51,6 +51,20 @@ def _is_egw_throttle(resp: httpx.Response) -> bool:
     return body.get("msg_cd") == "EGW00201"
 
 
+def _kis_reject_detail(resp: httpx.Response) -> str:
+    """KIS 거부 응답의 사유 메시지 (``msg1``) 를 추출. 없으면 빈 문자열.
+
+    EGW00201 은 통상 "초당 거래건수 초과" 로 알려져 있으나, 같은 코드가 KIS 관문
+    혼잡 등 다른 사유로도 나올 수 있어 실제 ``msg1`` 전문을 로그에 남겨 원인을
+    구분한다 (2026-06-04 진단). ``raise_for_status`` 가 본문을 버리기 전에 호출.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return ""
+    return str(body.get("msg1", "") or "")
+
+
 class KISApiError(Exception):
     """KIS API 오류 (rt_cd != '0' 등)."""
 
@@ -219,11 +233,25 @@ class KISApi:
             if not _is_egw_throttle(resp):
                 break
             logger.warning(
-                "KIS %s %s -> 500 EGW00201 throttle, backoff %.0fs", method, path, backoff
+                "KIS %s %s -> 500 EGW00201 throttle (사유=%r), backoff %.0fs",
+                method,
+                path,
+                _kis_reject_detail(resp),
+                backoff,
             )
             await asyncio.sleep(backoff)
             resp = await self._send(
                 method, path, headers=headers, params=params, json_data=json_data
+            )
+
+        # 재시도를 소진했는데도 throttle 이 이어지면 사유를 명확히 남긴다 — 곧
+        # raise_for_status 가 본문 없는 httpx 예외로 던져 msg1 이 사라지기 때문.
+        if _is_egw_throttle(resp):
+            logger.error(
+                "KIS %s %s -> 500 EGW00201 재시도 소진, 거부 지속 (사유=%r)",
+                method,
+                path,
+                _kis_reject_detail(resp),
             )
 
         # 5xx (502/503/504 + EGW00201 이 아닌 500): 일시 장애로 간주하고 지수 백오프 재시도.

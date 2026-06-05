@@ -98,7 +98,10 @@ class GatewayState:
         # 충돌이 불가피하므로, gateway 가 응답을 짧게 캐싱해 KIS 로 가는 잔고 조회를
         # TTL 당 1건으로 합친다.
         self.balance_cache_ttl = config.balance_cache_ttl_sec
+        self.balance_max_stale = config.balance_max_stale_sec
         self._balance_cache: tuple[float, dict[str, Any]] | None = None
+        # 직전 정상 잔고 — 조회 거부 시 이 값을 stale 로 돌려 cascade 를 끊는다.
+        self._balance_last_good: tuple[float, dict[str, Any]] | None = None
         self._balance_lock = asyncio.Lock()
 
     def record_request(self, endpoint: str, detail: str) -> None:
@@ -106,10 +109,26 @@ class GatewayState:
             {"endpoint": endpoint, "detail": detail, "timestamp": time.time()}
         )
 
+    def invalidate_balance_cache(self) -> None:
+        """주문 발생 등 잔고가 바뀐 직후 캐시 무효화 — 다음 조회를 새로 받게 한다."""
+        self._balance_cache = None
+
+    async def get_cash_light(self) -> int:
+        """예수금(매수가능금액) — 신선한 잔고 캐시가 있으면 그 값을, 없으면 가벼운
+        매수가능조회만 호출한다. 무거운 잔고조회(inquire-balance) 를 피한다 (KIS 권장,
+        2026-06-05). cash_balance 는 잔고/매수가능 모두 buying-power 출처라 동일.
+        """
+        cached = self._balance_cache
+        if cached is not None and time.monotonic() - cached[0] < self.balance_cache_ttl:
+            return int(cached[1].get("cash_balance", 0))
+        return await self.circuit_breaker.call(self.kis_api.get_buying_power)
+
     async def get_balance_cached(self) -> dict[str, Any]:
         """잔고 조회 — TTL 캐시 + 단일 비행 (동시 요청은 한 번의 KIS 호출을 공유).
 
-        circuit breaker 는 실제 KIS 호출에만 적용. 캐시 hit 은 breaker 상태와 무관.
+        조회가 거부/실패하면 직전 정상값(``balance_max_stale`` 이내)을 stale 로
+        돌려준다 — 일시 throttle 이 캐시 공백 → 재조회 폭풍으로 번지는 것을 막는다
+        (2026-06-05). circuit breaker 는 실제 KIS 호출에만 적용.
         """
         now = time.monotonic()
         cached = self._balance_cache
@@ -123,8 +142,21 @@ class GatewayState:
             if cached is not None and now - cached[0] < self.balance_cache_ttl:
                 return cached[1]
 
-            data = await self.circuit_breaker.call(self.kis_api.get_balance)
-            self._balance_cache = (time.monotonic(), data)
+            try:
+                data = await self.circuit_breaker.call(self.kis_api.get_balance)
+            except Exception:
+                stale = self._balance_last_good
+                if stale is not None and time.monotonic() - stale[0] < self.balance_max_stale:
+                    logger.warning(
+                        "잔고 조회 실패 — 직전 정상값 stale 반환 (나이 %.1fs)",
+                        time.monotonic() - stale[0],
+                    )
+                    return stale[1]
+                raise
+
+            stamped = (time.monotonic(), data)
+            self._balance_cache = stamped
+            self._balance_last_good = stamped
             return data
 
 
@@ -422,8 +454,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         gw.record_request("cash", "account")
         await gw.trade_limiter.acquire()
         try:
-            data = await gw.get_balance_cached()
-            return {"cash_balance": data.get("cash_balance", 0)}
+            cash = await gw.get_cash_light()
+            return {"cash_balance": cash}
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err
         except KISApiError as e:
@@ -517,6 +549,8 @@ async def _place_order(app: FastAPI, order: OrderRequest, side: str) -> OrderRes
             quantity=order.quantity,
             price=price,
         )
+        # 주문 직후 잔고가 바뀌므로 캐시를 비워 다음 조회를 새로 받게 한다.
+        gw.invalidate_balance_cache()
         return OrderResult(
             success=True,
             order_no=result.get("order_no"),

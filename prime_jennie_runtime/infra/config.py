@@ -116,8 +116,18 @@ class KISConfig(BaseSettings):
     # 잔고 (원장) 조회 캐시 TTL — KIS 원장은 같은 계좌의 근접/동시 조회를 EGW00201
     # 로 거부한다 (2026-06-03 실측: 동시 2건은 둘 다 거부). 여러 소비자 (monitor /
     # slow-loop / UI) 의 잔고 조회를 gateway 가 캐시로 합쳐 KIS 로는 TTL 당 1건만
-    # 나가게 한다. 잔고는 체결 시에만 바뀌므로 짧은 staleness 는 무해.
-    balance_cache_ttl_sec: float = 5.0
+    # 나가게 한다. 잔고는 체결 시에만 바뀌므로 짧은 staleness 는 무해 — 주문 발생
+    # 시 캐시를 무효화하므로 평상시엔 길게 잡아 원장 호출을 더 줄인다 (2026-06-05).
+    balance_cache_ttl_sec: float = 30.0
+
+    # 잔고 조회가 거부되면 직전 정상값을 이 나이까지 stale 로 반환 — 일시 throttle 이
+    # 캐시 공백 → 재조회 폭풍으로 번지는 cascade 를 끊는다 (2026-06-05 진단).
+    balance_max_stale_sec: float = 120.0
+
+    # 원장(잔고/매수가능/체결) 호출 최소 간격 — 원장은 느린 API 라 한 호출이 처리
+    # 중일 때 다음이 들어오면 겹침으로 거부된다. 연속 원장 호출을 직렬화하고 이전
+    # 호출 완료 후 이 간격 이상 벌린다 (2026-06-05: balance→buying-power 자기충돌).
+    kis_ledger_min_interval_sec: float = 1.0
 
     # Circuit breaker
     circuit_fail_max: int = 20

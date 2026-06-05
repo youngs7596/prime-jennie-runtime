@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from fastapi.testclient import TestClient
 
 from prime_jennie_runtime.kis_gateway.kis_api import KISApiError
@@ -21,6 +22,8 @@ class FakeKisApi:
         self.snapshot_error: Exception | None = None
         self.balance_result: dict | None = None
         self.balance_calls: int = 0
+        self.balance_error: Exception | None = None
+        self.buying_power_calls: int = 0
         # KIS chk-holiday 응답 (is-market-open 엔드포인트의 외부 판정 경로).
         self.trading_day_result: bool = True
         self.trading_day_calls: int = 0
@@ -52,6 +55,8 @@ class FakeKisApi:
 
     async def get_balance(self) -> dict:
         self.balance_calls += 1
+        if self.balance_error is not None:
+            raise self.balance_error
         return self.balance_result or {
             "positions": [
                 {
@@ -69,6 +74,10 @@ class FakeKisApi:
             "total_asset": 2_210_000,
             "stock_eval_amount": 710_000,
         }
+
+    async def get_buying_power(self) -> int:
+        self.buying_power_calls += 1
+        return 1_500_000
 
     async def get_daily_executions(self, start_date, end_date, *, stock_code: str = ""):
         return [
@@ -153,6 +162,70 @@ def test_cash_endpoint(kis_config):
     resp = client.get("/api/cash")
     assert resp.status_code == 200
     assert resp.json()["cash_balance"] == 1_500_000
+
+
+def test_cash_uses_light_buying_power(kis_config):
+    """/api/cash 는 신선한 잔고 캐시가 없으면 무거운 잔고 대신 매수가능조회만 부른다."""
+    fake = FakeKisApi()
+    client = _build_client(kis_config, fake)
+    resp = client.get("/api/cash")
+    assert resp.json()["cash_balance"] == 1_500_000
+    assert fake.buying_power_calls == 1
+    assert fake.balance_calls == 0
+
+
+def test_cash_reuses_fresh_balance_cache(kis_config):
+    """잔고가 방금 캐시됐으면 /api/cash 는 추가 KIS 호출 없이 그 값을 쓴다."""
+    fake = FakeKisApi()
+    client = _build_client(kis_config, fake)
+    client.get("/api/balance")  # 잔고 캐시 채움 (balance_calls=1)
+    resp = client.get("/api/cash")
+    assert resp.json()["cash_balance"] == 1_500_000
+    assert fake.balance_calls == 1
+    assert fake.buying_power_calls == 0  # 캐시 재사용 — 매수가능조회 안 함
+
+
+async def test_balance_returns_stale_on_failure(kis_config):
+    """조회 거부 시 직전 정상값을 stale 로 반환 — 재조회 cascade 차단."""
+    fake = FakeKisApi()
+    state = GatewayState(
+        config=kis_config,
+        kis_api=fake,  # type: ignore[arg-type]
+        calendar=MarketCalendar(trading_day_checker=lambda _d: True),
+    )
+    first = await state.get_balance_cached()
+    assert first["cash_balance"] == 1_500_000
+
+    state.invalidate_balance_cache()  # TTL 캐시 비우고
+    fake.balance_error = RuntimeError("EGW00201 throttle")  # 다음 조회 실패
+    stale = await state.get_balance_cached()
+    assert stale["cash_balance"] == 1_500_000  # 직전 정상값
+
+
+async def test_balance_raises_without_last_good(kis_config):
+    """직전 정상값이 없으면 실패를 그대로 올린다 (stale 로 가릴 게 없음)."""
+    fake = FakeKisApi()
+    fake.balance_error = RuntimeError("EGW00201 throttle")
+    state = GatewayState(
+        config=kis_config,
+        kis_api=fake,  # type: ignore[arg-type]
+        calendar=MarketCalendar(trading_day_checker=lambda _d: True),
+    )
+    with pytest.raises(RuntimeError):
+        await state.get_balance_cached()
+
+
+def test_order_invalidates_balance_cache(kis_config):
+    """주문 직후 잔고 캐시가 비어 다음 조회를 새로 받는다."""
+    fake = FakeKisApi()
+    client = _build_client(kis_config, fake)
+    client.get("/api/balance")  # balance_calls=1, 캐시됨
+    client.post(
+        "/api/order/buy",
+        json={"stock_code": "005930", "quantity": 5, "order_type": "market"},
+    )
+    client.get("/api/balance")  # 캐시 무효화됐으므로 다시 호출
+    assert fake.balance_calls == 2
 
 
 def test_balance_cached_within_ttl(kis_config):

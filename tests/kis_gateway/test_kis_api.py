@@ -418,9 +418,7 @@ async def test_egw00201_logs_kis_reject_reason(kis_config, monkeypatch, caplog):
         api = KISApi(kis_config)
         try:
             with (
-                caplog.at_level(
-                    logging.WARNING, logger="prime_jennie_runtime.kis_gateway.kis_api"
-                ),
+                caplog.at_level(logging.WARNING, logger="prime_jennie_runtime.kis_gateway.kis_api"),
                 pytest.raises(httpx.HTTPStatusError),
             ):
                 await api.get_snapshot("005930")
@@ -609,3 +607,85 @@ async def test_get_balance_composes_positions(kis_config):
     assert balance["total_asset"] == 2_210_000
     assert len(balance["positions"]) == 1
     assert balance["positions"][0]["stock_code"] == "005930"
+
+
+# ─── 원장 호출 간격 게이트 (2026-06-05) ──────────────────────────────
+
+
+def _balance_route(mock: respx.Router, base_url: str) -> None:
+    mock.get(url__regex=r".*/trading/inquire-balance.*").mock(
+        return_value=httpx.Response(200, json={"rt_cd": "0", "output1": [], "output2": [{}]})
+    )
+    mock.get(url__regex=r".*/trading/inquire-psbl-order.*").mock(
+        return_value=httpx.Response(200, json={"rt_cd": "0", "output": {"ord_psbl_cash": "1000"}})
+    )
+
+
+async def test_ledger_calls_spaced_by_min_interval(kis_config, monkeypatch):
+    """연속 원장 호출(잔고→매수가능)은 min_interval 만큼 벌어진다 — 자기충돌 방지."""
+    kis_config.kis_ledger_min_interval_sec = 1.0
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(
+        "prime_jennie_runtime.kis_gateway.kis_api.time.monotonic", lambda: clock["t"]
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+        clock["t"] += d
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url, assert_all_called=False) as mock:
+        _token_route(mock, kis_config.base_url)
+        _balance_route(mock, kis_config.base_url)
+        api = KISApi(kis_config)
+        try:
+            # get_balance 는 inquire-balance 후 get_buying_power(inquire-psbl-order) 를
+            # 부른다 — 둘 다 원장이라 두 번째가 1.0s 대기해야 한다.
+            await api.get_balance()
+        finally:
+            await api.close()
+
+    assert any(abs(s - 1.0) < 1e-9 for s in sleeps), sleeps
+
+
+async def test_quotation_calls_not_spaced(kis_config, monkeypatch):
+    """시세 호출은 원장 게이트를 거치지 않는다 — min_interval 대기 없음."""
+    kis_config.kis_ledger_min_interval_sec = 5.0
+    clock = {"t": 2000.0}
+    monkeypatch.setattr(
+        "prime_jennie_runtime.kis_gateway.kis_api.time.monotonic", lambda: clock["t"]
+    )
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+        clock["t"] += d
+
+    monkeypatch.setattr("prime_jennie_runtime.kis_gateway.kis_api.asyncio.sleep", fake_sleep)
+
+    with respx.mock(base_url=kis_config.base_url, assert_all_called=False) as mock:
+        _token_route(mock, kis_config.base_url)
+        mock.get(url__regex=r".*/quotations/inquire-price.*").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "rt_cd": "0",
+                    "output": {
+                        "stck_prpr": "71200",
+                        "stck_hgpr": "71500",
+                        "acml_vol": "1000",
+                    },
+                },
+            )
+        )
+        api = KISApi(kis_config)
+        try:
+            await api.get_snapshot("005930")
+            await api.get_snapshot("005930")
+        finally:
+            await api.close()
+
+    # 원장 간격(5.0s) 대기는 없어야 한다.
+    assert all(abs(s - 5.0) > 1e-9 for s in sleeps), sleeps

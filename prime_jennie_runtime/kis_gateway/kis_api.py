@@ -105,6 +105,12 @@ class KISApi:
         # KIS 로 실제 나가는 초당 호출수 계측 — EGW00201 원인 진단용 (2026-06-05).
         # 모든 실호출이 _send 를 지나므로 거기서 record 한다.
         self._call_meter = KisCallMeter(warn_per_sec=config.kis_call_warn_per_sec)
+        # 원장(trading) 호출 직렬화 + 최소 간격 — 같은 계좌 잔고/매수가능/체결 조회가
+        # 근접하면 KIS 가 겹침으로 거부(EGW00201)하므로, 한 번에 하나씩 + 이전 완료
+        # 후 min_interval 이상 벌려 보낸다 (2026-06-05 진단).
+        self._ledger_min_interval = config.kis_ledger_min_interval_sec
+        self._ledger_lock = asyncio.Lock()
+        self._ledger_last_done: float = 0.0
         # 주문 로직은 별도 모듈 — KISApi 는 thin wrapper 로 위임 (단일 책임 분리)
         self._order_client = OrderClient(self)
 
@@ -178,6 +184,28 @@ class KISApi:
         ``_request`` 의 초기 호출과 모든 재시도가 이 메서드를 거친다 — 재시도가
         limiter 를 우회하면 KIS 측 합산 한도 위반이 재시도에서 또 발생한다.
         """
+        # 원장(trading) 계열은 직렬화 + 최소 간격 게이트를 거친다 — 같은 계좌 근접
+        # 조회 거부(EGW00201) 방지. 시세/인증은 게이트 없이 전역 리미터만 거친다.
+        if "/trading/" in path:
+            async with self._ledger_lock:
+                wait = self._ledger_min_interval - (time.monotonic() - self._ledger_last_done)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                try:
+                    return await self._do_send(method, path, headers, params, json_data)
+                finally:
+                    self._ledger_last_done = time.monotonic()
+        return await self._do_send(method, path, headers, params, json_data)
+
+    async def _do_send(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        params: dict[str, Any] | None,
+        json_data: dict[str, Any] | None,
+    ) -> httpx.Response:
+        """전역 rate limiter + 계측을 거쳐 KIS 로 실제 1회 전송."""
         await self._rate_limiter.acquire()
         self._call_meter.record(path)
         resp = await self._client.request(

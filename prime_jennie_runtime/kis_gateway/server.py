@@ -258,6 +258,15 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
             "streamer_running": streamer_running,
         }
 
+    @app.get("/api/stats/kis-calls")
+    async def kis_call_stats() -> dict[str, Any]:
+        """KIS 로 실제 나가는 초당 호출수 — EGW00201 진단용 (2026-06-05).
+
+        재시도 포함 모든 실호출이 지나는 ``_send`` 길목에서 계측한 값.
+        """
+        gw = _gw(app.state)
+        return gw.kis_api.call_stats()
+
     # ─── Market ──────────────────────────────────────────────────
 
     @app.post("/api/snapshot/{ticker}", response_model=StockSnapshot)

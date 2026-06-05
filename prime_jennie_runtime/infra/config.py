@@ -108,6 +108,11 @@ class KISConfig(BaseSettings):
     rate_limit_global_per_sec: int = 10
     rate_limit_global_burst: int = 4
 
+    # KIS 실호출 초당 빈도 계측 — 트레일링 1초 호출수가 이 값 이상이면 WARNING.
+    # 전역 리미터가 한 윈도우 최대 burst + rate = 14/sec 로 묶으므로, 그보다 높은
+    # 값이 찍히면 리미터 우회나 외부 합산을 의심한다 (2026-06-05 진단 추가).
+    kis_call_warn_per_sec: int = 15
+
     # 잔고 (원장) 조회 캐시 TTL — KIS 원장은 같은 계좌의 근접/동시 조회를 EGW00201
     # 로 거부한다 (2026-06-03 실측: 동시 2건은 둘 다 거부). 여러 소비자 (monitor /
     # slow-loop / UI) 의 잔고 조회를 gateway 가 캐시로 합쳐 KIS 로는 TTL 당 1건만

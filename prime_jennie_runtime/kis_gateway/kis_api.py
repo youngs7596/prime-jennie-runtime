@@ -24,6 +24,7 @@ import httpx
 
 from prime_jennie_runtime.infra.config import KISConfig
 
+from .call_meter import KisCallMeter
 from .order_client import OrderClient
 from .rate_limiter import AsyncRateLimiter
 from .schemas import DailyPrice, MinutePrice, StockSnapshot
@@ -101,8 +102,15 @@ class KISApi:
             rate=config.rate_limit_global_per_sec,
             capacity=config.rate_limit_global_burst,
         )
+        # KIS 로 실제 나가는 초당 호출수 계측 — EGW00201 원인 진단용 (2026-06-05).
+        # 모든 실호출이 _send 를 지나므로 거기서 record 한다.
+        self._call_meter = KisCallMeter(warn_per_sec=config.kis_call_warn_per_sec)
         # 주문 로직은 별도 모듈 — KISApi 는 thin wrapper 로 위임 (단일 책임 분리)
         self._order_client = OrderClient(self)
+
+    def call_stats(self) -> dict:
+        """KIS 실호출 초당 빈도 스냅샷 (모니터링 엔드포인트용)."""
+        return self._call_meter.snapshot()
 
     # ─── Authentication ──────────────────────────────────────────
 
@@ -171,9 +179,13 @@ class KISApi:
         limiter 를 우회하면 KIS 측 합산 한도 위반이 재시도에서 또 발생한다.
         """
         await self._rate_limiter.acquire()
-        return await self._client.request(
+        self._call_meter.record(path)
+        resp = await self._client.request(
             method, path, headers=headers, params=params, json=json_data
         )
+        if _is_egw_throttle(resp):
+            self._call_meter.record_throttle(path)
+        return resp
 
     async def _headers(self, tr_id: str) -> dict[str, str]:
         """KIS API 공통 헤더 구성."""

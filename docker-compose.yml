@@ -371,18 +371,21 @@ services:
   # --- Control UI (Phase 2.10 Track F — Nginx 서빙, 별 repo: prime-jennie-control-ui) ---
 
   control-ui:
-    image: prime-jennie-control-ui:latest
-    # 별 repo (prime-jennie-control-ui) 에서 로컬 빌드된 이미지. registry 에 없으므로
-    # `docker compose pull` 이 건너뛰도록 pull_policy=never. control-ui 도 ghcr 로
-    # 옮기면 제거 가능 (TODO).
-    pull_policy: never
+    image: ghcr.io/youngs7596/prime-jennie-control-ui:latest
+    # 별 repo (prime-jennie-control-ui) 가 자체 GHCR 워크플로로 빌드/푸시하고, MS-01 의
+    # control-ui 전용 러너(ms-01-control-ui)가 이 서비스만 pull + recreate 한다
+    # (2026-06-05 GHCR 자동배포 전환, 그 전엔 로컬 빌드 + pull_policy=never).
+    # profile 을 apps 로만 둔 건 의도적이다 — runtime 배포(deploy.yml: --profile full)의
+    # `compose pull` 이 control-ui(private 패키지)를 건드려 토큰 없이 pull 실패하는 걸
+    # 막는다. 호스트 재부팅 시엔 restart 정책으로 자동 복구되고, control-ui 러너의
+    # deploy job 이 `--profile apps --no-deps` 로 이 서비스만 갈아끼운다.
     ports:
       - "80:80"
     depends_on:
       dashboard:
         condition: service_started
     restart: unless-stopped
-    profiles: ["full", "apps"]
+    profiles: ["apps"]
 
   # --- Dashboard (Track C, Phase 2.10 #4) ---
   #

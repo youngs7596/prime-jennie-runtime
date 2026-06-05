@@ -4,7 +4,8 @@ v2 원본: `/jobs/collect-minute-chart` (services/jobs/app.py:624-699).
 
 v3 어댑터:
 - v2 KIS 직접 호출 (rate-limit time.sleep 1/18s) → kis_gateway HTTP
-  `/api/market/minute-prices`. asyncio.sleep 으로 동일 ~18 req/s 페이싱.
+  `/api/market/minute-prices`. asyncio.sleep 으로 ~10 req/s 페이싱 (2026-06-05
+  버스트 피크 완화로 v2 의 18 req/s 에서 하향, 아래 _REQ_PER_SEC 주석 참고).
 - v2 in-line INSERT 검사 → PostgresPriceRepo.upsert_minute (executemany 일괄).
 - 2026-05-08 부터 KIS 분봉 단일 수집자. price_scheduler.collect_minute 은 5종목
   sample placeholder 였던 잔재 잡으로 obsolete (top30 안에 모두 포함되어 100% 중복).
@@ -30,7 +31,12 @@ from prime_jennie_runtime.kis_gateway.schemas import MinutePrice
 logger = logging.getLogger(__name__)
 
 
-_REQ_PER_SEC = 18  # v2 1/18s sleep → KIS rate-limit 마진.
+# 분봉 수집 페이싱. v2 는 1/18s 였지만 18 req/s 는 KIS 초당 한도(20)에 거의 붙어
+# 돌아서, 같은 5분 슬롯의 잔고 폴·시세 호출과 합쳐질 때 합산 피크가 한도를 잠깐
+# 스쳤다 (2026-06-05 잔고 throttle 진단의 잔여 증상). 10 req/s 로 낮춰 KIS 한도의
+# 절반만 쓰면 나머지 호출에 여유가 생기고, 대상 40여 종목도 4초면 끝나 5분 주기
+# 안에서 신선도 손해 없이 버스트 피크가 내려간다.
+_REQ_PER_SEC = 10
 _MIN_INTERVAL = 1.0 / _REQ_PER_SEC
 
 # 측정 대기 시트 ticker 조회 — paper_outcomes 의 _fetch_pending_sheets 와 같은 기준.

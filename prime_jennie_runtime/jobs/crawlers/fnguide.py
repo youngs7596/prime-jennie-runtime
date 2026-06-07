@@ -85,6 +85,34 @@ async def crawl_fnguide_consensus(
 
 
 def _parse_fnguide_consensus_table(soup: BeautifulSoup, result: ConsensusData) -> None:
+    # 1) "업종 비교" 표 — EPS·ROE 는 회사 컬럼에서 읽는다.
+    #    이 표의 헤더는 ['구분', <회사명>, '코스피 …(업종평균)', 'KOSPI(시장평균)'] 라서
+    #    회사 값은 첫 데이터 셀(tds[0]) 이다. 이전 코드는 tds[-1] (KOSPI 시장평균) 를
+    #    읽어 전 종목이 동일한 값으로 오염됐다 — forward_roe 가 모든 종목 8.84,
+    #    forward_eps 가 9,060.56 로 찍히던 버그 (2026-06-07 수정).
+    for table in soup.select("table"):
+        caption = table.find("caption")
+        if caption is None or "업종 비교" not in caption.get_text():
+            continue
+        for row in table.select("tr"):
+            th = row.select_one("th")
+            if not th:
+                continue
+            label = th.get_text(strip=True)
+            tds = row.select("td")
+            if not tds:
+                continue
+            company = _parse_number(tds[0].get_text(strip=True))
+            if company is None:
+                continue
+            if label.startswith("EPS") and result.forward_eps is None:
+                result.forward_eps = company
+            elif label == "ROE" and result.forward_roe is None:
+                result.forward_roe = company
+
+    # 2) Financial Highlight 표 — PER 은 최우측 (E) 컬럼이 forward 추정치다.
+    #    "업종 비교" 표의 PER 라벨엔 "배" 가 없어 자연히 건너뛰고 FH 의 'PER(배)' 행을
+    #    잡는다 (기존에 유일하게 정상 동작하던 경로).
     for table in soup.select("table"):
         for row in table.select("tr"):
             th = row.select_one("th, td.cmp-table-cell")
@@ -94,21 +122,10 @@ def _parse_fnguide_consensus_table(soup: BeautifulSoup, result: ConsensusData) -
             tds = row.select("td")
             if not tds:
                 continue
-
-            if "EPS" in label and "원" in label and result.forward_eps is None:
-                val = _parse_number(tds[-1].get_text(strip=True))
-                if val is not None:
-                    result.forward_eps = val
-
             if "PER" in label and "배" in label and result.forward_per is None:
                 val = _parse_number(tds[-1].get_text(strip=True))
                 if val is not None and val > 0:
                     result.forward_per = val
-
-            if "ROE" in label and result.forward_roe is None:
-                val = _parse_number(tds[-1].get_text(strip=True))
-                if val is not None:
-                    result.forward_roe = val
 
     for div in soup.select("div.corp_group2, div.corp_group1"):
         for table in div.select("table"):

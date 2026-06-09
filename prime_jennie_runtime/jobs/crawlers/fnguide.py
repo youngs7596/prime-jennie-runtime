@@ -4,7 +4,8 @@ v2 `prime_jennie/infra/crawlers/fnguide.py` 의 파싱 규칙을 그대로 유�
 HTTP 만 `httpx.AsyncClient` 로 바꿨다.
 
 - `crawl_consensus(client, stock_code)` : FnGuide 우선, 실패 시 Naver 폴백.
-  analyst_count < 3 이면 thin coverage 로 None.
+  목표주가·추정기관수·투자의견·forward EPS/PER 은 '투자의견 컨센서스' 표(열 방향)에서,
+  forward ROE 는 '업종 비교' 표 회사 컬럼에서 읽는다.
 """
 
 from __future__ import annotations
@@ -25,8 +26,6 @@ _HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
 }
-
-MIN_ANALYST_COUNT = 3
 
 
 @dataclass
@@ -51,14 +50,10 @@ async def crawl_consensus(client: httpx.AsyncClient, stock_code: str) -> Consens
     if result is None:
         return None
 
+    # 추정기관수가 적어도(thin coverage) 레코드는 버리지 않는다. 컨센서스 추정치가
+    # 얇아도 '업종 비교' 표에서 온 trailing EPS·ROE 는 그대로 쓸모가 있어서, 통째로
+    # 드롭하면 그 펀더멘털까지 같이 사라진다 (2026-06-09 결정).
     result.source = source
-    if result.analyst_count is not None and result.analyst_count < MIN_ANALYST_COUNT:
-        logger.debug(
-            "[%s] thin coverage (%d analysts), skipping",
-            stock_code,
-            result.analyst_count,
-        )
-        return None
     return result
 
 
@@ -73,8 +68,11 @@ async def crawl_fnguide_consensus(
         soup = BeautifulSoup(resp.text, "html.parser")
 
         result = ConsensusData()
+        # '투자의견 컨센서스' 추정 표를 먼저 읽어 목표주가·추정기관수·투자의견과 진짜
+        # forward EPS·PER 을 채운다. 그 다음 '업종 비교' 표가 forward ROE 를 채우고,
+        # 커버 없는 종목에 한해 trailing EPS·PER 로 폴백한다 (이미 채워졌으면 건너뜀).
+        _parse_fnguide_consensus_estimate(soup, result)
         _parse_fnguide_consensus_table(soup, result)
-        _parse_fnguide_target_price(soup, result)
 
         if result.forward_per is None and result.forward_eps is None:
             return None
@@ -152,29 +150,43 @@ def _parse_fnguide_consensus_table(soup: BeautifulSoup, result: ConsensusData) -
                             result.forward_roe = val
 
 
-def _parse_fnguide_target_price(soup: BeautifulSoup, result: ConsensusData) -> None:
-    for table in soup.select("table"):
-        for row in table.select("tr"):
-            th = row.select_one("th")
-            if not th:
-                continue
-            label = th.get_text(strip=True)
-            tds = row.select("td")
-            if not tds:
-                continue
+def _parse_fnguide_consensus_estimate(soup: BeautifulSoup, result: ConsensusData) -> None:
+    """'투자의견 컨센서스' 추정 표 — 열 방향이다.
 
-            if "목표주가" in label or "Target" in label:
-                val = _parse_number(tds[-1].get_text(strip=True))
-                if val is not None and val > 0:
-                    result.target_price = int(val)
-            if "투자의견" in label or "컨센서스" in label:
-                val = _parse_number(tds[-1].get_text(strip=True))
-                if val is not None and 1 <= val <= 5:
-                    result.investment_opinion = val
-            if "애널리스트" in label or "커버" in label:
-                val = _parse_number(tds[-1].get_text(strip=True))
-                if val is not None and val > 0:
-                    result.analyst_count = int(val)
+    헤더 한 줄에 [투자의견, 목표주가, EPS, PER, 추정기관수] 가 나열되고 값은 그 아래
+    데이터 한 줄에 들어간다. 목표주가·추정기관수·투자의견은 이 표에만 있고, 여기 EPS·PER
+    이 증권사 평균 추정치(FY1)다 — '업종 비교' 표의 최근결산 회사 값보다 진짜 forward 다.
+
+    이전 코드는 "목표주가" 를 행 머리(왼쪽 라벨)로 찾아서 영영 못 잡았다. 실제론 열 헤더라
+    target_price·analyst_count 가 전 종목 None 으로 비어 있었다 (2026-06-09 수정).
+
+    커버 없는 종목은 데이터 자리에 "관련 데이터가 없습니다" 한 칸만 찍히므로 건너뛴다.
+    """
+    for table in soup.select("table"):
+        headers = [th.get_text(strip=True) for th in table.select("thead th")]
+        if not any("목표주가" in h for h in headers):
+            continue
+        row = table.select_one("tbody tr")
+        if row is None:
+            return
+        cells = row.select("td")
+        if len(cells) < len(headers):  # "관련 데이터가 없습니다" placeholder
+            return
+        for header, cell in zip(headers, cells, strict=False):
+            val = _parse_number(cell.get_text(strip=True))
+            if val is None:
+                continue
+            if "투자의견" in header and result.investment_opinion is None and 1 <= val <= 5:
+                result.investment_opinion = val
+            elif "목표주가" in header and result.target_price is None and val > 0:
+                result.target_price = int(val)
+            elif header == "EPS" and result.forward_eps is None:
+                result.forward_eps = val
+            elif "PER" in header and result.forward_per is None and val > 0:
+                result.forward_per = val
+            elif "기관수" in header and result.analyst_count is None and val > 0:
+                result.analyst_count = int(val)
+        return
 
 
 async def crawl_naver_consensus(client: httpx.AsyncClient, stock_code: str) -> ConsensusData | None:

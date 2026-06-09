@@ -85,8 +85,8 @@ async def test_collect_us_market_upserts_with_change_pct():
             await collect_us_market(pool, client, days=30)
 
     inserts = [c for c in pool.conn.calls if "INSERT INTO us_market_daily" in c[0]]
-    # 5 티커 × 2 바 = 10 upsert
-    assert len(inserts) == 10
+    # 6 티커 (SOX/NVDA/SP500/NASDAQ/NQ_FUT/BRENT) × 2 바 = 12 upsert
+    assert len(inserts) == 12
 
     # 첫 SOX 바는 change_pct=None, 두 번째 SOX 바는 (102.5-100.5)/100.5*100
     sox_calls = [c for c in inserts if c[1][0] == "SOX"]

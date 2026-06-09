@@ -243,7 +243,10 @@ async def macro_collect_global(
         ("^N225", "nikkei"),
         ("^HSI", "hsi"),
         ("JPY=X", "usd_jpy"),
-        ("CL=F", "crude_oil"),
+        # crude_oil 필드는 브렌트유(BZ=F)로 적재한다. 한국은 원유 전량 수입국이고
+        # 중동·두바이 가격에 연동돼 WTI 보다 브렌트가 수입 충격을 더 잘 반영한다.
+        # (2026-06-09 WTI→Brent 전환. 코스피 유가 알파 측정 결과 근거)
+        ("BZ=F", "crude_oil"),
         ("GC=F", "gold"),
     ):
         data = await _fetch_us_latest(http, yahoo_ticker, yahoo_ticker)

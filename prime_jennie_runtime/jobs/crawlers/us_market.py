@@ -23,6 +23,7 @@ US_TICKERS: dict[str, str] = {
     "^GSPC": "SP500",
     "^IXIC": "NASDAQ",
     "NQ=F": "NQ_FUT",
+    "BZ=F": "BRENT",  # 브렌트유 — 코스피 유가 충격 팩터 (2026-06-09 추가, 한국 수입원유 벤치마크)
 }
 
 _YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"

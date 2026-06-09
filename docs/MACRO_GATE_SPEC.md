@@ -239,7 +239,7 @@ class MarketSnapshot(BaseModel):
     # 환율 / 원자재
     usd_krw: float
     usd_jpy: float
-    crude_oil: float
+    crude_oil: float   # 브렌트유 종가 (BZ=F). 한국 수입원유 벤치마크 — 2026-06-09 WTI→Brent 전환
     gold: float
     
     # 공포 지수
@@ -337,7 +337,7 @@ Trigger: {trigger_reason}   # "scheduled_0800" | "manual" | "auto_kospi_drop" �
 
 환율/원자재:
 - USD/KRW: {usd_krw} ({usd_krw_change:+.2%})
-- Crude WTI: {crude} ({crude_change:+.2%})
+- Crude Brent: {crude} ({crude_change:+.2%})
 - Gold: {gold} ({gold_change:+.2%})
 
 공포 지수:

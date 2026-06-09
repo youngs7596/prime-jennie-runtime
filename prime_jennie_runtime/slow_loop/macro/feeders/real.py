@@ -178,8 +178,8 @@ class RealMarketSnapshotFeeder:
         usd_krw = _as_float(snap.get("usd_krw"), 1350.0)
         usd_jpy = _as_float(snap.get("usd_jpy"), 150.0)
 
-        # 원자재 — crude/gold Yahoo CL=F/GC=F (Phase 2.13-2)
-        crude = _as_float(snap.get("crude_oil"), 80.0)
+        # 원자재 — crude=브렌트 BZ=F / gold GC=F (2026-06-09 crude 를 WTI→Brent 전환)
+        crude = _as_float(snap.get("crude_oil"), 90.0)
         crude_change_pct = _as_float(snap.get("crude_oil_change_pct")) / 100.0
         gold = _as_float(snap.get("gold"), 2300.0)
         gold_change_pct = _as_float(snap.get("gold_change_pct")) / 100.0

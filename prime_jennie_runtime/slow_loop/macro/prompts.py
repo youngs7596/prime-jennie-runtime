@@ -127,7 +127,7 @@ Trigger: {ctx.trigger_reason}
 
 환율/원자재:
 - USD/KRW: {snap.usd_krw:.2f} ({snap.usd_krw_change_pct:+.2%})
-- Crude WTI: {snap.crude_oil:.2f} ({snap.crude_oil_change_pct:+.2%})
+- Crude Brent: {snap.crude_oil:.2f} ({snap.crude_oil_change_pct:+.2%})
 - Gold: {snap.gold:.2f} ({snap.gold_change_pct:+.2%})
 
 공포 지수:

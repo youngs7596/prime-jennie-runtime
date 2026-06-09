@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from prime_jennie_runtime.jobs.paper_outcomes import (
+    MAX_MEASURABLE_HOLD_BDAYS,
     _weighted_exit_price,
     measure_paper_outcomes,
 )
@@ -99,6 +100,7 @@ class _FakeConn:
         sheets_pending: list[dict],
         fail_upsert_for: set[str] | None = None,
         minute: dict[date, list[dict]] | None = None,
+        trading_days: set[date] | None = None,
     ) -> None:
         # daily: price_date -> {open, high, low, close}
         self.daily = daily
@@ -108,10 +110,29 @@ class _FakeConn:
         self.fail_upsert_for = fail_upsert_for or set()
         # minute: KST 달력일 -> 분봉 dict 목록 (v1 simulator 경로)
         self.minute = minute or {}
+        # 발행일이 거래일인지 판정용 집합 (휴장일 발행 제외 필터 미러). None 이면
+        # 필터를 적용하지 않아 모든 발행일을 거래일로 본다 — 기존 테스트 호환.
+        self.trading_days = trading_days
 
     async def fetch(self, sql: str, *args: Any) -> list[dict]:
         if "FROM position_sheets ps" in sql:
-            return self.sheets_pending
+            # 실 SQL 의 두 제외 필터 (placeholder hold 상한 + 휴장일 발행) 미러.
+            out = []
+            for row in self.sheets_pending:
+                rules = json.loads(row["sheet_json"])["exit"]["rules"]
+                holds = [
+                    r["value"]
+                    for r in rules
+                    if r.get("type") == "time_stop" and r.get("mode") == "hold_days"
+                ]
+                if holds and max(holds) > MAX_MEASURABLE_HOLD_BDAYS:
+                    continue  # placeholder 제외
+                if self.trading_days is not None:
+                    pub = row["generated_at"].astimezone(KST).date()
+                    if pub not in self.trading_days:
+                        continue  # 휴장일 발행 제외
+                out.append(row)
+            return out
         if "FROM minute_prices" in sql:
             _ticker, start_kst, _end_kst = args
             return self.minute.get(start_kst.date(), [])
@@ -458,6 +479,82 @@ async def test_pending_filter_skips_bt_sheets():
     # SQL 단계에서 LIKE 'ps_%' 가 막아 sheets_pending 이 비어 있는 상태로 들어와도
     # measure 가 0건으로 정상 종료해야 함.
     _ = sheet  # 발행됐다고 가정만, fake pool 은 빈 응답을 돌려준다
+    stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=10))
+
+    assert stats["candidates"] == 0
+    assert stats["measured"] == 0
+    assert len(conn.upserts) == 0
+
+
+@pytest.mark.asyncio
+async def test_holiday_published_sheet_excluded():
+    """휴장일에 발행된 시트는 측정 대상에서 빠진다 — 발행일에 시장이 안 열렸으면 제외.
+
+    2026-06-03 휴장일 가드 누수 이전에 주말·공휴일 발행된 시트는 발행일 종가가 아예
+    없어 영영 data_missing 으로만 남는다. 후보 단계에서 빼서 paper_outcomes 를 더럽히지
+    않는다. 같은 종목이 거래일에 발행된 시트는 정상 측정된다 (대조).
+    """
+    # 발행일 5-5 (어린이날) 는 휴장 — trading_days 에 미포함.
+    sheet = _make_sheet(
+        sheet_id="ps_20260505_110000_a0a1",
+        generated_at=datetime(2026, 5, 5, 11, 0, tzinfo=KST),
+        time_stop_days=5,
+    )
+
+    # 거래일 종가 series 는 5-5 를 포함하지 않는다 (휴장).
+    daily = _daily_series(date(2026, 5, 6), [100, 101, 102, 103, 104, 105, 106])
+    trading_days = set(daily.keys())  # 5-5 미포함
+
+    conn = _FakeConn(
+        daily=daily,
+        trading_days=trading_days,
+        sheets_pending=[
+            {
+                "sheet_id": sheet.sheet_id,
+                "sheet_json": sheet.model_dump_json(),
+                "generated_at": sheet.generated_at,
+            }
+        ],
+    )
+    pool = _FakePool(conn)
+
+    stats = await measure_paper_outcomes(pool, today=date(2026, 5, 20))
+
+    assert stats["candidates"] == 0
+    assert stats["measured"] == 0
+    assert len(conn.upserts) == 0
+
+
+@pytest.mark.asyncio
+async def test_placeholder_long_hold_sheet_excluded():
+    """time_stop hold_days 가 상한을 넘는 placeholder 시트는 측정 대상에서 빠진다.
+
+    수동 편입 시트(069500/241560)는 hold_days 250 같은 placeholder 라 측정 윈도우가
+    사실상 안 닫혀 영영 측정 못 하면서 매 cycle 후보로만 잡힌다. 후보에서 뺀다.
+    """
+    publish = date(2026, 5, 20)
+    sheet = _make_sheet(
+        sheet_id="ps_20260520_090000_069c",
+        ticker="069500",
+        generated_at=datetime(2026, 5, 20, 9, 0, tzinfo=KST),
+        time_stop_days=MAX_MEASURABLE_HOLD_BDAYS + 100,  # placeholder
+    )
+
+    daily = _daily_series(publish, [100, 101, 102, 103, 104, 105, 106])
+
+    conn = _FakeConn(
+        daily=daily,
+        trading_days=set(daily.keys()),
+        sheets_pending=[
+            {
+                "sheet_id": sheet.sheet_id,
+                "sheet_json": sheet.model_dump_json(),
+                "generated_at": sheet.generated_at,
+            }
+        ],
+    )
+    pool = _FakePool(conn)
+
     stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=10))
 
     assert stats["candidates"] == 0

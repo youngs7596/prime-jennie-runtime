@@ -50,6 +50,10 @@ ENTRY_MODEL = "close_on_publish_date"
 DEFAULT_WINDOW_BDAYS = 20  # time_stop 없는 시트 (validator 가 막지만 안전망)
 MA_HISTORY_MARGIN_BDAYS = 5  # death_cross MA long lookback 마진
 MAX_BATCH_SHEETS = 500  # 한 cycle 안전망
+# 측정 윈도우(time_stop hold_days)가 이 거래일 수를 넘으면 사실상 안 닫혀 영영 측정
+# 못 하는 placeholder 로 보고 후보에서 제외한다. 정상 전략 시트는 hold_days <= 10,
+# 수동 편입 placeholder(069500/241560)는 250.
+MAX_MEASURABLE_HOLD_BDAYS = 60
 # 분봉 simulator 를 쓰기 위한 하루 최소 분봉 수. 정규장은 약 380 분봉 — 일부만 있는
 # 날을 분봉으로 시뮬하면 빠진 시간대의 가격 움직임을 놓치므로, 거의 온전한 날만
 # 분봉을 쓰고 나머지는 일봉 4-tick fallback (일봉은 최소한 고가/저가를 포함).
@@ -160,11 +164,28 @@ async def _fetch_pending_sheets(pool: Any, *, today: date) -> list[dict]:
                 SELECT 1 FROM paper_outcomes po WHERE po.sheet_id = ps.sheet_id
             )
             AND generated_at < $1::date
+            -- 휴장일 발행 잔재 제외: 발행일(KST)에 시장이 열린(daily_prices 에 그 날
+            -- 행이 하나라도 있는) 시트만 측정 대상. 2026-06-03 휴장일 가드 누수
+            -- (d14c95e 수리) 이전에 주말·공휴일 발행된 시트는 발행일 종가가 아예 없어
+            -- 영영 data_missing 으로만 남으므로 측정 대상에서 뺀다.
+            AND EXISTS (
+                SELECT 1 FROM daily_prices d
+                WHERE d.price_date = (ps.generated_at AT TIME ZONE 'Asia/Seoul')::date
+            )
+            -- placeholder 시트 제외: 수동 편입(069500/241560)처럼 time_stop hold_days 가
+            -- 비현실적으로 길어 측정 윈도우가 사실상 안 닫히는 시트. 영영 측정 못 하면서
+            -- 매 cycle 후보로만 잡혀 헛도는 것을 막는다.
+            AND COALESCE((
+                SELECT max((r->>'value')::int)
+                FROM jsonb_array_elements(ps.sheet_json->'exit'->'rules') r
+                WHERE r->>'type' = 'time_stop' AND r->>'mode' = 'hold_days'
+            ), 0) <= $3
             ORDER BY generated_at ASC
             LIMIT $2
             """,
             today,
             MAX_BATCH_SHEETS,
+            MAX_MEASURABLE_HOLD_BDAYS,
         )
     return [dict(r) for r in rows]
 

@@ -100,6 +100,7 @@ async def lifespan(app: FastAPI):
             handler=CommandHandler(redis_client, config.telegram, pool=pool, kis_client=kis_client),
             bot=bot,
             intent_router=intent_router,
+            redis_client=redis_client,  # offset 영속 — 재시작 시 update 재전달 차단
         )
         long_poll_task = asyncio.create_task(long_poll.run(), name="telegram-long-poll")
         app.state.pool = pool

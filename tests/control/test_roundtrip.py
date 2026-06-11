@@ -55,8 +55,11 @@ async def test_emergency_then_resume_roundtrip(fake_redis):
     await consumer.apply(ControlCommand.model_validate_json(msgs[-1][1][b"payload"].decode()))
     assert (await SystemState(fake_redis).snapshot()).stopped
 
-    # /resume
+    # /resume 도 /stop 과 동일하게 확인 단어 필수 — bare 는 안내만, publish 없음
     r = await handler.process_command("/resume", "", chat_id="1001")
+    assert r.published is None
+
+    r = await handler.process_command("/resume", "확인", chat_id="1001")
     assert r.published is not None
     msgs = await fake_redis.xrange(STREAM_CONTROL_COMMANDS)
     await consumer.apply(ControlCommand.model_validate_json(msgs[-1][1][b"payload"].decode()))

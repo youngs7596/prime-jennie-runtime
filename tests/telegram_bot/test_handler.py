@@ -14,6 +14,7 @@ from prime_jennie_runtime.telegram_bot.control import (
     RESPONSE_LIQUIDATE_USAGE,
     RESPONSE_NOT_ALLOWED,
     RESPONSE_RATE_LIMITED,
+    RESPONSE_RESUME_CONFIRM,
     RESPONSE_STOP_CONFIRM,
     STATE_KEY_LIQUIDATE_ARMED,
     STATE_KEY_PAUSE,
@@ -176,9 +177,20 @@ async def test_pause_default_reason(fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_resume_publishes_resume(fake_redis):
+async def test_resume_requires_confirm(fake_redis):
+    """확인 단어 없는 /resume 은 publish 없이 안내만 — /stop 과 대칭 + 재전달 방어."""
     h = _handler(fake_redis)
-    result = await h.process_command("/resume", "", chat_id="1001")
+    r_bare = await h.process_command("/resume", "", chat_id="1001")
+    assert r_bare.reply == RESPONSE_RESUME_CONFIRM
+    assert r_bare.published is None
+    r_wrong = await h.process_command("/resume", "ok", chat_id="1001")
+    assert r_wrong.published is None
+
+
+@pytest.mark.asyncio
+async def test_resume_with_confirm_publishes(fake_redis):
+    h = _handler(fake_redis)
+    result = await h.process_command("/resume", "확인", chat_id="1001")
     assert result.published is not None
     assert result.published.kind == "resume"
 

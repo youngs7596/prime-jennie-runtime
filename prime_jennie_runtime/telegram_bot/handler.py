@@ -45,6 +45,7 @@ from .control import (
     RESPONSE_LIQUIDATE_USAGE,
     RESPONSE_NOT_ALLOWED,
     RESPONSE_RATE_LIMITED,
+    RESPONSE_RESUME_CONFIRM,
     RESPONSE_STOP_CONFIRM,
     RESPONSE_UNKNOWN,
     STATE_KEY_DRYRUN,
@@ -218,6 +219,10 @@ class CommandHandler:
         )
 
     async def _handle_resume(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        # /stop /sellall 과 동일한 확인 단계. 봇 재시작 시 텔레그램 update 재전달로
+        # 과거 /resume 이 맥락 없이 재실행되는 경로의 마지막 방어선이기도 하다.
+        if args.strip() != "확인":
+            return CommandResult(reply=RESPONSE_RESUME_CONFIRM)
         cmd = await self._publish("resume", chat_id)
         return CommandResult(reply="재개 요청 발행됨", published=cmd)
 
@@ -226,7 +231,7 @@ class CommandHandler:
             return CommandResult(reply=RESPONSE_STOP_CONFIRM)
         cmd = await self._publish("emergency_stop", chat_id, reason="telegram_emergency")
         return CommandResult(
-            reply="<b>긴급 정지 요청 발행됨</b>\n재개: <code>/resume</code>",
+            reply="<b>긴급 정지 요청 발행됨</b>\n재개: <code>/resume 확인</code>",
             published=cmd,
         )
 
@@ -569,10 +574,10 @@ class CommandHandler:
 
     async def _handle_buy(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
         if await self._is_stopped():
-            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume</code>")
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume 확인</code>")
         if await self._is_paused():
             return CommandResult(
-                reply="일시정지 상태입니다 (진입 차단). 재개: <code>/resume</code>"
+                reply="일시정지 상태입니다 (진입 차단). 재개: <code>/resume 확인</code>"
             )
         if not await self._check_manual_trade_limit(chat_id):
             return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
@@ -603,7 +608,7 @@ class CommandHandler:
 
     async def _handle_sell(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
         if await self._is_stopped():
-            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume</code>")
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume 확인</code>")
         # PAUSE 는 청산 허용 (docstring "진입만 중단")
         if not await self._check_manual_trade_limit(chat_id):
             return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
@@ -643,7 +648,7 @@ class CommandHandler:
 
     async def _handle_sellall(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
         if await self._is_stopped():
-            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume</code>")
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume 확인</code>")
         if args.strip() != "확인":
             return CommandResult(reply="전체 청산: <code>/sellall 확인</code> 으로 실행")
         cmd = await self._publish("manual_sellall", chat_id, reason="telegram_sellall")

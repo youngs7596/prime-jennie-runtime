@@ -89,7 +89,7 @@ RESPONSE_HELP = (
     "<b>Prime Jennie v3 — 명령어</b>\n\n"
     "<b>매매 제어</b>\n"
     "/pause [사유] — 진입 일시정지\n"
-    "/resume — 재개\n"
+    "/resume 확인 — 재개\n"
     "/stop 확인 — 긴급 정지\n"
     "/dryrun on|off — 시뮬레이션 모드\n\n"
     "<b>조회</b>\n"
@@ -125,6 +125,12 @@ RESPONSE_UNKNOWN = "알 수 없는 명령입니다. /help"
 RESPONSE_NOT_ALLOWED = "허용되지 않은 chat 입니다."
 RESPONSE_RATE_LIMITED = "너무 빠릅니다. 잠시 후 다시 시도하세요."
 RESPONSE_STOP_CONFIRM = "긴급 정지: <code>/stop 확인</code> 로만 실행됩니다."
+# /resume 도 /stop /sellall 과 같은 확인 단계 요구 — 봇 재시작 시 텔레그램이 미확인
+# 메시지를 재전달해 과거 /resume 이 맥락 없이 재실행되는 경로 (2026-06-10 전수조사
+# G11) 와, kill switch 해제가 단발 명령인 비대칭을 함께 막는다.
+RESPONSE_RESUME_CONFIRM = (
+    "재개: <code>/resume 확인</code> 으로만 실행됩니다.\n(긴급정지·일시정지 해제 → 자동 매매 재개)"
+)
 RESPONSE_DRYRUN_USAGE = "사용법: <code>/dryrun on|off</code>"
 RESPONSE_LIQUIDATE_USAGE = (
     "사용법:\n"
@@ -150,6 +156,7 @@ __all__ = [
     "RESPONSE_LIQUIDATE_USAGE",
     "RESPONSE_NOT_ALLOWED",
     "RESPONSE_RATE_LIMITED",
+    "RESPONSE_RESUME_CONFIRM",
     "RESPONSE_STOP_CONFIRM",
     "RESPONSE_UNKNOWN",
     "STATE_KEY_DRYRUN",

@@ -16,7 +16,7 @@ from prime_jennie_runtime.infra.config import TelegramConfig
 from prime_jennie_runtime.infra.redis_streams import STREAM_CONTROL_COMMANDS
 from prime_jennie_runtime.telegram_bot.bot import TelegramBot
 from prime_jennie_runtime.telegram_bot.handler import CommandHandler
-from prime_jennie_runtime.telegram_bot.long_poll import LongPollLoop
+from prime_jennie_runtime.telegram_bot.long_poll import OFFSET_KEY, LongPollLoop
 
 
 def _config(**overrides) -> TelegramConfig:
@@ -128,7 +128,7 @@ async def test_poll_once_handles_multiple_updates(fake_redis):
                     "ok": True,
                     "result": [
                         _update(200, "/pause"),
-                        _update(201, "/resume"),
+                        _update(201, "/resume 확인"),
                     ],
                 },
             )
@@ -144,6 +144,82 @@ async def test_poll_once_handles_multiple_updates(fake_redis):
 
     msgs = await fake_redis.xrange(STREAM_CONTROL_COMMANDS)
     assert len(msgs) == 2
+
+
+# ---------- offset Redis 영속 ----------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_persists_offset_to_redis(fake_redis):
+    """update 처리 시작 시점에 offset 이 Redis 에 기록된다 (at-most-once ACK)."""
+    cfg = _config()
+    handler = CommandHandler(fake_redis, cfg)
+
+    async with respx.mock(base_url="https://api.telegram.org") as mock:
+        mock.post("/bottok/sendMessage").mock(return_value=httpx.Response(200, json={"ok": True}))
+        bot = TelegramBot(cfg)
+        loop = LongPollLoop(cfg, handler, bot, redis_client=fake_redis)
+
+        await loop._dispatch(_update(500, "/status"))
+
+        await loop.close()
+        await bot.close()
+
+    raw = await fake_redis.get(OFFSET_KEY)
+    assert raw is not None
+    assert int(raw) == 501
+
+
+@pytest.mark.asyncio
+async def test_load_offset_survives_restart(fake_redis):
+    """재시작(새 인스턴스)이 영속 offset 을 복원 — 과거 update 재실행 차단 (G11)."""
+    cfg = _config()
+    handler = CommandHandler(fake_redis, cfg)
+
+    async with respx.mock(base_url="https://api.telegram.org") as mock:
+        mock.post("/bottok/sendMessage").mock(return_value=httpx.Response(200, json={"ok": True}))
+        bot = TelegramBot(cfg)
+        first = LongPollLoop(cfg, handler, bot, redis_client=fake_redis)
+        await first._dispatch(_update(700, "/status"))
+        await first.close()
+
+        second = LongPollLoop(cfg, handler, bot, redis_client=fake_redis)
+        await second._load_offset()
+        assert second._offset == 701  # type: ignore[attr-defined]
+
+        # 복원된 offset 이전의 재전달 update 는 offset 을 되돌리지 못한다
+        await second._dispatch(_update(650, "/status"))
+        assert second._offset == 701  # type: ignore[attr-defined]
+        assert int(await fake_redis.get(OFFSET_KEY)) == 701
+
+        await second.close()
+        await bot.close()
+
+
+@pytest.mark.asyncio
+async def test_load_offset_without_redis_is_noop(fake_redis):
+    """redis_client 미주입(기존 테스트 경로) 이면 in-memory 0 출발 그대로."""
+    cfg = _config()
+    handler = CommandHandler(fake_redis, cfg)
+    bot = TelegramBot(cfg)
+    loop = LongPollLoop(cfg, handler, bot)
+    await loop._load_offset()
+    assert loop._offset == 0  # type: ignore[attr-defined]
+    await loop.close()
+    await bot.close()
+
+
+@pytest.mark.asyncio
+async def test_load_offset_corrupt_value_falls_back_to_zero(fake_redis):
+    cfg = _config()
+    handler = CommandHandler(fake_redis, cfg)
+    await fake_redis.set(OFFSET_KEY, b"not-a-number")
+    bot = TelegramBot(cfg)
+    loop = LongPollLoop(cfg, handler, bot, redis_client=fake_redis)
+    await loop._load_offset()
+    assert loop._offset == 0  # type: ignore[attr-defined]
+    await loop.close()
+    await bot.close()
 
 
 @pytest.mark.asyncio

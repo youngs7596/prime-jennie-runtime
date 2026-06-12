@@ -90,6 +90,9 @@ services:
       # Slack 통합 (선택) — 설정 시 entry/exit/risk_level_change 알림 미러.
       # 미설정 시 notifier 는 Redis stream 만 발행 (기존 동작).
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # 사용자가 인지한 비추적 보유 — 부팅 state-KIS 검사의 kis-only 경고 제외.
+      # 069500 = KODEX200 (2026-06-12 v3 관리 제외 결정). job-worker 와 동일 값 유지.
+      RECONCILE_IGNORE_KIS_ONLY: "069500"
     depends_on:
       redis:
         condition: service_healthy
@@ -470,6 +473,9 @@ services:
       # macro_collect_global/korea 는 BOK ECOS 키가 있을 때만 실제 호출.
       # 비어 있으면 jobs/app.py 가 None 으로 전달 → fallback 경로만 동작.
       BOK_ECOS_API_KEY: ${BOK_ECOS_API_KEY:-}
+      # 사용자가 인지한 비추적 보유 — reconcile 잡의 only_in_kis 경고 제외.
+      # 069500 = KODEX200 (2026-06-12 v3 관리 제외 결정). fast-loop 와 동일 값 유지.
+      RECONCILE_IGNORE_KIS_ONLY: "069500"
       DART_API_KEY: ${DART_API_KEY:-}
       # DeepSeek chat: global_news_digest 요약 + daily_briefing_report + wsj_gmail_ingest 요약.
       # 2026-04-24 briefing/WSJ 도 Opus → DeepSeek 전환 (월 ~$30-50 추가 절감).

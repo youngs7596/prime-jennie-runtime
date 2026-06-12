@@ -299,3 +299,73 @@ async def test_changed_mismatch_re_alerts_despite_debounce():
         assert await redis.xlen("v3:notifications") == 2
     finally:
         await redis.aclose()
+
+
+# ---------- 인지된 비추적 보유 무시 목록 (RECONCILE_IGNORE_KIS_ONLY) ----------
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_kis_only_suppressed(monkeypatch):
+    """무시 목록 종목만 어긋나면 (069500 KODEX200 사례) 경고 없음."""
+    monkeypatch.setenv("RECONCILE_IGNORE_KIS_ONLY", "069500")
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://kis:8080/api/balance").mock(
+                return_value=httpx.Response(200, json=_balance_payload(["069500"]))
+            )
+            async with httpx.AsyncClient() as client:
+                result = await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+        assert result == {"only_in_state": [], "only_in_kis": [], "qty_mismatch": []}
+        assert await redis.xlen("v3:notifications") == 0
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_does_not_mask_other_mismatch(monkeypatch):
+    """무시 목록 외 종목의 어긋남은 그대로 경고 — 무시 종목만 빠진다."""
+    monkeypatch.setenv("RECONCILE_IGNORE_KIS_ONLY", "069500")
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://kis:8080/api/balance").mock(
+                return_value=httpx.Response(200, json=_balance_payload(["069500", "066970"]))
+            )
+            async with httpx.AsyncClient() as client:
+                result = await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+        assert result["only_in_kis"] == ["066970"]
+        msgs = await redis.xrange("v3:notifications")
+        assert len(msgs) == 1
+        payload = json.loads(msgs[0][1][b"payload"])
+        assert "066970" in payload["body"]
+        assert "069500" not in payload["body"]
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_does_not_suppress_only_in_state(monkeypatch):
+    """무시 목록은 kis-only 방향 전용 — state-only (무한 매도 위험) 는 여전히 critical."""
+    monkeypatch.setenv("RECONCILE_IGNORE_KIS_ONLY", "069500")
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await redis.set(f"{POSITION_STATE_PREFIX}ps_a", _state("069500"))
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://kis:8080/api/balance").mock(
+                return_value=httpx.Response(200, json=_balance_payload([]))
+            )
+            async with httpx.AsyncClient() as client:
+                result = await reconcile_state_kis(
+                    redis_client=redis, http=client, kis_gateway_url="http://kis:8080"
+                )
+        assert result["only_in_state"] == ["069500"]
+        msgs = await redis.xrange("v3:notifications")
+        assert len(msgs) == 1
+        assert json.loads(msgs[0][1][b"payload"])["severity"] == "critical"
+    finally:
+        await redis.aclose()

@@ -35,6 +35,8 @@ from datetime import UTC, datetime
 import httpx
 import redis.asyncio as aioredis
 
+from prime_jennie_runtime.infra.acknowledged_holdings import acknowledged_untracked_tickers
+
 logger = logging.getLogger(__name__)
 
 POSITION_STATE_PREFIX = "position_state:"
@@ -149,6 +151,15 @@ async def reconcile_state_kis(
     state_tickers = set(state)
     only_in_state = sorted(state_tickers - kis_tickers)
     only_in_kis = sorted(kis_tickers - state_tickers)
+    # 사용자가 인지한 비추적 보유 (예: 069500 KODEX200 관리 제외, 2026-06-12)
+    # 는 only_in_kis 경고에서만 제외 — 반대 방향·수량 drift 는 그대로 경고.
+    acknowledged = acknowledged_untracked_tickers() & set(only_in_kis)
+    if acknowledged:
+        only_in_kis = [t for t in only_in_kis if t not in acknowledged]
+        logger.info(
+            "reconcile: 인지된 비추적 보유 %s — only_in_kis 경고에서 제외",
+            sorted(acknowledged),
+        )
     qty_mismatch = [
         {"ticker": t, "state_qty": state[t], "kis_qty": kis[t]}
         for t in sorted(state_tickers & kis_tickers)

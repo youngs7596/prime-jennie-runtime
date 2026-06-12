@@ -20,6 +20,7 @@ from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.notifier import Notifier
 from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
 from prime_jennie_runtime.fast_loop.schemas import GenericAlertNotification
+from prime_jennie_runtime.infra.acknowledged_holdings import acknowledged_untracked_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,14 @@ async def check_state_kis_mismatch(
 
     only_in_state = sorted(state_tickers - kis_tickers)
     only_in_kis = sorted(kis_tickers - state_tickers)
+    # 사용자가 인지한 비추적 보유는 kis-only 경고에서만 제외 (reconcile 잡과 동일 정책).
+    acknowledged = acknowledged_untracked_tickers() & set(only_in_kis)
+    if acknowledged:
+        only_in_kis = [t for t in only_in_kis if t not in acknowledged]
+        logger.info(
+            "startup check: 인지된 비추적 보유 %s — kis-only 경고에서 제외",
+            sorted(acknowledged),
+        )
 
     if not only_in_state and not only_in_kis:
         logger.info("startup state-KIS check OK: %d tickers matched", len(state_tickers))

@@ -135,3 +135,36 @@ async def test_balance_fetch_failure_does_not_block_startup(fake_redis):
     result = await check_state_kis_mismatch(tracker, BoomKis(), notifier)
     assert result == {}
     assert await fake_redis.xlen(STREAM_NOTIFICATIONS) == 0
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_untracked_suppressed_at_startup(monkeypatch, fake_redis):
+    """인지된 비추적 보유 (069500 KODEX200) 는 부팅 검사의 kis-only 경고에서 제외."""
+    monkeypatch.setenv("RECONCILE_IGNORE_KIS_ONLY", "069500")
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    await tracker.register(_state("ps_a", "005930"))
+    kis = FakeKisWithBalance([("005930", 10), ("069500", 1568)])
+
+    result = await check_state_kis_mismatch(tracker, kis, notifier)
+
+    assert result == {"only_in_state": [], "only_in_kis": []}
+    assert await fake_redis.xlen(STREAM_NOTIFICATIONS) == 0
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_does_not_mask_others_at_startup(monkeypatch, fake_redis):
+    """무시 목록 외 비추적 보유는 부팅 검사에서 여전히 경고."""
+    monkeypatch.setenv("RECONCILE_IGNORE_KIS_ONLY", "069500")
+    tracker = PositionTracker(fake_redis)
+    notifier = Notifier(fake_redis)
+    kis = FakeKisWithBalance([("069500", 1568), ("066970", 5)])
+
+    result = await check_state_kis_mismatch(tracker, kis, notifier)
+
+    assert result["only_in_kis"] == ["066970"]
+    msgs = await fake_redis.xrange(STREAM_NOTIFICATIONS)
+    assert len(msgs) == 1
+    payload = json.loads(msgs[0][1][b"payload"])
+    assert "066970" in payload["body"]
+    assert "069500" not in payload["body"]

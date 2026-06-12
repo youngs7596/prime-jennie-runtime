@@ -1,4 +1,4 @@
-"""9종 Exit Rule 평가 엔진 — first_match 순회.
+"""10종 Exit Rule 평가 엔진 — first_match 순회.
 
 `sheet.exit.rules`를 배열 순서대로 평가하여 첫 매칭되는 rule의 `ExitDecision`을
 반환한다. `breakeven`은 청산이 아닌 SL 상향 보조 rule이므로
@@ -30,6 +30,7 @@ from prime_jennie_runtime.position_sheet.schema import (
     FixedTpRule,
     OverextensionExitRule,
     ProfitFloorRule,
+    RecoveryExitRule,
     ScaleOutRule,
     TimeStopRule,
     TrailingTpRule,
@@ -113,6 +114,8 @@ def _evaluate_rule(
         return _check_profit_floor(rule, state, current_return)
     if isinstance(rule, DeathCrossRule):
         return _check_death_cross(rule, state, tick, now, daily_closes, current_return)
+    if isinstance(rule, RecoveryExitRule):
+        return _check_recovery_exit(rule, current_return)
     # sheet 스키마가 허용하는 모든 타입은 위에서 커버된다.
     return None
 
@@ -356,6 +359,21 @@ def _check_profit_floor(
                 "current_return": current_return,
                 "floor_pct": rule.floor_pct,
             },
+        )
+    return None
+
+
+def _check_recovery_exit(
+    rule: RecoveryExitRule,
+    current_return: float,
+) -> ExitDecision | None:
+    """손익률이 임계(0 이하) 이상으로 회복하면 전량 청산 — 사용자 등록 조건부 매도."""
+    if current_return >= rule.pct:
+        return _make_decision(
+            should_close=True,
+            reason="recovery_exit",
+            rule_type="recovery_exit",
+            metadata={"threshold_pct": rule.pct, "current_return": current_return},
         )
     return None
 

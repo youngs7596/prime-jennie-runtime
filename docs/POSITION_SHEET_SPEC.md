@@ -13,6 +13,12 @@
 
 ## CHANGELOG
 
+### v0.3 (2026-06-12)
+사람-승인 매매 설계 반영 (`.ai/designs/2026-06-12-human-approved-trading-nl-interface.md` §3-1).
+
+- **§5.2.10 `recovery_exit` rule 신설**: 손익률이 임계(0 이하) 이상으로 회복하면 전량 청산.
+  운영자가 텔레그램 자연어로 등록하는 조건부 매도용 — Scout 전략은 이 rule 을 발행하지 않는다.
+
 ### v0.2 (2026-04-16)
 Claude Code v2 컨텍스트 리뷰 반영. v2의 12-rule 체계 커버리지 완성.
 
@@ -216,6 +222,7 @@ type ExitRule =
   | OverextensionExitRule
   | ProfitFloorRule
   | DeathCrossRule
+  | RecoveryExitRule
 ```
 
 ### 5.1 평가 주기
@@ -380,6 +387,26 @@ Executor는 **틱 수신마다** exit.rules[]를 **배열 순서대로** 평가�
 **`min_loss_pct` 조건이 필요한 이유**: 수익 구간에서 death cross는 빈번하게 발생하지만 추세 반전 시그널로서 신뢰도 낮음. 손실 구간 + 추세 꺾임이 결합되어야 청산 가치 있음. 수익 구간은 trailing_tp/profit_floor/breakeven이 담당.
 
 **v2 검증 파라미터**: `ma_short=5, ma_long=20, min_loss_pct=0.01`.
+
+#### 5.2.10 `recovery_exit`
+
+```typescript
+{ type: "recovery_exit", pct: number }   // -0.10 <= pct <= 0.0
+```
+
+- `pct`: 청산 임계 손익률, **0 이하 분수**. 예: `-0.01` = "손실이 -1% 위로 줄어들면 매도", `0.0` = "양전하면 매도"
+- 트리거: `(현재가 / 진입가 - 1) >= pct`
+- 액션: 시장가 전량 청산
+- `exit_reason`: `"recovery_exit"`
+
+**용도**: 운영자가 텔레그램 자연어로 등록하는 조건부 매도 (2026-06-12 사람-승인 매매 설계).
+물린 보유를 "본전 근처로 회복하면 정리" 하는 의도의 표현. **Scout 전략은 이 rule 을
+발행하지 않으며**, 양수 목표 익절은 기존 `fixed_tp` 의 역할이라 pct 양수는 스키마가 거부한다.
+
+**주의사항**:
+- 등록 시점에 이미 손익률이 임계 이상이면 **다음 tick 에서 즉시 발동**한다. 등록 확인
+  단계에서 발동가를 표기해 사용자가 인지한 상태로 등록하게 한다.
+- breakeven 처럼 상태를 갖지 않는 무상태 rule — 매 tick 단순 비교.
 
 ### 5.3 rules[] 배열 순서 규칙
 

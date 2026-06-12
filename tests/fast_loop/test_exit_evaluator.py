@@ -138,6 +138,41 @@ class TestFixedTp:
         assert decision is None
 
 
+class TestRecoveryExit:
+    def test_trigger_on_recovery_above_negative_threshold(self):
+        # -1% 회복선: -0.8% 손실로 올라오면 발동
+        sheet = _sheet_with_rules([{"type": "recovery_exit", "pct": -0.01}])
+        state = _fresh_state()
+        decision = evaluate(sheet, state, _tick(99.2))
+        assert decision is not None
+        assert decision.should_close is True
+        assert decision.reason == "recovery_exit"
+        assert decision.portion == 1.0
+
+    def test_trigger_when_already_above(self):
+        # 양전 상태는 회복선 이상이므로 그대로 발동 (등록 직후 즉시 발동 의도)
+        sheet = _sheet_with_rules([{"type": "recovery_exit", "pct": -0.01}])
+        state = _fresh_state()
+        decision = evaluate(sheet, state, _tick(101.0))
+        assert decision is not None
+        assert decision.reason == "recovery_exit"
+
+    def test_no_trigger_below_threshold(self):
+        # -2% 손실 — 회복선(-1%) 미달
+        sheet = _sheet_with_rules([{"type": "recovery_exit", "pct": -0.01}])
+        state = _fresh_state()
+        assert evaluate(sheet, state, _tick(98.0)) is None
+
+    def test_zero_threshold_means_breakeven_exit(self):
+        # pct=0.0: "양전하면 매도" — 본전 미만이면 침묵, 본전부터 발동
+        sheet = _sheet_with_rules([{"type": "recovery_exit", "pct": 0.0}])
+        state = _fresh_state()
+        assert evaluate(sheet, state, _tick(99.9)) is None
+        decision = evaluate(sheet, state, _tick(100.0))
+        assert decision is not None
+        assert decision.reason == "recovery_exit"
+
+
 class TestTrailingTp:
     def test_trigger_after_activation_and_drop(self):
         sheet = _sheet_with_rules([{"type": "trailing_tp", "activate_pct": 0.05, "drop_pct": 0.03}])

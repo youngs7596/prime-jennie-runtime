@@ -23,6 +23,7 @@ from prime_jennie_runtime.position_sheet.schema import (
     OverextensionExitRule,
     PositionSheet,
     ProvenanceSection,
+    RecoveryExitRule,
     SizeSection,
     TimeStopRule,
 )
@@ -273,6 +274,57 @@ async def test_fixed_tp_hit_on_high():
     # 만족 → open tick 에서 매칭. high(110) 까지 가지 않음.
     assert args[7] == 108.0
     assert args[10] == pytest.approx(8.0)
+
+
+@pytest.mark.asyncio
+async def test_recovery_exit_hit_on_rebound():
+    """recovery_exit(-1%) — 눌렸다가 -0.8% 까지 회복한 tick 에서 청산 (SPEC §5.2.10)."""
+    publish = date(2026, 5, 20)
+    sheet = _make_sheet(
+        sheet_id="ps_20260520_110000_cccc",
+        generated_at=datetime(2026, 5, 20, 11, 0, tzinfo=KST),
+        fixed_sl_pct=0.05,
+        fixed_tp_pct=0.08,
+        time_stop_days=5,
+        extra_rules=[RecoveryExitRule(pct=-0.01)],
+    )
+
+    # entry close 100. day+1 은 회복선(99) 미달로 침묵, day+2 high=99.2 에서
+    # current_return -0.8% >= -1% → recovery_exit. sl(95)/tp(108) 은 내내 미발동.
+    daily = {
+        publish: _ohlc(100),
+        publish + timedelta(days=1): _ohlc(97, open_=98, high=98, low=96),
+        publish + timedelta(days=2): {
+            "open_price": 98,
+            "high_price": 99.2,
+            "low_price": 97.8,
+            "close_price": 99,
+        },
+        publish + timedelta(days=3): _ohlc(100),
+        publish + timedelta(days=4): _ohlc(101),
+        publish + timedelta(days=5): _ohlc(102),
+        publish + timedelta(days=6): _ohlc(103),  # window margin
+    }
+
+    conn = _FakeConn(
+        daily=daily,
+        sheets_pending=[
+            {
+                "sheet_id": sheet.sheet_id,
+                "sheet_json": sheet.model_dump_json(),
+                "generated_at": sheet.generated_at,
+            }
+        ],
+    )
+    pool = _FakePool(conn)
+
+    stats = await measure_paper_outcomes(pool, today=publish + timedelta(days=7))
+
+    assert stats["measured"] == 1
+    args = conn.upserts[0]
+    assert args[8] == "recovery_exit"
+    assert args[7] == 99.2
+    assert args[10] == pytest.approx(-0.8)
 
 
 @pytest.mark.asyncio

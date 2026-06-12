@@ -37,7 +37,7 @@ SHEET_ID_RE = re.compile(r"^(?:ps|bt)_\d{8}_\d{6}_[0-9a-f]{4}$")
 
 
 # =====================================================================
-# Exit Rules — 9종 discriminated union
+# Exit Rules — 10종 discriminated union
 # =====================================================================
 
 
@@ -110,6 +110,19 @@ class DeathCrossRule(BaseModel):
     min_loss_pct: Annotated[float, Field(gt=0)]
 
 
+class RecoveryExitRule(BaseModel):
+    """손익률이 임계 이상으로 회복하면 전량 청산 — 사용자 등록 조건부 매도용.
+
+    pct 는 0 이하 분수 (예: -0.01 = "손실이 -1% 위로 줄어들면 매도", 0.0 = "양전
+    하면 매도"). 양수 목표는 fixed_tp 의 역할이라 여기서 받지 않는다. 등록 시점에
+    이미 임계 이상이면 다음 tick 에서 즉시 발동한다 (확인 단계에서 발동가를 보여
+    주므로 의도된 동작). 2026-06-12 사람-승인 매매 설계 §3-1.
+    """
+
+    type: Literal["recovery_exit"] = "recovery_exit"
+    pct: Annotated[float, Field(ge=-0.10, le=0.0)]
+
+
 ExitRule = Annotated[
     FixedSlRule
     | FixedTpRule
@@ -119,7 +132,8 @@ ExitRule = Annotated[
     | TimeStopRule
     | OverextensionExitRule
     | ProfitFloorRule
-    | DeathCrossRule,
+    | DeathCrossRule
+    | RecoveryExitRule,
     Field(discriminator="type"),
 ]
 

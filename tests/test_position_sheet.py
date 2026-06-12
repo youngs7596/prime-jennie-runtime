@@ -125,6 +125,41 @@ def test_scale_out_portion_exceeded():
         PositionSheet(**data)
 
 
+# T21: recovery_exit — 음수~0 임계 수용, 양수·과대 음수 거부 (SPEC §5.2.10)
+def test_recovery_exit_accepted():
+    data = _base_sheet()
+    data["exit"]["rules"] = [
+        {"type": "recovery_exit", "pct": -0.01},
+        {"type": "fixed_sl", "pct": 0.05},
+        {"type": "time_stop", "mode": "eod"},
+    ]
+    sheet = PositionSheet(**data)
+    assert {r.type for r in sheet.exit.rules} >= {"recovery_exit", "fixed_sl", "time_stop"}
+
+
+def test_recovery_exit_rejects_positive_pct():
+    # 양수 목표는 fixed_tp 의 역할 — recovery_exit 은 0 이하만
+    data = _base_sheet()
+    data["exit"]["rules"] = [
+        {"type": "recovery_exit", "pct": 0.02},
+        {"type": "fixed_sl", "pct": 0.05},
+        {"type": "time_stop", "mode": "eod"},
+    ]
+    with pytest.raises(ValueError):
+        PositionSheet(**data)
+
+
+def test_recovery_exit_rejects_below_minus_10pct():
+    data = _base_sheet()
+    data["exit"]["rules"] = [
+        {"type": "recovery_exit", "pct": -0.15},
+        {"type": "fixed_sl", "pct": 0.05},
+        {"type": "time_stop", "mode": "eod"},
+    ]
+    with pytest.raises(ValueError):
+        PositionSheet(**data)
+
+
 # T11: entry.valid_until > sheet.valid_until
 def test_entry_valid_until_exceeds_sheet():
     now = datetime(2026, 4, 16, 9, 15, 0, tzinfo=KST)

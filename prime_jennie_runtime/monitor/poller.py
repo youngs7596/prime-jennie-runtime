@@ -50,6 +50,13 @@ ALERT_FAILURE_THRESHOLD = 3
 # 장 시간 외 polling 주기 (초). 평가금액이 안 변하므로 크게 늘려 KIS 호출을 절약.
 IDLE_INTERVAL_SEC = 300.0
 
+# gateway 응답 대기 한도. gateway 의 잔고 경로는 KIS 원장 거부 시 1+2+4초
+# backoff 재시도 후 stale 캐시로 200 을 주는데, 그 체인이 최대 ~12초 걸린다.
+# 5초였을 땐 stale 로 멀쩡히 응답될 폴을 시간 초과로 "gateway_unreachable" 라
+# 오인해 거짓 critical 이 났다 (2026-06-12 13:46·14:17 — 분봉 수집과 잔고
+# 폴이 겹친 구간). 체인 전체를 기다리도록 15초.
+_GATEWAY_TIMEOUT_SEC = 15.0
+
 
 class LivePositionsPoller:
     """주기적으로 KIS Gateway `/balance` 를 읽어 Redis 에 스냅샷을 쓴다.
@@ -107,7 +114,7 @@ class LivePositionsPoller:
 
     async def __aenter__(self) -> LivePositionsPoller:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=5.0)
+            self._client = httpx.AsyncClient(timeout=_GATEWAY_TIMEOUT_SEC)
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
@@ -169,7 +176,7 @@ class LivePositionsPoller:
     async def tick_once(self) -> int:
         """1회 polling. 성공 시 positions 개수를 반환, 실패 시 0."""
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=5.0)
+            self._client = httpx.AsyncClient(timeout=_GATEWAY_TIMEOUT_SEC)
             self._owned_client = True
         try:
             resp = await self._client.get(f"{self._gateway_url}/api/balance")

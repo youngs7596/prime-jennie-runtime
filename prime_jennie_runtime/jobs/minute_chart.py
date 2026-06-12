@@ -8,8 +8,10 @@ v3 어댑터:
 - 2026-05-08 부터 KIS 분봉 단일 수집자. price_scheduler.collect_minute 은 5종목
   sample placeholder 였던 잔재 잡으로 obsolete (top30 안에 모두 포함되어 100% 중복).
 
-수집 대상 (P2.6, 2026-06-03 교정):
-- stock_masters 시총 상위 N (백테스트 참고용 기본 커버리지)
+수집 대상 (P2.6, 2026-06-03 교정 / 2026-06-12 확대):
+- stock_masters KOSPI 보통주·우선주 시총 상위 N — 기본 200 (KOSPI 200 상당,
+  사용자 결정 "데이터는 많이 모을수록 좋다"). 코스닥·ETF 가 시총 상위에 섞여
+  들어오지 않게 market/security_type 필터 (No-KOSDAQ 정책, 5-26 학습).
 - paper 측정 윈도우가 아직 열려있는 시트의 ticker — v2 잔재 watchlist_histories
   (4-17 동결, v3 writer 없음) 를 대체. 측정하려는 시트의 분봉이 정작 안 쌓이던
   결함을 고침 (P3 1분봉 simulator 의 전제).
@@ -26,6 +28,8 @@ v3 어댑터:
   경고 로그만 남기고 하한을 지킨다 (KIS 안전 우선. cron 은 max_instances=1
   이라 다음 주기와 겹치지 않고 skip 된다). 분봉은 과거 봉 조회라 창 안에서
   늦게 수집될수록 오히려 완결된 봉을 받는다 — 신선도 손해 없음.
+- 기본 대상 ~215종목 (top200 + 측정 대기 시트) 이면 간격 1.1초 (≈0.9 req/s)
+  로 창을 채우며 꾸준히 흐른다 — 685종목까지는 240초 안에 끝난다.
 """
 
 from __future__ import annotations
@@ -101,13 +105,13 @@ async def collect_minute_chart(
     http: httpx.AsyncClient,
     gateway_url: str,
     *,
-    top_n: int = 30,
+    top_n: int = 200,
     window_sec: float = _WINDOW_SEC,
     min_interval_sec: float = _MIN_INTERVAL_SEC,
 ) -> dict:
     """v2 `/jobs/collect-minute-chart` 포팅 + P2.6 수집 대상 교정 + 적응형 페이싱.
 
-    1) stock_masters 활성 + 시총 desc 상위 N (default 30)
+    1) stock_masters 활성 KOSPI 보통주·우선주 + 시총 desc 상위 N (default 200)
     2) 측정 윈도우가 열려있는 시트 (paper_outcomes 미적재) 의 ticker 추가
     3) 종목 수로 간격을 연산해 창에 고르게 분산, 혼잡 신호 시 감속 + 말미 1회
        재시도 (gateway 전역 limiter 가 최종 방어선)
@@ -119,9 +123,12 @@ async def collect_minute_chart(
     # 대상 조회는 connection 을 짧게 쓰고 바로 반환 — 긴 페이싱 루프 동안
     # pool connection 을 점유하면 같은 worker 의 다른 잡이 굶는다.
     async with pool.acquire() as conn:
+        # market/security_type 필터 — 시총 상위를 넓히면 코스닥 대형주·ETF 가
+        # 섞여 들어온다 (5-26 서진시스템 학습). KOSPI 보통주·우선주만.
         top_rows = await conn.fetch(
             "SELECT stock_code FROM stock_masters "
             "WHERE is_active = TRUE AND market_cap IS NOT NULL "
+            "AND market = 'KOSPI' AND security_type = 'STOCK' "
             "ORDER BY market_cap DESC LIMIT $1",
             top_n,
         )

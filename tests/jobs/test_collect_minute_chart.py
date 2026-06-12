@@ -32,8 +32,10 @@ class _FakeConn:
         # 측정 대기 시트 (paper_outcomes 미적재) 의 ticker.
         self.pending_sheet_codes = pending_sheet_codes
         self.executemany_calls: list[tuple[str, list[tuple]]] = []
+        self.seen_sqls: list[str] = []
 
     async def fetch(self, sql: str, *args: object) -> list[dict]:
+        self.seen_sqls.append(sql)
         if "FROM stock_masters" in sql:
             return [{"stock_code": c} for c in self.top_codes]
         if "FROM position_sheets" in sql:
@@ -129,6 +131,10 @@ async def test_collect_minute_chart_fetches_top_n_and_pending_sheets():
     assert result["failed"] == 0
     assert result["backoffs"] == 0
     assert len(conn.executemany_calls) == 3  # 종목별 1회 upsert
+    # 시총 상위 조회는 KOSPI 보통주·우선주만 — 코스닥·ETF 차단 (No-KOSDAQ 정책)
+    top_sql = next(s for s in conn.seen_sqls if "FROM stock_masters" in s)
+    assert "market = 'KOSPI'" in top_sql
+    assert "security_type = 'STOCK'" in top_sql
 
 
 @pytest.mark.asyncio

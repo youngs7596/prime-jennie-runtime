@@ -220,15 +220,16 @@ SEEDS: list[SeedJob] = [
         kwargs={"period_days": 30},
     ),
     # Track B — collect_minute_chart (v2 utility_jobs_dag: */5 9-15 * * 1-5).
-    # KIS 분봉의 단일 수집자 (top30 시총 + 최신 watchlist). 18 req/s pacing 으로 KIS
-    # 시세 한도(19/sec) 마진 유지. 2026-05-08 이전엔 price_scheduler.collect_minute 와
-    # 동시 실행되었으나 후자는 obsolete 잔재로 disabled.
+    # KIS 분봉의 단일 수집자 (KOSPI 시총 top200 + 측정 대기 시트). 2026-06-12
+    # 30→200 확대 (KOSPI 200 상당 — "데이터는 많이 모을수록 좋다"). 같은 날 도입한
+    # 적응형 페이싱이 240초 창에 펴므로 5분 주기 안에서 KIS 한도와 충돌 없음.
+    # 운영 DB 는 같은 날 UPDATE 적용 — 이 시드는 새 환경 재현용.
     SeedJob(
         id="job_worker.collect_minute_chart",
         owner="job_worker",
         handler_key="collect_minute_chart",
         cron="*/5 9-15 * * 1-5",
-        kwargs={"top_n": 30},
+        kwargs={"top_n": 200},
     ),
     # Track B — collect_full_market_data (v2 utility_jobs_dag: 0 16 * * 1-5, 일봉 top300).
     # 운영 일봉 수집자 — stock_masters 시총 top300 자동발견, 18 req/s 페이싱, idempotent

@@ -146,6 +146,57 @@ async def test_poll_once_handles_multiple_updates(fake_redis):
     assert len(msgs) == 2
 
 
+# ---------- intent v2 — NL 분류 회신 ----------
+
+
+class _StubRouter:
+    enabled = True
+
+    def __init__(self, result) -> None:
+        self._result = result
+
+    async def classify(self, text: str):
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_nl_not_understood_gets_reply(fake_redis):
+    """분류 실패가 무응답이 아니라 안내 회신으로 끝난다 (v2)."""
+    from prime_jennie_runtime.telegram_bot.llm_intent import IntentResult
+
+    from .fakes import FakeTelegramBot
+
+    cfg = _config()
+    handler = CommandHandler(fake_redis, cfg)
+    bot = FakeTelegramBot()
+    loop = LongPollLoop(cfg, handler, bot, intent_router=_StubRouter(IntentResult(reply="안내문")))
+
+    await loop._dispatch(_update(900, "이해 못할 잡담"))
+
+    await loop.close()
+    assert bot.sent_messages == ["안내문"]
+
+
+@pytest.mark.asyncio
+async def test_nl_routed_command_processed(fake_redis):
+    from prime_jennie_runtime.telegram_bot.llm_intent import IntentResult
+
+    from .fakes import FakeTelegramBot
+
+    cfg = _config()
+    handler = CommandHandler(fake_redis, cfg)
+    bot = FakeTelegramBot()
+    loop = LongPollLoop(
+        cfg, handler, bot, intent_router=_StubRouter(IntentResult(command="/status", args=""))
+    )
+
+    await loop._dispatch(_update(901, "지금 상태 어때"))
+
+    await loop.close()
+    assert len(bot.sent_messages) == 1
+    assert "상태" in bot.sent_messages[0]
+
+
 # ---------- offset Redis 영속 ----------
 
 

@@ -167,13 +167,19 @@ class LongPollLoop:
 
         parsed = parse_command(text)
         if parsed is None:
-            # 평문 메시지 — IntentRouter 가 활성화돼 있으면 LLM 으로 분류 시도
+            # 평문 메시지 — IntentRouter 가 활성화돼 있으면 LLM 으로 분류 시도.
+            # 분류 실패·거부는 안내 회신 (v1 의 무응답 설계 제거 — 사용자가
+            # 꺼짐/거부를 구분 못 하던 문제, 2026-06-10 전수조사).
             if self._intent_router is None or not self._intent_router.enabled:
                 return
-            classified = await self._intent_router.classify(text)
-            if classified is None:
+            result = await self._intent_router.classify(text)
+            if result is None:
                 return
-            cmd, args = classified
+            if result.command is None:
+                if result.reply:
+                    await self._bot.send_message(result.reply, chat_id=str(chat_id))
+                return
+            cmd, args = result.command, result.args
             logger.info("nl_routed text=%r → cmd=%s args=%r", text[:80], cmd, args)
         else:
             cmd, args = parsed

@@ -1,16 +1,21 @@
-"""LLM 기반 자연어 → 명령 라우터.
+"""LLM 기반 자연어 → 명령 라우터 (v2 — 사람-승인 매매 설계 §3-3).
 
-평문 한국어 ("오늘 손익?", "삼성전자 가격 알려줘") 를 알려진 슬래시 명령으로
-변환. DeepSeek chat 모델 (env: DEEPSEEK_API_KEY / DEEPSEEK_MODEL) 사용.
+평문 한국어 ("오늘 손익?", "서진시스템 -1% 회복하면 매도") 를 알려진 슬래시
+명령으로 변환. DeepSeek chat 모델 (env: DEEPSEEK_API_KEY / DEEPSEEK_MODEL) 사용.
 
 설계:
 - httpx 직접 호출 (langchain 의존 회피 — telegram-bot 이미지 가벼움 유지).
 - response_format=json_object 로 강제 JSON. {"command": "/...", "args": "..."}
   또는 {"command": null, "reason": "..."} 형식.
-- API key 없거나 호출 실패 시 None 반환 → bot 은 평소대로 무응답 (현재 행동
-  보존).
-- 매매성 명령 (`/buy /sell /sellall /stop`, `/liquidate arm`) 은 LLM 이 추출
-  하더라도 직접 실행하지 않고 사용자에게 슬래시 명령 형식 가이드만 회신.
+- LLM 은 통역만 한다 — 매매가 실제로 나가는 길목 (확인 단어) 은 전부 슬래시
+  직접 입력으로만 통과 가능. NL 경로로 추출된 args 의 "확인" 토큰은 여기서
+  제거한다 ("/resume 확인" 류가 LLM 출력으로 실행되는 일 차단).
+- 즉시 매매 명령 (/buy /sell /sellall /stop /liquidate) 은 추출돼도 실행하지
+  않고 직접 입력 형식을 안내. 조건부 매도는 /adopt 로 라우팅 — /adopt 자체가
+  2단계 확인이라 echo 까지만 간다.
+- v1 의 무응답 설계 제거 (2026-06-10 전수조사: 사용자가 꺼짐/거부를 구분 못
+  했음) — 분류 실패·거부 모두 안내를 회신한다. None 반환은 라우터 비활성
+  (API key 없음) 일 때뿐.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -27,7 +33,8 @@ from prime_jennie_runtime.infra.llm_stats import record_llm_call
 
 logger = logging.getLogger(__name__)
 
-# 안전한 명령 — LLM 추출 후 즉시 실행 가능
+# 안전한 명령 — LLM 추출 후 즉시 실행 가능. /adopt 와 /resume 은 자체 확인
+# 단계가 있어 NL 라우팅이 echo/안내까지만 도달한다.
 _SAFE_COMMANDS = {
     "/help",
     "/status",
@@ -48,9 +55,26 @@ _SAFE_COMMANDS = {
     "/resume",
     "/dryrun",
     "/diagnose",
+    "/adopt",
 }
-# 위험 명령 — LLM 추출하더라도 즉시 실행 금지 (사용자가 슬래시로 직접 입력해야)
+# 즉시 매매 명령 — LLM 추출하더라도 실행하지 않고 직접 입력 형식 안내만
 _DANGEROUS_COMMANDS = {"/buy", "/sell", "/sellall", "/stop", "/liquidate"}
+
+_DANGEROUS_USAGE = {
+    "/buy": "/buy 종목 [수량]",
+    "/sell": "/sell 종목 [수량|전량]",
+    "/sellall": "/sellall 확인",
+    "/stop": "/stop 확인",
+    "/liquidate": "/liquidate add|remove|list|clear|arm|disarm|status",
+}
+
+RESPONSE_NL_NOT_UNDERSTOOD = (
+    "무슨 명령인지 이해하지 못했습니다. <code>/help</code> 에서 명령 목록을 보거나,\n"
+    '조건부 매도는 이렇게: "서진시스템 -1% 회복하면 매도해줘"'
+)
+RESPONSE_NL_ERROR = (
+    "자연어 해석에 실패했습니다 (LLM 오류). 잠시 후 다시 시도하거나 슬래시 명령을 사용하세요."
+)
 
 _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 명령으로 분류한다.
 
@@ -73,7 +97,17 @@ _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 
 - /resume — 재개
 - /dryrun on|off — 시뮬레이션
 - /diagnose — 시스템 진단
+- /adopt <종목> <회복선%> — 보유 종목의 조건부 매도 등록
 - /help — 도움말
+
+조건부 매도 (/adopt) 규칙:
+- "~가 양전하면 팔아줘", "손실이 -N% 위로 줄어들면 매도" 처럼 보유 종목을
+  손익률 조건으로 매도하려는 의도면 /adopt 로 분류한다.
+- args 는 "<종목> <회복선%>". 회복선은 -10 ~ 0 사이 숫자 하나 (% 기호 없이).
+  "양전하면" 단독이면 0. 여러 조건이 "~하거나" 로 묶이면 가장 낮은(음수로 더
+  깊은) 임계 하나만 쓴다.
+- 예: "서진시스템이 양전하거나 -1% 미만으로 손실이 줄어들면 매도해줘"
+  → {"command": "/adopt", "args": "서진시스템 -1"}
 
 출력 형식 (반드시 JSON 객체):
 {"command": "/balance", "args": ""}
@@ -81,10 +115,32 @@ _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 
 {"command": null, "reason": "분류 불가"}
 
 규칙:
-- 의도가 모호하거나 매매(매수/매도/긴급정지/강제청산) 요청이면 command=null
-- args 는 명령 뒤에 붙는 인자만 (종목명, 가격, 분 등)
-- JSON 외 다른 텍스트 출력 금지
+- 즉시 매수/즉시 매도/전량 청산/긴급정지/강제청산 요청이면 command=null
+  (조건부 매도만 /adopt). 의도가 모호해도 command=null.
+- args 는 명령 뒤에 붙는 인자만 (종목명, 가격, 분 등).
+- JSON 외 다른 텍스트 출력 금지.
 """
+
+
+@dataclass
+class IntentResult:
+    """classify 결과 — 라우팅할 명령 또는 사용자 안내 중 하나.
+
+    command 가 있으면 라우팅, 없으면 reply 를 사용자에게 회신.
+    """
+
+    command: str | None = None
+    args: str = ""
+    reply: str | None = None
+
+
+def _strip_confirm_tokens(args: str) -> str:
+    """NL 경로로 새어 들어온 "확인" 토큰 제거.
+
+    확인 단어는 사용자가 슬래시 명령으로 직접 입력해야만 유효하다 — LLM 출력이
+    "/resume 확인" 을 만들어 kill switch 해제 같은 실행이 일어나는 일 차단.
+    """
+    return " ".join(t for t in args.split() if t != "확인")
 
 
 class IntentRouter:
@@ -112,10 +168,11 @@ class IntentRouter:
     def enabled(self) -> bool:
         return bool(self._api_key)
 
-    async def classify(self, text: str) -> tuple[str, str] | None:
-        """평문 → ``(command, args)`` 또는 None.
+    async def classify(self, text: str) -> IntentResult | None:
+        """평문 → IntentResult. None 은 라우터 비활성/빈 입력일 때뿐.
 
-        매매성 명령은 의도가 명확해도 None 반환 (안전 가드).
+        실패·거부 경로는 전부 reply 가 채워진 IntentResult — 호출자는 그대로
+        사용자에게 회신한다 (무응답 금지).
         """
         if not self._api_key:
             return None
@@ -147,10 +204,9 @@ class IntentRouter:
             parsed = json.loads(content)
         except Exception:
             logger.exception("intent classification failed")
-            return None
+            return IntentResult(reply=RESPONSE_NL_ERROR)
 
-        # LLM 호출 자체는 성공한 자리 — 분류 결과와 무관하게 stats 누적.
-        # parser 실패는 위 except 에서 잡혔으므로 여기 도달 시 usage 추출 안전.
+        # LLM 호출 성공 — 분류 결과와 무관하게 stats 누적.
         usage_raw = data.get("usage") or {}
         in_tok = int(usage_raw.get("prompt_tokens", 0))
         out_tok = int(usage_raw.get("completion_tokens", 0))
@@ -164,19 +220,30 @@ class IntentRouter:
 
         cmd = parsed.get("command")
         if not cmd or not isinstance(cmd, str):
-            return None
+            return IntentResult(reply=RESPONSE_NL_NOT_UNDERSTOOD)
         cmd = cmd.lower().strip()
         if cmd in _DANGEROUS_COMMANDS:
             logger.info("intent router blocked dangerous command: %s", cmd)
-            return None
+            usage = _DANGEROUS_USAGE.get(cmd, cmd)
+            return IntentResult(
+                reply=(
+                    "즉시 매매 명령은 직접 입력해야 실행됩니다: "
+                    f"<code>{usage}</code>\n조건부 매도라면: <code>/adopt 종목 회복선%</code>"
+                )
+            )
         if cmd not in _SAFE_COMMANDS:
-            return None
-        args = parsed.get("args", "") or ""
-        return cmd, str(args).strip()
+            return IntentResult(reply=RESPONSE_NL_NOT_UNDERSTOOD)
+        args = _strip_confirm_tokens(str(parsed.get("args", "") or "").strip())
+        return IntentResult(command=cmd, args=args)
 
     async def close(self) -> None:
         if self._owned_client:
             await self._client.aclose()
 
 
-__all__ = ["IntentRouter"]
+__all__ = [
+    "RESPONSE_NL_ERROR",
+    "RESPONSE_NL_NOT_UNDERSTOOD",
+    "IntentResult",
+    "IntentRouter",
+]

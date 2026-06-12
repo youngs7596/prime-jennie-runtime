@@ -174,3 +174,81 @@ async def test_emergency_then_resume_restores_entry(fake_redis):
     assert not (await SystemState(fake_redis).snapshot()).entry_allowed
     await c.apply(_cmd("resume"))
     assert (await SystemState(fake_redis).snapshot()).entry_allowed
+
+
+# ---------- adopt_position (사람-승인 매매 §3-2) ----------
+
+
+@pytest.mark.asyncio
+async def test_adopt_position_registers_tracker(fake_redis):
+    from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+
+    tracker = PositionTracker(fake_redis)
+    c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
+    await c.apply(
+        _cmd(
+            "adopt_position",
+            payload={
+                "sheet_id": "ps_20260612_178320_ab12",
+                "ticker": "178320",
+                "entry_price": 80800.0,
+                "quantity": 1,
+                "entered_at": "2026-06-12T10:00:00+09:00",
+            },
+        )
+    )
+    state = tracker.get("ps_20260612_178320_ab12")
+    assert state is not None
+    assert state.ticker == "178320"
+    assert state.entry_price == 80800.0
+    assert state.quantity == 1
+    # register 가 Redis 까지 영속 — fast-loop 재기동 복원 경로
+    raw = await fake_redis.get("position_state:ps_20260612_178320_ab12")
+    assert raw is not None
+
+
+@pytest.mark.asyncio
+async def test_adopt_position_duplicate_is_idempotent(fake_redis):
+    from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+
+    tracker = PositionTracker(fake_redis)
+    c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
+    payload = {
+        "sheet_id": "ps_20260612_178320_ab12",
+        "ticker": "178320",
+        "entry_price": 80800.0,
+        "quantity": 1,
+    }
+    await c.apply(_cmd("adopt_position", payload=payload))
+    # 재전달돼도 기존 state 를 덮어쓰지 않는다
+    await c.apply(_cmd("adopt_position", payload={**payload, "entry_price": 1.0}))
+    state = tracker.get("ps_20260612_178320_ab12")
+    assert state is not None
+    assert state.entry_price == 80800.0
+
+
+@pytest.mark.asyncio
+async def test_adopt_position_without_tracker_is_noop(fake_redis):
+    c = ControlCommandConsumer(fake_redis, consumer_name="test")  # tracker 미주입
+    await c.apply(
+        _cmd(
+            "adopt_position",
+            payload={
+                "sheet_id": "ps_20260612_178320_ab12",
+                "ticker": "178320",
+                "entry_price": 80800.0,
+                "quantity": 1,
+            },
+        )
+    )
+    assert await fake_redis.get("position_state:ps_20260612_178320_ab12") is None
+
+
+@pytest.mark.asyncio
+async def test_adopt_position_invalid_payload_skipped(fake_redis):
+    from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+
+    tracker = PositionTracker(fake_redis)
+    c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
+    await c.apply(_cmd("adopt_position", payload={"sheet_id": "", "ticker": "178320"}))
+    assert tracker.active_sheet_ids() == []

@@ -19,12 +19,15 @@ KST = timezone(timedelta(hours=9))
 MIN_POSITION_PCT = 0.005
 
 # 허용 strategy_tag (추가는 MINOR 업데이트)
+# MANUAL_ADOPT — 사용자 지시로 실보유 종목을 v3 관리에 편입한 시트 (2026-06-12
+# 사람-승인 매매 설계 §3-2). Scout 전략 아님 — 전략 성과 분석에서 제외할 것.
 ALLOWED_STRATEGY_TAGS = frozenset(
     {
         "GAP_UP_REBOUND",
         "SECTOR_MOMENTUM",
         "EARNINGS_DRIFT",
         "MEAN_REVERT_RSI",
+        "MANUAL_ADOPT",
     }
 )
 

@@ -32,6 +32,14 @@ from prime_jennie_runtime.infra.redis_streams import (
     TypedStreamPublisher,
 )
 
+from .adoption import (
+    ADOPT_FIXED_SL_PCT,
+    ADOPT_HOLD_BDAYS,
+    build_adoption_sheet,
+    find_tracked_sheet_for_ticker,
+    parse_recovery_pct,
+    persist_adoption_sheet,
+)
 from .control import (
     KEY_FORCED_LIQUIDATION,
     KEY_MANUAL_TRADE_PREFIX,
@@ -122,6 +130,7 @@ class CommandHandler:
             "/buy": self._handle_buy,
             "/sell": self._handle_sell,
             "/sellall": self._handle_sellall,
+            "/adopt": self._handle_adopt,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -654,6 +663,105 @@ class CommandHandler:
         cmd = await self._publish("manual_sellall", chat_id, reason="telegram_sellall")
         return CommandResult(
             reply="<b>전체 청산 요청 발행</b> (실행은 fast-loop 에서)", published=cmd
+        )
+
+    async def _handle_adopt(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        """실보유 종목 v3 편입 + 조건부 매도(recovery_exit) 등록.
+
+        2단계 확인: ``/adopt 종목 회복선%`` 는 해석 echo 만, 끝에 ``확인`` 을
+        붙여야 실행 — 사람-승인 매매 설계 §2 시나리오 A 의 결정론 원형.
+        """
+        parts = args.strip().split()
+        confirm = bool(parts) and parts[-1] == "확인"
+        if confirm:
+            parts = parts[:-1]
+        if len(parts) != 2:
+            return CommandResult(
+                reply=(
+                    "사용법: <code>/adopt 종목 회복선%</code>\n"
+                    "예: <code>/adopt 서진시스템 -1</code> — 손익률 -1% 이상 회복 시 전량 매도\n"
+                    "해석을 본 뒤 끝에 <code>확인</code> 을 붙여 등록합니다."
+                )
+            )
+        term, pct_raw = parts
+        pct = parse_recovery_pct(pct_raw)
+        if pct is None:
+            return CommandResult(reply="회복선은 -10 ~ 0 사이의 % 값이어야 합니다. 예: -1, -2.5, 0")
+        if self._pool is None or self._kis is None:
+            return CommandResult(reply="DB/KIS 미연결 — /adopt 를 처리할 수 없습니다.")
+
+        stock = await resolve_stock(self._pool, term)
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {term}")
+        code, name = stock
+
+        existing = await find_tracked_sheet_for_ticker(self._redis, code)
+        if existing:
+            return CommandResult(
+                reply=(
+                    f"{name}({code}) 는 이미 v3 가 추적 중입니다 (시트 {existing}). "
+                    "중복 편입 불가."
+                )
+            )
+
+        try:
+            portfolio = await self._kis.get_balance()
+        except Exception:
+            logger.exception("/adopt get_balance failed")
+            return CommandResult(reply="잔고 조회 실패 — 잠시 후 다시 시도하세요.")
+        position = next((p for p in portfolio.positions if p.stock_code == code), None)
+        if position is None:
+            return CommandResult(reply=f"보유하고 있지 않습니다: {name}({code})")
+
+        trigger_price = int(position.average_buy_price * (1 + pct))
+        summary = (
+            f"<b>{name}({code}) {position.quantity}주 — v3 편입 + 조건부 매도</b>\n"
+            f"매입가 {position.average_buy_price:,}원 기준 손익률 {pct * 100:.1f}% 이상 회복 시 "
+            f"전량 시장가 매도 (발동가 약 {trigger_price:,}원)\n"
+            f"안전장치: 매입가 대비 -{int(ADOPT_FIXED_SL_PCT * 100)}% 손절 "
+            f"+ {ADOPT_HOLD_BDAYS}거래일 시간 종료 포함"
+        )
+        if not confirm:
+            return CommandResult(
+                reply=f"{summary}\n\n등록: <code>/adopt {term} {pct_raw} 확인</code>"
+            )
+
+        sheet = build_adoption_sheet(
+            ticker=code,
+            avg_price=position.average_buy_price,
+            quantity=position.quantity,
+            recovery_pct=pct,
+            now=self._now(),
+            issued_by=f"telegram:{chat_id}",
+            hypothesis=f"사용자 조건부 매도: 손익률 {pct * 100:.1f}% 이상 회복 시 전량 매도",
+        )
+        try:
+            await persist_adoption_sheet(self._pool, sheet)
+        except Exception:
+            logger.exception("/adopt sheet persist failed sheet=%s", sheet.sheet_id)
+            return CommandResult(reply="시트 영속 실패 — 등록 중단 (로그 확인)")
+        cmd = await self._publish(
+            "adopt_position",
+            chat_id,
+            reason="manual_adopt",
+            payload={
+                "sheet_id": sheet.sheet_id,
+                "ticker": code,
+                "entry_price": float(position.average_buy_price),
+                "quantity": int(position.quantity),
+                "entered_at": sheet.generated_at.isoformat(),
+            },
+        )
+        stopped = await self._is_stopped()
+        stop_note = (
+            "\n주의: 현재 STOP 상태 — 발동해도 주문이 나가지 않습니다. "
+            "해제: <code>/resume 확인</code>"
+            if stopped
+            else ""
+        )
+        return CommandResult(
+            reply=f"등록됨 — {summary}\n시트: <code>{sheet.sheet_id}</code>{stop_note}",
+            published=cmd,
         )
 
     async def _handle_diagnose(self, args: str, **_: object) -> CommandResult:

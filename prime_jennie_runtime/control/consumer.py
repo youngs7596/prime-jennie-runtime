@@ -104,7 +104,9 @@ class ControlCommandConsumer:
 
     async def apply(self, command: ControlCommand) -> None:
         """단일 명령 적용 — 테스트 / consumer 양쪽에서 직접 호출 가능."""
-        if command.kind in ("manual_buy", "manual_sell", "manual_sellall"):
+        if command.kind == "adopt_position":
+            await self._apply_adopt_position(command)
+        elif command.kind in ("manual_buy", "manual_sell", "manual_sellall"):
             await self._apply_manual_trade(command)
         else:
             handler = _HANDLERS.get(command.kind)
@@ -123,6 +125,57 @@ class ControlCommandConsumer:
                     reason=command.reason or "",
                 )
             )
+
+    async def _apply_adopt_position(self, command: ControlCommand) -> None:
+        """실보유 종목 편입 — in-process PositionTracker 등록 (사람-승인 매매 §3-2).
+
+        시트는 telegram handler 가 이미 position_sheets 에 영속했다. 여기서는
+        tracker 등록만 — register 가 Redis 영속까지 같이 하므로 fast-loop 재기동
+        후에도 load_from_redis 로 복원된다. 매매가 아니므로 STOP/PAUSE 무관
+        (발동 시 주문은 ExitExecutor 의 기존 게이트가 차단).
+        """
+        from prime_jennie_runtime.fast_loop.domain import PositionState
+
+        if self._tracker is None:
+            logger.error("adopt_position received but no tracker (fast-loop 전용 명령)")
+            return
+        p = command.payload
+        sheet_id = str(p.get("sheet_id", ""))
+        ticker = str(p.get("ticker", ""))
+        try:
+            entry_price = float(p.get("entry_price", 0))
+            quantity = int(p.get("quantity", 0))
+        except (TypeError, ValueError):
+            entry_price, quantity = 0.0, 0
+        if not sheet_id or not ticker or entry_price <= 0 or quantity <= 0:
+            logger.warning("adopt_position invalid payload: %s", command.payload)
+            return
+        if self._tracker.get(sheet_id) is not None:
+            logger.info("adopt_position duplicate sheet_id=%s — skip", sheet_id)
+            return
+        entered_raw = p.get("entered_at")
+        try:
+            entered_at = datetime.fromisoformat(str(entered_raw))
+        except (TypeError, ValueError):
+            entered_at = datetime.now(UTC)
+        state = PositionState(
+            sheet_id=sheet_id,
+            ticker=ticker,
+            entry_price=entry_price,
+            quantity=quantity,
+            entered_at=entered_at,
+            high_watermark=entry_price,
+            peak_return_pct=0.0,
+        )
+        await self._tracker.register(state)
+        logger.info(
+            "adopt_position registered sheet=%s ticker=%s entry=%.0f qty=%d by=%s",
+            sheet_id,
+            ticker,
+            entry_price,
+            quantity,
+            command.issued_by,
+        )
 
     async def _apply_manual_trade(self, command: ControlCommand) -> None:
         if self._kis is None:

@@ -4,7 +4,7 @@
 
 ## 리포 경계
 
-- **이 리포**: v3 paper alpha 탐색 엔진. 느린 루프 + 빠른 루프 + v2 포팅 서비스. paper 로 alpha 를 증명하는 실험실이며 실계좌 자산을 매매하지 않는다 (정체성: `.ai/designs/2026-05-29-paper-mode-alpha-discovery.md`)
+- **이 리포**: v3 paper alpha 탐색 엔진. 느린 루프 + 빠른 루프 + v2 포팅 서비스. paper 로 alpha 를 증명하는 실험실이며 스스로 실계좌 자산을 매매하지 않는다. 실계좌 매매는 운영자의 텔레그램 지시·수락으로만 실행된다 (정체성: `.ai/designs/2026-05-29-paper-mode-alpha-discovery.md` + 2026-06-12 수정 `.ai/designs/2026-06-12-human-approved-trading-nl-interface.md`)
 - **minyoung-mah**: Multi-Agent Harness 라이브러리. `pip install -e ../minyoung-mah`로 소비. **직접 수정하지 않음** (별도 repo, 별도 계정)
 - **prime-jennie (v2)**: 참조 전용. 포팅 시 원본 경로 명시
 

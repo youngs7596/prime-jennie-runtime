@@ -246,6 +246,15 @@ async def run() -> None:
 
         sheet_fetcher = PostgresSheetFetcher(pool)
 
+        entry_executor = EntryExecutor(
+            kis=kis,
+            tracker=tracker,
+            notifier=notifier,
+            recorder=recorder,
+            system_state=system_state,
+            stock_resolver=stock_resolver,
+        )
+
         control_consumer = ControlCommandConsumer(
             redis_client,
             consumer_name=f"control-fast-{cfg.env}",
@@ -254,6 +263,8 @@ async def run() -> None:
             recorder=recorder,
             sheet_fetcher=sheet_fetcher,
             notifier=notifier,
+            # approved_buy (추천 수락 매수) 집행 — 자동 진입과 동일 경로.
+            entry_executor=entry_executor,
         )
 
         risk_throttle = IntradayRiskThrottle(redis_client)
@@ -261,15 +272,6 @@ async def run() -> None:
         snapshot_fetcher = RuntimeMarketSnapshotFetcher(http=http_client, redis_client=redis_client)
         risk_publisher = TypedStreamPublisher(
             redis_client, STREAM_NOTIFICATIONS, RiskLevelChangeNotification
-        )
-
-        entry_executor = EntryExecutor(
-            kis=kis,
-            tracker=tracker,
-            notifier=notifier,
-            recorder=recorder,
-            system_state=system_state,
-            stock_resolver=stock_resolver,
         )
         exit_executor = ExitExecutor(
             kis=kis,

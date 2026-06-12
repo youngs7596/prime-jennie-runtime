@@ -17,6 +17,9 @@ Consumer group 는 `control.runtime` 하나만 둔다 (state 는 멱등이므로
   TradeNotification, ExitFilledEvent publish). 미주입 시 KIS 호출 + log 만
   (v3 외부 보유 종목 호환). 2026-05-15 audit D1 / manual_sell silent gap
   fix.
+- approved_buy — 추천 수락 매수 (시나리오 B). entry_executor 주입 시 자동
+  진입과 동일 경로로 집행. STOP 차단, **PAUSE 통과** (2026-06-12 정책:
+  PAUSE = 무확인 진입 차단, 2단계 확인을 거친 승인 매수는 예외).
 - observer 주입 시 `pj.control.applied` 이벤트 발생 (telemetry).
 """
 
@@ -48,6 +51,7 @@ from prime_jennie_runtime.telegram_bot.control import (
 )
 
 if TYPE_CHECKING:
+    from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
     from prime_jennie_runtime.fast_loop.kis_client import KisClient
     from prime_jennie_runtime.fast_loop.notifier import Notifier
     from prime_jennie_runtime.fast_loop.persistence import PostgresTradeRecorder
@@ -74,6 +78,8 @@ class ControlCommandConsumer:
         recorder: PostgresTradeRecorder | None = None,
         sheet_fetcher: Callable[[str], Awaitable[list[PositionSheet]]] | None = None,
         notifier: Notifier | None = None,
+        entry_executor: EntryExecutor | None = None,
+        now_fn: Callable[[], datetime] | None = None,
         max_confirm_retries: int = 5,
         confirm_interval: float = 2.0,
     ) -> None:
@@ -85,6 +91,9 @@ class ControlCommandConsumer:
         self._recorder = recorder
         self._sheet_fetcher = sheet_fetcher
         self._notifier = notifier
+        # approved_buy 집행용 — 자동 진입과 동일 경로 (체결 확인·tracker·기록·통지).
+        self._entry_executor = entry_executor
+        self._now = now_fn or (lambda: datetime.now(UTC))
         self._max_confirm_retries = max_confirm_retries
         self._confirm_interval = confirm_interval
         self._consumer = TypedStreamConsumer(
@@ -108,6 +117,8 @@ class ControlCommandConsumer:
             await self._apply_adopt_position(command)
         elif command.kind == "untrack_position":
             await self._apply_untrack_position(command)
+        elif command.kind == "approved_buy":
+            await self._apply_approved_buy(command)
         elif command.kind in ("manual_buy", "manual_sell", "manual_sellall"):
             await self._apply_manual_trade(command)
         else:
@@ -216,6 +227,115 @@ class ControlCommandConsumer:
             state.quantity,
             command.issued_by,
         )
+
+    async def _apply_approved_buy(self, command: ControlCommand) -> None:
+        """추천 수락 매수 — 2단계 확인을 거친 사람-승인 진입 (시나리오 B 설계).
+
+        **PAUSE 는 통과한다** — 2026-06-12 정책 결정: PAUSE 의 뜻은 "사람이
+        2단계 확인으로 승인하지 않은 진입은 전부 차단". 이 명령은 텔레그램
+        echo + "확인" 을 거친 뒤에만 발행되므로 통과가 정의에 맞다. STOP 은
+        여전히 전부 차단. DRYRUN 은 EntryExecutor 가 system_state 로 처리
+        (가짜 체결 통지). 거부 분기는 모두 텔레그램 통지 (조용한 실패 금지).
+
+        주문은 시트의 entry 형식과 무관하게 **시장가** — 사용자가 확인한
+        echo 가 시장가 기준 수량·금액이므로 집행도 같은 형식이어야 한다.
+        """
+        if self._entry_executor is None or self._tracker is None or self._sheet_fetcher is None:
+            logger.error("approved_buy received but deps missing (fast-loop 전용 명령)")
+            return
+        p = command.payload
+        sheet_id = str(p.get("sheet_id", ""))
+        ticker = str(p.get("ticker", ""))
+        try:
+            quantity = int(p.get("quantity", 0))
+        except (TypeError, ValueError):
+            quantity = 0
+        if not sheet_id or not ticker or quantity <= 0:
+            logger.warning("approved_buy invalid payload: %s", command.payload)
+            return
+
+        stopped = bool(await self._redis.get(STATE_KEY_STOP))
+        if stopped:
+            logger.warning("approved_buy blocked by STOP: payload=%s", command.payload)
+            await self._alert(
+                "warning",
+                "수락 매수 차단",
+                f"{ticker} {quantity}주 — STOP 상태라 실행하지 않았습니다.",
+            )
+            return
+
+        # 멱등 + 보유 중복 — 같은 시트 재전달이나 이미 추적 중인 종목 재수락 거부.
+        if self._tracker.get(sheet_id) is not None or self._tracker.sheet_ids_for(ticker):
+            logger.info("approved_buy duplicate sheet=%s ticker=%s — skip", sheet_id, ticker)
+            return
+
+        sheets = await self._sheet_fetcher(sheet_id)
+        if not sheets:
+            logger.error("approved_buy sheet not found: %s", sheet_id)
+            await self._alert(
+                "warning",
+                "수락 매수 실패",
+                f"{ticker} {quantity}주 — 추천 시트를 찾지 못해 실행하지 않았습니다.",
+            )
+            return
+        sheet = sheets[0]
+        if sheet.ticker != ticker:
+            logger.error(
+                "approved_buy ticker mismatch sheet=%s sheet_ticker=%s payload=%s — skip",
+                sheet_id,
+                sheet.ticker,
+                ticker,
+            )
+            return
+        if sheet.valid_until <= self._now():
+            logger.warning(
+                "approved_buy expired sheet=%s valid_until=%s", sheet_id, sheet.valid_until
+            )
+            await self._alert(
+                "warning",
+                "수락 매수 만료",
+                f"{ticker} — 추천 시트 유효기간이 지나 실행하지 않았습니다.",
+            )
+            return
+
+        order_sheet = sheet.model_copy(
+            update={"entry": sheet.entry.model_copy(update={"trigger": "market"})}
+        )
+        outcome = await self._entry_executor.execute(order_sheet, quantity=quantity)
+        logger.info(
+            "approved_buy sheet=%s ticker=%s qty=%d success=%s reason=%s by=%s",
+            sheet_id,
+            ticker,
+            quantity,
+            outcome.success,
+            outcome.reason,
+            command.issued_by,
+        )
+        # 체결 성공 통지는 EntryExecutor 의 entry_filled 가 담당. 실패만 보강.
+        if not outcome.success:
+            await self._alert(
+                "warning",
+                "수락 매수 미체결",
+                f"{ticker} {quantity}주 — {outcome.reason or '실패'} (주문 잔량은 취소됨)",
+            )
+
+    async def _alert(self, severity: str, title: str, body: str) -> None:
+        """텔레그램 보조 통지 — best-effort, notifier 미주입이면 로그만."""
+        if self._notifier is None:
+            return
+        try:
+            from prime_jennie_runtime.fast_loop.schemas import GenericAlertNotification
+
+            await self._notifier.emit(
+                GenericAlertNotification(
+                    severity=severity,  # type: ignore[arg-type]
+                    title=title,
+                    body=body,
+                    ts=datetime.now(UTC),
+                )
+            )
+        except Exception:
+            logger.exception("control alert emit failed: %s", title)
 
     async def _apply_manual_trade(self, command: ControlCommand) -> None:
         if self._kis is None:

@@ -679,6 +679,7 @@ async def run_slow_loop(
 
     published: list[str] = []
     rejected: list[str] = []
+    persisted_sheets = []  # 추천 발송용 — emit 여부 무관, DB 영속 성공한 시트
     for cand in validation.candidates:
         try:
             sheet, reject_reason = await comp.engine.build_sheet_with_reason(cand, inputs)
@@ -764,6 +765,7 @@ async def run_slow_loop(
             ticker=cand.ticker,
             sheet_id=sheet.sheet_id,
         )
+        persisted_sheets.append(sheet)
 
         if not emit_to_fast_loop:
             # control STOP/PAUSE — 시트는 DB 에 영속됐으나 fast_loop 로 stream
@@ -822,6 +824,24 @@ async def run_slow_loop(
             logger.exception(
                 "coordinator publish_event(SheetPublished) failed sheet=%s", sheet.sheet_id
             )
+
+    # --- 6. 추천 발송 (시나리오 B) — 시트 영속까지 끝난 뒤 best-effort ---
+    # STOP 중에는 발송하지 않는다 (수락해도 consumer 가 차단하므로 소음만 됨).
+    # PAUSE (사람-승인 운영) 가 주 대상이고, 자동매매 상태에서도 참고용 발송.
+    if persisted_sheets and control_reason != "control_stopped":
+        try:
+            from prime_jennie_runtime.slow_loop.recommendation import (
+                announce_recommendations,
+            )
+
+            await announce_recommendations(
+                comp.publisher.client,
+                comp.db_engine,
+                persisted_sheets,
+                as_of_dt=as_of_dt,
+            )
+        except Exception:
+            logger.exception("recommendation announce failed (best-effort)")
 
     return SlowLoopResult(
         macro_post=post,

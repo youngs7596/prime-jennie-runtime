@@ -22,6 +22,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
+from datetime import time as dt_time
 from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
@@ -32,6 +33,13 @@ from prime_jennie_runtime.infra.redis_streams import (
     TypedStreamPublisher,
 )
 
+from .acceptance import (
+    clear_pending_accept,
+    compute_accept_quantity,
+    load_pending_accept,
+    load_sheet,
+    store_pending_accept,
+)
 from .adoption import (
     ADOPT_FIXED_SL_PCT,
     ADOPT_HOLD_BDAYS,
@@ -67,6 +75,7 @@ from .control import (
     ControlCommand,
     ControlKind,
     rate_limit_key,
+    reco_key,
 )
 from .stock_resolver import resolve_stock
 
@@ -135,6 +144,7 @@ class CommandHandler:
             "/sell": self._handle_sell,
             "/sellall": self._handle_sellall,
             "/adopt": self._handle_adopt,
+            "/accept": self._handle_accept,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -667,6 +677,148 @@ class CommandHandler:
         cmd = await self._publish("manual_sellall", chat_id, reason="telegram_sellall")
         return CommandResult(
             reply="<b>전체 청산 요청 발행</b> (실행은 fast-loop 에서)", published=cmd
+        )
+
+    def _is_market_hours(self) -> bool:
+        """평일 09:00~15:20 KST — 수락 매수 실행 가능 창. 휴장일은 KIS 거부가 잡는다."""
+        now = self._now().astimezone(KST)
+        if now.weekday() >= 5:
+            return False
+        return dt_time(9, 0) <= now.time() <= dt_time(15, 20)
+
+    async def _handle_accept(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        """오늘의 추천 수락 매수 — 시나리오 B (2026-06-12 설계).
+
+        2단계 확인: ``/accept 번호`` 는 시장가 기준 수량·금액 echo 만,
+        ``/accept 번호 확인`` 이 실행. 확정 수량은 echo 시점 값을 Redis 에
+        10분 보존 — 확인 시점 재계산 없음 (사용자가 본 숫자 그대로 나간다).
+        발행되는 approved_buy 는 PAUSE 를 통과한다 (STOP 만 차단) — 2026-06-12
+        정책 결정: PAUSE = 무확인 진입 차단.
+        """
+        if await self._is_stopped():
+            return CommandResult(reply="긴급정지 상태입니다. 재개: <code>/resume 확인</code>")
+        parts = args.strip().split()
+        confirm = bool(parts) and parts[-1] == "확인"
+        if confirm:
+            parts = parts[:-1]
+        if len(parts) != 1 or not parts[0].isdigit():
+            return CommandResult(
+                reply=(
+                    "사용법: <code>/accept 번호</code> — 오늘의 추천 수락 매수\n"
+                    "수량·금액 해석을 본 뒤 끝에 <code>확인</code> 을 붙여 실행합니다."
+                )
+            )
+        number = parts[0]
+        if self._pool is None or self._kis is None:
+            return CommandResult(reply="DB/KIS 미연결 — /accept 를 처리할 수 없습니다.")
+
+        today = self._now().astimezone(KST).strftime("%Y-%m-%d")
+        sheet_id_raw = await self._redis.hget(reco_key(today), number)
+        if not sheet_id_raw:
+            return CommandResult(reply=f"오늘의 추천 {number}번이 없습니다.")
+        sheet_id = sheet_id_raw.decode() if isinstance(sheet_id_raw, bytes) else str(sheet_id_raw)
+
+        if confirm:
+            return await self._execute_accept(chat_id, number, sheet_id)
+
+        # --- echo 경로 — 해석 + 확정 수량 보존 ---
+        sheet = await load_sheet(self._pool, sheet_id)
+        if sheet is None:
+            return CommandResult(reply="추천 시트를 불러오지 못했습니다 (로그 확인)")
+        if sheet.valid_until <= self._now():
+            return CommandResult(reply=f"추천 {number}번은 유효기간이 지나 수락할 수 없습니다.")
+        existing = await find_tracked_sheet_for_ticker(self._redis, sheet.ticker)
+        if existing:
+            return CommandResult(
+                reply=f"{sheet.ticker} 는 이미 v3 가 추적 중입니다 (시트 {existing}). 수락 불가."
+            )
+        stock = await resolve_stock(self._pool, sheet.ticker)
+        name = stock[1] if stock else sheet.ticker
+        try:
+            portfolio = await self._kis.get_balance()
+            snap = await self._kis.get_snapshot(sheet.ticker)
+        except Exception:
+            logger.exception("/accept balance/snapshot failed ticker=%s", sheet.ticker)
+            return CommandResult(reply="잔고/시세 조회 실패 — 잠시 후 다시 시도하세요.")
+        if snap.price <= 0:
+            return CommandResult(reply=f"{name}({sheet.ticker}) 시세를 읽지 못했습니다.")
+        qty, _notional = compute_accept_quantity(
+            total_asset=portfolio.total_asset,
+            cash_balance=portfolio.cash_balance,
+            price=snap.price,
+            sheet=sheet,
+        )
+        if qty <= 0:
+            return CommandResult(reply="계산된 수량이 0주입니다 — 가용 현금이 부족합니다.")
+        rules_note = ""
+        try:
+            rules_by_sheet = await load_sheet_exit_rules(self._pool, [sheet_id])
+            rules = rules_by_sheet.get(sheet_id) or []
+            if rules:
+                lines = "\n".join(f"  · {format_exit_rule(r, snap.price)}" for r in rules)
+                rules_note = f"\n청산 룰 (현재가 기준 근사):\n{lines}"
+        except Exception:
+            logger.exception("/accept exit rules load failed sheet=%s", sheet_id)
+        await store_pending_accept(
+            self._redis,
+            chat_id,
+            number=number,
+            sheet_id=sheet_id,
+            ticker=sheet.ticker,
+            quantity=qty,
+        )
+        market_note = (
+            ""
+            if self._is_market_hours()
+            else "\n주의: 지금은 장 시간이 아닙니다 — 실행은 평일 09:00~15:20 에만 됩니다."
+        )
+        price = int(snap.price)
+        return CommandResult(
+            reply=(
+                f"<b>추천 {number}번 — {name}({sheet.ticker}) 시장가 매수</b>\n"
+                f"{qty}주 × 현재가 {price:,}원 ≈ {qty * price:,}원\n"
+                f"전략 {sheet.strategy_tag} · 시트 <code>{sheet_id}</code>"
+                f"{rules_note}{market_note}\n\n"
+                f"실행: <code>/accept {number} 확인</code> (10분 내)"
+            )
+        )
+
+    async def _execute_accept(self, chat_id: str, number: str, sheet_id: str) -> CommandResult:
+        """확인 경로 — echo 가 보존한 수량 그대로 approved_buy 발행."""
+        pending = await load_pending_accept(self._redis, chat_id)
+        if (
+            pending is None
+            or str(pending.get("number")) != number
+            or str(pending.get("sheet_id")) != sheet_id
+        ):
+            return CommandResult(
+                reply=(
+                    "확인할 수락 내역이 없습니다 (10분 만료 또는 번호 불일치).\n"
+                    f"다시: <code>/accept {number}</code>"
+                )
+            )
+        if not self._is_market_hours():
+            return CommandResult(reply="장 시간(평일 09:00~15:20)에만 실행할 수 있습니다.")
+        if not await self._check_manual_trade_limit(chat_id):
+            return CommandResult(reply="일일 수동매매 한도에 도달했습니다.")
+        qty = int(pending.get("quantity", 0))
+        ticker = str(pending.get("ticker", ""))
+        if qty <= 0 or not ticker:
+            await clear_pending_accept(self._redis, chat_id)
+            return CommandResult(reply="수락 내역이 손상되어 실행하지 않았습니다. 다시 시작하세요.")
+        cmd = await self._publish(
+            "approved_buy",
+            chat_id,
+            reason="accept_recommendation",
+            payload={"sheet_id": sheet_id, "ticker": ticker, "quantity": qty},
+        )
+        await clear_pending_accept(self._redis, chat_id)
+        return CommandResult(
+            reply=(
+                f"<b>수락 매수 발행</b> — {ticker} {qty}주 시장가\n"
+                "체결 또는 실패 통지가 곧 도착합니다."
+            ),
+            published=cmd,
         )
 
     async def _handle_adopt(self, args: str, chat_id: str = "", **_: object) -> CommandResult:

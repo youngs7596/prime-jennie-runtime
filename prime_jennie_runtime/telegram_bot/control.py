@@ -31,6 +31,10 @@ ControlKind = Literal[
     # 추적 종료 — 등록된 조건부 주문 취소 (사람-승인 매매 §4 조회·취소).
     # fast-loop 만 처리 — payload: sheet_id/ticker (ticker 는 오발행 검증용)
     "untrack_position",
+    # 추천 수락 매수 — echo + "확인" 2단계를 거친 사람-승인 진입 (시나리오 B).
+    # fast-loop 만 처리 — payload: sheet_id/ticker/quantity.
+    # 정책 (2026-06-12): STOP 차단, PAUSE 통과 — PAUSE 는 "무확인 진입 차단".
+    "approved_buy",
 ]
 
 
@@ -82,6 +86,18 @@ KEY_FORCED_LIQUIDATION = "forced_liquidation:stocks"
 KEY_MANUAL_TRADE_PREFIX = "telegram:manual_trades:"
 MANUAL_TRADE_DAILY_LIMIT = 20
 
+# 추천 번호 ↔ 시트 매핑 (시나리오 B) — slow-loop 가 쓰고 텔레그램 봇이 읽는다.
+# HSET {번호: sheet_id}, 당일 TTL. 키는 KST 날짜로 일 단위 분리.
+KEY_RECO_PREFIX = "v3:reco:"
+# 수락 확인 대기 상태 — echo 시점의 확정 수량을 "확인" 까지 보존 (10분 TTL).
+KEY_ACCEPT_PENDING_PREFIX = "v3:accept:pending:"
+ACCEPT_PENDING_TTL_SEC = 600
+
+
+def reco_key(kst_date_str: str) -> str:
+    """``v3:reco:YYYY-MM-DD`` — 추천 번호 매핑 키."""
+    return f"{KEY_RECO_PREFIX}{kst_date_str}"
+
 
 def rate_limit_key(chat_id: str) -> str:
     return f"telegram:rl:{chat_id}"
@@ -120,6 +136,7 @@ RESPONSE_HELP = (
     "/buy 종목 [수량] — 수동 매수\n"
     "/sell 종목 [수량|전량] — 수동 매도\n"
     "/sellall 확인 — 전량 청산\n"
+    "/accept 번호 — 오늘의 추천 수락 매수\n"
     "/adopt 종목 회복선% — 보유 편입 + 조건부 매도\n"
     "/adopt list — 조건부 주문 조회\n"
     "/adopt cancel 종목 — 조건부 주문 취소\n\n"
@@ -153,11 +170,14 @@ RESPONSE_LIQUIDATE_USAGE = (
 )
 
 __all__ = [
+    "ACCEPT_PENDING_TTL_SEC",
+    "KEY_ACCEPT_PENDING_PREFIX",
     "KEY_FORCED_LIQUIDATION",
     "KEY_MANUAL_TRADE_PREFIX",
     "KEY_MAX_BUY_COUNT",
     "KEY_MUTE_UNTIL",
     "KEY_PRICE_ALERTS",
+    "KEY_RECO_PREFIX",
     "KEY_WATCHLIST_MANUAL",
     "MANUAL_TRADE_DAILY_LIMIT",
     "RESPONSE_DRYRUN_USAGE",
@@ -177,4 +197,5 @@ __all__ = [
     "ControlCommand",
     "ControlKind",
     "rate_limit_key",
+    "reco_key",
 ]

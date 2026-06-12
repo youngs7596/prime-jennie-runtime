@@ -8,7 +8,7 @@
 | 키 | 의미 | Writer | Reader |
 |----|------|--------|--------|
 | `control.state:stop` | 긴급 정지. 모든 진입/청산 중단. `/resume` 으로만 해제. | `ControlCommandConsumer._emergency_stop` | `SystemState.snapshot`, `BalanceAwareSizer`, `EntryExecutor`, slow_loop pipeline, telegram `/status` |
-| `control.state:pause` | 일시 정지. 진입만 차단, 청산은 계속. value=pause_reason. | `ControlCommandConsumer._pause` / `_emergency_stop` | 동일 |
+| `control.state:pause` | 일시 정지. **무확인 진입 차단** — 자동 진입 + 무확인 수동 매수(manual_buy)를 막고, 청산과 2단계 확인을 거친 승인 매수(approved_buy, `/accept`)는 통과 (2026-06-12 시나리오 B 정책). value=pause_reason. | `ControlCommandConsumer._pause` / `_emergency_stop` | 동일 |
 | `control.state:dryrun` | DRY_RUN 플래그. 실 주문 금지 (시뮬레이션만). | `_set_dryrun` | `BalanceAwareSizer`, `EntryExecutor`, `_apply_manual_trade` |
 | `control.state:liquidate_armed` | 강제 청산 armed flag. | `_liquidate_arm` / `_liquidate_disarm` | TickLoop |
 

@@ -33,8 +33,9 @@ from prime_jennie_runtime.infra.llm_stats import record_llm_call
 
 logger = logging.getLogger(__name__)
 
-# 안전한 명령 — LLM 추출 후 즉시 실행 가능. /adopt 와 /resume 은 자체 확인
-# 단계가 있어 NL 라우팅이 echo/안내까지만 도달한다.
+# 안전한 명령 — LLM 추출 후 즉시 실행 가능. /adopt /accept /resume 은 자체
+# 확인 단계가 있어 NL 라우팅이 echo/안내까지만 도달한다 (확인 토큰은 아래
+# _strip_confirm_tokens 가 제거 — 실행은 직접 친 슬래시만).
 _SAFE_COMMANDS = {
     "/help",
     "/status",
@@ -56,6 +57,7 @@ _SAFE_COMMANDS = {
     "/dryrun",
     "/diagnose",
     "/adopt",
+    "/accept",
 }
 # 즉시 매매 명령 — LLM 추출하더라도 실행하지 않고 직접 입력 형식 안내만
 _DANGEROUS_COMMANDS = {"/buy", "/sell", "/sellall", "/stop", "/liquidate"}
@@ -100,6 +102,7 @@ _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 
 - /adopt <종목> <회복선%> — 보유 종목의 조건부 매도 등록
 - /adopt list — 등록된 조건부 주문 목록
 - /adopt cancel <종목> — 등록된 조건부 주문 취소
+- /accept <번호> — 오늘의 추천 수락 매수 (해석 확인 후 실행)
 - /help — 도움말
 
 조건부 매도 (/adopt) 규칙:
@@ -114,6 +117,12 @@ _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 
   → {"command": "/adopt", "args": "list"}
 - 등록된 조건부 주문을 취소·해제하려는 의도면
   → {"command": "/adopt", "args": "cancel <종목>"}
+
+추천 수락 (/accept) 규칙:
+- "1번 사줘", "추천 2번 수락", "오늘 추천 첫 번째 매수해줘" 처럼 오늘의 추천을
+  번호로 수락하려는 의도면 /accept 로 분류한다. args 는 번호 숫자 하나.
+- 예: "1번 사줘" → {"command": "/accept", "args": "1"}
+- 번호 없이 "추천 사줘" 면 command=null (어느 추천인지 모호).
 
 출력 형식 (반드시 JSON 객체):
 {"command": "/balance", "args": ""}

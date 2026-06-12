@@ -98,6 +98,8 @@ _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 
 - /dryrun on|off — 시뮬레이션
 - /diagnose — 시스템 진단
 - /adopt <종목> <회복선%> — 보유 종목의 조건부 매도 등록
+- /adopt list — 등록된 조건부 주문 목록
+- /adopt cancel <종목> — 등록된 조건부 주문 취소
 - /help — 도움말
 
 조건부 매도 (/adopt) 규칙:
@@ -108,6 +110,10 @@ _SYSTEM_PROMPT = """너는 한국어 평문 메시지를 텔레그램 슬래시 
   깊은) 임계 하나만 쓴다.
 - 예: "서진시스템이 양전하거나 -1% 미만으로 손실이 줄어들면 매도해줘"
   → {"command": "/adopt", "args": "서진시스템 -1"}
+- 등록된 조건부 주문(조건부 매도)을 보여달라는 의도면
+  → {"command": "/adopt", "args": "list"}
+- 등록된 조건부 주문을 취소·해제하려는 의도면
+  → {"command": "/adopt", "args": "cancel <종목>"}
 
 출력 형식 (반드시 JSON 객체):
 {"command": "/balance", "args": ""}

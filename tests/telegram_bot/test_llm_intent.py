@@ -200,3 +200,26 @@ async def test_classify_records_even_when_command_blocked():
     assert result.command is None  # 안전 가드 — 안내 회신으로 대체
     keys = await redis.keys("llm:stats:*:telegram_intent")
     assert len(keys) == 1  # 그래도 호출 자체는 stats 에 들어감
+
+
+@pytest.mark.asyncio
+async def test_adopt_cancel_routed_with_confirm_stripped():
+    """취소 의도 → /adopt cancel 라우팅. NL 경로의 "확인" 은 제거 — echo 까지만."""
+    transport = _mock_transport(
+        _ds_payload({"command": "/adopt", "args": "cancel 서진시스템 확인"})
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        router = IntentRouter(api_key="x", client=client)
+        result = await router.classify("서진시스템 조건부 매도 취소해줘")
+    assert result is not None
+    assert (result.command, result.args) == ("/adopt", "cancel 서진시스템")
+
+
+@pytest.mark.asyncio
+async def test_adopt_list_routed():
+    transport = _mock_transport(_ds_payload({"command": "/adopt", "args": "list"}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        router = IntentRouter(api_key="x", client=client)
+        result = await router.classify("등록된 조건부 주문 보여줘")
+    assert result is not None
+    assert (result.command, result.args) == ("/adopt", "list")

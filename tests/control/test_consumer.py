@@ -252,3 +252,61 @@ async def test_adopt_position_invalid_payload_skipped(fake_redis):
     c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
     await c.apply(_cmd("adopt_position", payload={"sheet_id": "", "ticker": "178320"}))
     assert tracker.active_sheet_ids() == []
+
+
+# ---------- untrack_position (조건부 주문 취소, 사람-승인 매매 §4) ----------
+
+
+def _adopt_payload(sheet_id="ps_x", ticker="178320") -> dict:
+    return {
+        "sheet_id": sheet_id,
+        "ticker": ticker,
+        "entry_price": 80800.0,
+        "quantity": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_untrack_position_closes_state_and_redis_key(fake_redis):
+    from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+
+    tracker = PositionTracker(fake_redis)
+    c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
+    await c.apply(_cmd("adopt_position", payload=_adopt_payload()))
+    assert tracker.get("ps_x") is not None
+
+    await c.apply(_cmd("untrack_position", payload={"sheet_id": "ps_x", "ticker": "178320"}))
+    assert tracker.get("ps_x") is None
+    assert tracker.sheet_ids_for("178320") == []
+    # Redis 영속 키까지 삭제 — fast-loop 재기동 시 되살아나지 않음
+    assert await fake_redis.get("position_state:ps_x") is None
+
+
+@pytest.mark.asyncio
+async def test_untrack_position_unknown_sheet_is_idempotent(fake_redis):
+    from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+
+    tracker = PositionTracker(fake_redis)
+    c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
+    # 없는 sheet_id — 재전달/이중 발행 시 no-op
+    await c.apply(_cmd("untrack_position", payload={"sheet_id": "ps_x", "ticker": "178320"}))
+    assert tracker.active_sheet_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_untrack_position_ticker_mismatch_keeps_state(fake_redis):
+    from prime_jennie_runtime.fast_loop.position_tracker import PositionTracker
+
+    tracker = PositionTracker(fake_redis)
+    c = ControlCommandConsumer(fake_redis, consumer_name="test", tracker=tracker)
+    await c.apply(_cmd("adopt_position", payload=_adopt_payload()))
+
+    # payload ticker 가 state 와 다르면 오발행 — 추적 유지
+    await c.apply(_cmd("untrack_position", payload={"sheet_id": "ps_x", "ticker": "005930"}))
+    assert tracker.get("ps_x") is not None
+
+
+@pytest.mark.asyncio
+async def test_untrack_position_without_tracker_is_noop(fake_redis):
+    c = ControlCommandConsumer(fake_redis, consumer_name="test")  # tracker 미주입
+    await c.apply(_cmd("untrack_position", payload={"sheet_id": "ps_x", "ticker": "178320"}))

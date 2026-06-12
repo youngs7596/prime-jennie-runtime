@@ -37,8 +37,12 @@ from .adoption import (
     ADOPT_HOLD_BDAYS,
     build_adoption_sheet,
     find_tracked_sheet_for_ticker,
+    find_tracked_state_for_ticker,
+    format_exit_rule,
+    load_sheet_exit_rules,
     parse_recovery_pct,
     persist_adoption_sheet,
+    scan_tracked_states,
 )
 from .control import (
     KEY_FORCED_LIQUIDATION,
@@ -666,12 +670,18 @@ class CommandHandler:
         )
 
     async def _handle_adopt(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
-        """실보유 종목 v3 편입 + 조건부 매도(recovery_exit) 등록.
+        """실보유 종목 v3 편입 + 조건부 매도(recovery_exit) 등록 / 조회 / 취소.
 
         2단계 확인: ``/adopt 종목 회복선%`` 는 해석 echo 만, 끝에 ``확인`` 을
         붙여야 실행 — 사람-승인 매매 설계 §2 시나리오 A 의 결정론 원형.
+        ``list`` / ``cancel`` 서브명령은 설계 §4 의 standing order 가시성 보장.
         """
         parts = args.strip().split()
+        sub = parts[0].lower() if parts else ""
+        if sub == "list":
+            return await self._handle_adopt_list()
+        if sub == "cancel":
+            return await self._handle_adopt_cancel(parts[1:], chat_id)
         confirm = bool(parts) and parts[-1] == "확인"
         if confirm:
             parts = parts[:-1]
@@ -680,7 +690,8 @@ class CommandHandler:
                 reply=(
                     "사용법: <code>/adopt 종목 회복선%</code>\n"
                     "예: <code>/adopt 서진시스템 -1</code> — 손익률 -1% 이상 회복 시 전량 매도\n"
-                    "해석을 본 뒤 끝에 <code>확인</code> 을 붙여 등록합니다."
+                    "해석을 본 뒤 끝에 <code>확인</code> 을 붙여 등록합니다.\n"
+                    "조회: <code>/adopt list</code> · 취소: <code>/adopt cancel 종목</code>"
                 )
             )
         term, pct_raw = parts
@@ -699,8 +710,7 @@ class CommandHandler:
         if existing:
             return CommandResult(
                 reply=(
-                    f"{name}({code}) 는 이미 v3 가 추적 중입니다 (시트 {existing}). "
-                    "중복 편입 불가."
+                    f"{name}({code}) 는 이미 v3 가 추적 중입니다 (시트 {existing}). 중복 편입 불가."
                 )
             )
 
@@ -761,6 +771,107 @@ class CommandHandler:
         )
         return CommandResult(
             reply=f"등록됨 — {summary}\n시트: <code>{sheet.sheet_id}</code>{stop_note}",
+            published=cmd,
+        )
+
+    async def _handle_adopt_list(self) -> CommandResult:
+        """등록된 조건부 주문 전체 조회 — tracker 가 추적 중인 시트 + exit 룰.
+
+        tracker 의 Redis 영속 state 가 "지금 fast-loop 이 평가하는 것" 의 정본,
+        룰 내용은 position_sheets 의 sheet_json 에서 보강. DB 미주입/조회 실패
+        시에도 종목·수량은 보여준다 (가시성이 우선).
+        """
+        states = await scan_tracked_states(self._redis)
+        if not states:
+            return CommandResult(reply="등록된 조건부 주문이 없습니다.")
+        rules_by_sheet: dict[str, list[dict]] = {}
+        if self._pool is not None:
+            try:
+                rules_by_sheet = await load_sheet_exit_rules(
+                    self._pool, [str(s["sheet_id"]) for s in states]
+                )
+            except Exception:
+                logger.exception("/adopt list sheet_json load failed")
+        lines = [f"<b>등록된 조건부 주문 ({len(states)}건)</b>"]
+        for st in states:
+            sheet_id = str(st.get("sheet_id", ""))
+            ticker = str(st.get("ticker", ""))
+            entry = float(st.get("entry_price") or 0)
+            qty = int(st.get("quantity") or 0)
+            stock = await resolve_stock(self._pool, ticker)
+            name = stock[1] if stock else ticker
+            lines.append(f"\n<b>{name}({ticker})</b> {qty}주 · 매입 {int(entry):,}원")
+            rules = rules_by_sheet.get(sheet_id)
+            if rules:
+                lines.extend(f"  · {format_exit_rule(r, entry)}" for r in rules)
+            else:
+                lines.append("  · 룰 정보 없음 (시트 조회 실패)")
+            lines.append(f"  시트 <code>{sheet_id}</code>")
+        lines.append("\n취소: <code>/adopt cancel 종목</code>")
+        return CommandResult(reply="\n".join(lines))
+
+    async def _handle_adopt_cancel(self, parts: list[str], chat_id: str) -> CommandResult:
+        """조건부 주문 취소 — tracker 추적 종료 (등록의 역방향, 2단계 확인).
+
+        실제 제거는 fast-loop 의 ControlCommandConsumer 가 in-memory tracker 에
+        적용 — telegram-bot 이 Redis 키만 지우면 fast-loop 메모리에 남아 다음
+        persist 때 되살아난다 (adopt 와 같은 이유로 control 명령 경유).
+        """
+        confirm = bool(parts) and parts[-1] == "확인"
+        if confirm:
+            parts = parts[:-1]
+        if len(parts) != 1:
+            return CommandResult(
+                reply=(
+                    "사용법: <code>/adopt cancel 종목</code>\n"
+                    "해석을 본 뒤 끝에 <code>확인</code> 을 붙여 취소합니다."
+                )
+            )
+        term = parts[0]
+        stock = await resolve_stock(self._pool, term)
+        if stock is None:
+            return CommandResult(reply=f"종목을 찾을 수 없습니다: {term}")
+        code, name = stock
+        state = await find_tracked_state_for_ticker(self._redis, code)
+        if state is None:
+            return CommandResult(
+                reply=(
+                    f"{name}({code}) 는 v3 가 추적 중이 아닙니다. 조회: <code>/adopt list</code>"
+                )
+            )
+        sheet_id = str(state["sheet_id"])
+        entry = float(state.get("entry_price") or 0)
+        qty = int(state.get("quantity") or 0)
+        rule_lines: list[str] = []
+        if self._pool is not None:
+            try:
+                rules_by_sheet = await load_sheet_exit_rules(self._pool, [sheet_id])
+                rule_lines = [
+                    f"  · {format_exit_rule(r, entry)}" for r in rules_by_sheet.get(sheet_id, [])
+                ]
+            except Exception:
+                logger.exception("/adopt cancel sheet_json load failed sheet=%s", sheet_id)
+        summary = (
+            f"<b>{name}({code}) {qty}주 — 조건부 주문 취소</b>\n"
+            + ("해제되는 룰:\n" + "\n".join(rule_lines) + "\n" if rule_lines else "")
+            + "취소하면 v3 청산 관리에서 빠집니다 — 조건부 매도·손절·시간 종료가 "
+            "모두 해제되고, 이후 매도는 <code>/sell</code> 수동뿐입니다."
+        )
+        if not confirm:
+            return CommandResult(
+                reply=f"{summary}\n\n취소 실행: <code>/adopt cancel {term} 확인</code>"
+            )
+        cmd = await self._publish(
+            "untrack_position",
+            chat_id,
+            reason="manual_adopt_cancel",
+            payload={"sheet_id": sheet_id, "ticker": code},
+        )
+        return CommandResult(
+            reply=(
+                f"취소 발행됨 — {name}({code}) 시트 <code>{sheet_id}</code>\n"
+                "반영 확인: 잠시 후 <code>/adopt list</code>"
+            ),
             published=cmd,
         )
 

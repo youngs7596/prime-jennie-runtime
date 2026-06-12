@@ -28,6 +28,9 @@ ControlKind = Literal[
     # 실보유 종목을 v3 PositionTracker 관리에 편입 (사람-승인 매매 §3-2).
     # fast-loop 만 처리 — payload: sheet_id/ticker/entry_price/quantity/entered_at
     "adopt_position",
+    # 추적 종료 — 등록된 조건부 주문 취소 (사람-승인 매매 §4 조회·취소).
+    # fast-loop 만 처리 — payload: sheet_id/ticker (ticker 는 오발행 검증용)
+    "untrack_position",
 ]
 
 
@@ -117,7 +120,9 @@ RESPONSE_HELP = (
     "/buy 종목 [수량] — 수동 매수\n"
     "/sell 종목 [수량|전량] — 수동 매도\n"
     "/sellall 확인 — 전량 청산\n"
-    "/adopt 종목 회복선% — 보유 편입 + 조건부 매도\n\n"
+    "/adopt 종목 회복선% — 보유 편입 + 조건부 매도\n"
+    "/adopt list — 조건부 주문 조회\n"
+    "/adopt cancel 종목 — 조건부 주문 취소\n\n"
     "<b>강제 청산</b>\n"
     "/liquidate add|remove|list|clear|arm|disarm|status\n\n"
     "<b>진단</b>\n"

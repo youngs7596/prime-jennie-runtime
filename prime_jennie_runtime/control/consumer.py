@@ -106,6 +106,8 @@ class ControlCommandConsumer:
         """단일 명령 적용 — 테스트 / consumer 양쪽에서 직접 호출 가능."""
         if command.kind == "adopt_position":
             await self._apply_adopt_position(command)
+        elif command.kind == "untrack_position":
+            await self._apply_untrack_position(command)
         elif command.kind in ("manual_buy", "manual_sell", "manual_sellall"):
             await self._apply_manual_trade(command)
         else:
@@ -174,6 +176,44 @@ class ControlCommandConsumer:
             ticker,
             entry_price,
             quantity,
+            command.issued_by,
+        )
+
+    async def _apply_untrack_position(self, command: ControlCommand) -> None:
+        """조건부 주문 취소 — tracker 추적 종료 (사람-승인 매매 §4 조회·취소).
+
+        adopt_position 의 역방향. tracker.close 가 in-memory 제거 + Redis 키
+        삭제까지 하므로 fast-loop 재기동 후에도 되살아나지 않는다. 재전달 멱등
+        (이미 없는 sheet_id 는 no-op). 매매가 아니므로 STOP/PAUSE 무관.
+        payload 의 ticker 는 검증용 — state 와 어긋나면 오발행으로 보고 거부.
+        """
+        if self._tracker is None:
+            logger.error("untrack_position received but no tracker (fast-loop 전용 명령)")
+            return
+        p = command.payload
+        sheet_id = str(p.get("sheet_id", ""))
+        ticker = str(p.get("ticker", ""))
+        if not sheet_id:
+            logger.warning("untrack_position invalid payload: %s", command.payload)
+            return
+        state = self._tracker.get(sheet_id)
+        if state is None:
+            logger.info("untrack_position unknown sheet_id=%s — skip (멱등)", sheet_id)
+            return
+        if ticker and state.ticker != ticker:
+            logger.error(
+                "untrack_position ticker mismatch sheet=%s state=%s payload=%s — skip",
+                sheet_id,
+                state.ticker,
+                ticker,
+            )
+            return
+        await self._tracker.close(sheet_id)
+        logger.info(
+            "untrack_position closed sheet=%s ticker=%s qty=%d by=%s",
+            sheet_id,
+            state.ticker,
+            state.quantity,
             command.issued_by,
         )
 

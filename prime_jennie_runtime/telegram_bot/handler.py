@@ -692,6 +692,9 @@ class CommandHandler:
         2단계 확인: ``/accept 번호`` 는 시장가 기준 수량·금액 echo 만,
         ``/accept 번호 확인`` 이 실행. 확정 수량은 echo 시점 값을 Redis 에
         10분 보존 — 확인 시점 재계산 없음 (사용자가 본 숫자 그대로 나간다).
+        ``/accept 번호 수량`` 처럼 수량을 붙이면 시트 비중 계산을 그 주식 수로
+        제한한다 (상한 역할 — 계산값보다 크면 계산값으로 묶임). 실 1주 같은
+        소량 테스트용. 수량은 직접 친 슬래시에서만 — 자연어 경로는 번호만.
         발행되는 approved_buy 는 PAUSE 를 통과한다 (STOP 만 차단) — 2026-06-12
         정책 결정: PAUSE = 무확인 진입 차단.
         """
@@ -701,14 +704,20 @@ class CommandHandler:
         confirm = bool(parts) and parts[-1] == "확인"
         if confirm:
             parts = parts[:-1]
-        if len(parts) != 1 or not parts[0].isdigit():
+        # parts = [번호] 또는 [번호, 수량]. 수량은 선택 — 적으면 시트 비중 계산을
+        # 덮어쓰되 그 값을 넘지는 않는 상한으로 동작한다 (실 1주 같은 소량 테스트용).
+        if not (1 <= len(parts) <= 2) or not all(p.isdigit() for p in parts):
             return CommandResult(
                 reply=(
-                    "사용법: <code>/accept 번호</code> — 오늘의 추천 수락 매수\n"
+                    "사용법: <code>/accept 번호 [수량]</code> — 오늘의 추천 수락 매수\n"
+                    "수량을 적으면 그 주식 수로 제한합니다 (생략 시 시트 비중대로).\n"
                     "수량·금액 해석을 본 뒤 끝에 <code>확인</code> 을 붙여 실행합니다."
                 )
             )
         number = parts[0]
+        override_qty = int(parts[1]) if len(parts) == 2 else None
+        if override_qty is not None and override_qty <= 0:
+            return CommandResult(reply="수량은 1주 이상이어야 합니다.")
         if self._pool is None or self._kis is None:
             return CommandResult(reply="DB/KIS 미연결 — /accept 를 처리할 수 없습니다.")
 
@@ -748,6 +757,14 @@ class CommandHandler:
             price=snap.price,
             sheet=sheet,
         )
+        override_note = ""
+        if override_qty is not None:
+            if override_qty > qty:
+                # 지정 수량이 비중 계산보다 크면 계산값으로 묶는다 (상한 역할).
+                override_note = f" · 지정 {override_qty}주 → 비중 상한 {qty}주로 제한"
+            else:
+                override_note = f" · 지정 {override_qty}주 적용"
+                qty = override_qty
         if qty <= 0:
             return CommandResult(reply="계산된 수량이 0주입니다 — 가용 현금이 부족합니다.")
         rules_note = ""
@@ -776,7 +793,7 @@ class CommandHandler:
         return CommandResult(
             reply=(
                 f"<b>추천 {number}번 — {name}({sheet.ticker}) 시장가 매수</b>\n"
-                f"{qty}주 × 현재가 {price:,}원 ≈ {qty * price:,}원\n"
+                f"{qty}주 × 현재가 {price:,}원 ≈ {qty * price:,}원{override_note}\n"
                 f"전략 {sheet.strategy_tag} · 시트 <code>{sheet_id}</code>"
                 f"{rules_note}{market_note}\n\n"
                 f"실행: <code>/accept {number} 확인</code> (10분 내)"

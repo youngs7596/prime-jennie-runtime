@@ -201,6 +201,73 @@ async def test_accept_echo_stores_pending_and_replies_quantity():
 
 
 @pytest.mark.asyncio
+async def test_accept_echo_with_quantity_override_limits_to_given_shares():
+    """`/accept 번호 수량` — 비중 계산(14주)보다 작은 지정 수량은 그 값으로 제한."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await _seed_reco(redis)
+        sheet = _reco_sheet()
+        handler = _handler(redis, pool=_pool_with_sheet(sheet), kis=_FakeKis())
+        result = await handler.process_command("/accept", "1 1", 1001)
+        assert "1주 × 현재가" in result.reply
+        assert "지정 1주 적용" in result.reply
+        assert result.published is None
+        pending = await load_pending_accept(redis, "1001")
+        assert pending["quantity"] == 1
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_accept_echo_quantity_override_caps_at_sizing():
+    """지정 수량이 비중 상한(14주)보다 크면 상한으로 묶이고 안내한다."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await _seed_reco(redis)
+        sheet = _reco_sheet()
+        handler = _handler(redis, pool=_pool_with_sheet(sheet), kis=_FakeKis())
+        result = await handler.process_command("/accept", "1 100", 1001)
+        assert "14주 × 현재가" in result.reply
+        assert "비중 상한 14주로 제한" in result.reply
+        pending = await load_pending_accept(redis, "1001")
+        assert pending["quantity"] == 14
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_accept_quantity_override_confirm_publishes_given_shares():
+    """echo 에서 1주로 제한한 뒤 확인하면 그 1주로 approved_buy 발행."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await redis.set(STATE_KEY_PAUSE, b"exit_only_human_approved_v1")
+        await _seed_reco(redis)
+        sheet = _reco_sheet()
+        handler = _handler(redis, pool=_pool_with_sheet(sheet), kis=_FakeKis())
+        await handler.process_command("/accept", "1 1", 1001)
+        result = await handler.process_command("/accept", "1 확인", 1001)
+        assert result.published is not None
+        assert result.published.kind == "approved_buy"
+        assert result.published.payload["quantity"] == 1
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_accept_quantity_override_rejects_zero():
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+    try:
+        await _seed_reco(redis)
+        sheet = _reco_sheet()
+        handler = _handler(redis, pool=_pool_with_sheet(sheet), kis=_FakeKis())
+        result = await handler.process_command("/accept", "1 0", 1001)
+        assert "1주 이상" in result.reply
+        assert result.published is None
+    finally:
+        await redis.aclose()
+
+
+@pytest.mark.asyncio
 async def test_accept_confirm_without_pending_guides():
     redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
     try:

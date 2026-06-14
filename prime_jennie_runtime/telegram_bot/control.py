@@ -136,7 +136,7 @@ RESPONSE_HELP = (
     "/buy 종목 [수량] — 수동 매수\n"
     "/sell 종목 [수량|전량] — 수동 매도\n"
     "/sellall 확인 — 전량 청산\n"
-    "/accept 번호 — 오늘의 추천 수락 매수\n"
+    "/accept 번호 [수량] — 오늘의 추천 수락 매수 (수량 지정 시 그 주식 수로 제한)\n"
     "/adopt 종목 회복선% — 보유 편입 + 조건부 매도\n"
     "/adopt list — 조건부 주문 조회\n"
     "/adopt cancel 종목 — 조건부 주문 취소\n\n"

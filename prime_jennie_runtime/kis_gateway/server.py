@@ -172,6 +172,7 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
         nonlocal state
         redis_client = None
         pg_pool = None
+        realtime_buffer = None
         if state is None:
             cfg = config or KISConfig()
             # paper/real 모드 안전장치 — real 모드 시 KIS_REAL_CONFIRMED 누락이면 RuntimeError.
@@ -239,6 +240,18 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                     "price_repo init failed — daily/minute prices will not have PG fallback"
                 )
 
+            # 실시간 체결·호가 적재 버퍼 — 게이트웨이가 pg_pool 로 직접 기록.
+            if pg_pool is not None and isinstance(streamer, KISWebSocketStreamer):
+                try:
+                    from .realtime_persist import RealtimeBuffer
+
+                    realtime_buffer = RealtimeBuffer(pg_pool)
+                    streamer.attach_sink(realtime_buffer)
+                    await realtime_buffer.start()
+                    logger.info("RealtimeBuffer wired — 체결·호가 적재 활성")
+                except Exception:
+                    logger.exception("realtime buffer init failed — 실시간 적재 비활성")
+
             state = GatewayState(
                 config=cfg,
                 kis_api=api,
@@ -255,6 +268,8 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                 await state.streamer.stop()
             if state is not None:
                 await state.kis_api.close()
+            if realtime_buffer is not None:
+                await realtime_buffer.stop()
             if redis_client is not None:
                 await redis_client.aclose()
             if pg_pool is not None:

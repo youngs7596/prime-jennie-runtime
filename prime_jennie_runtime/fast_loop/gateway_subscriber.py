@@ -30,8 +30,13 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# KIS WebSocket 한 연결당 등록 가능한 종목 수 상한.
+# KIS WebSocket 한 연결당 등록 가능한 건수 상한.
 KIS_WS_SUBSCRIPTION_LIMIT = 41
+
+# 종목마다 체결(H0STCNT0)+호가(H0STASP0) 두 채널을 등록하므로 등록 2건/종목.
+# 실효 종목 수는 한도의 절반.
+_REGISTRATIONS_PER_CODE = 2
+MAX_SUBSCRIPTION_CODES = KIS_WS_SUBSCRIPTION_LIMIT // _REGISTRATIONS_PER_CODE
 
 # 측정 윈도우가 열려있는 시트의 ticker — jobs/minute_chart.py 와 같은 기준.
 # 최신 시트 우선으로 정렬해 한도 초과 시 오래된 시트부터 떨어져 나가게 한다.
@@ -51,7 +56,8 @@ _PENDING_SHEET_TICKERS_SQL = """
 async def load_subscription_codes(pool: asyncpg.Pool) -> list[str]:
     """positions + 측정 대기 시트 ticker 에서 구독 대상 종목 코드를 수집.
 
-    KIS WebSocket 등록 한도 (41) 를 넘으면 positions 전체 + 최신 시트 순으로 자른다.
+    체결+호가 두 채널이라 실효 종목 한도 (20) 를 넘으면 positions 전체 + 최신 시트
+    순으로 자른다.
     """
     async with pool.acquire() as conn:
         pos_rows = await conn.fetch("SELECT stock_code FROM positions")
@@ -66,9 +72,11 @@ async def load_subscription_codes(pool: asyncpg.Pool) -> list[str]:
     for code in position_codes + sheet_codes:
         if code in seen:
             continue
-        if len(codes) >= KIS_WS_SUBSCRIPTION_LIMIT:
+        if len(codes) >= MAX_SUBSCRIPTION_CODES:
             logger.warning(
-                "subscription codes truncated at KIS WS limit (%d) — dropped=%d",
+                "sub codes truncated at %d (등록 %d건/종목, KIS 한도 %d) dropped=%d",
+                MAX_SUBSCRIPTION_CODES,
+                _REGISTRATIONS_PER_CODE,
                 KIS_WS_SUBSCRIPTION_LIMIT,
                 len(set(position_codes + sheet_codes)) - len(codes),
             )
@@ -120,4 +128,9 @@ async def subscribe_on_startup(
     return {"codes": codes, "response": body}
 
 
-__all__ = ["load_subscription_codes", "subscribe_on_startup", "KIS_WS_SUBSCRIPTION_LIMIT"]
+__all__ = [
+    "load_subscription_codes",
+    "subscribe_on_startup",
+    "KIS_WS_SUBSCRIPTION_LIMIT",
+    "MAX_SUBSCRIPTION_CODES",
+]

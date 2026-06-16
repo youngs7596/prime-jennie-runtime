@@ -18,6 +18,7 @@ import contextlib
 import json
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -38,13 +39,30 @@ WS_URL_PAPER = "ws://ops.koreainvestment.com:31000"
 # Redis Stream
 PRICE_STREAM_MAXLEN = 10_000
 
-# KIS TR ID for real-time stock execution price
+# KIS TR ID — 실시간 체결(H0STCNT0) + 실시간 호가(H0STASP0)
 TR_ID_STOCK_EXEC = "H0STCNT0"
+TR_ID_STOCK_ASKP = "H0STASP0"
 
 # Backoff constants
 _BACKOFF_INITIAL = 60
 _BACKOFF_MAX = 600
 _STABLE_CONNECTION_SECS = 30
+
+_KST = timezone(timedelta(hours=9))
+
+
+def _to_int(s: str) -> int | None:
+    try:
+        return int(float(s))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(s: str) -> float | None:
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
 
 
 class KISWebSocketStreamer:
@@ -62,6 +80,7 @@ class KISWebSocketStreamer:
         is_paper: bool = False,
         calendar: MarketCalendar | None = None,
         ws_connect: Any = None,
+        sink: Any = None,
     ):
         self._redis = redis_client
         self._app_key = app_key
@@ -70,6 +89,9 @@ class KISWebSocketStreamer:
         self._calendar = calendar or MarketCalendar()
         # ws_connect 은 테스트용 — websockets.connect 대체 가능
         self._ws_connect = ws_connect or websockets.connect
+        # sink 가 있으면 체결·호가를 적재 버퍼로 흘리고 호가 채널도 구독한다.
+        self._sink = sink
+        self._subscribe_orderbook = sink is not None
 
         self._subscription_codes: set[str] = set()
         self._ws: Any = None
@@ -91,6 +113,11 @@ class KISWebSocketStreamer:
     @property
     def subscribed_codes(self) -> list[str]:
         return sorted(self._subscription_codes)
+
+    def attach_sink(self, sink: Any) -> None:
+        """적재 버퍼 연결. lifespan 에서 pg_pool 준비 후 호출. 호가 구독을 켠다."""
+        self._sink = sink
+        self._subscribe_orderbook = True
 
     async def get_approval_key(self, base_url: str) -> str:
         """WebSocket approval key 발급 (캐싱 30초)."""
@@ -183,31 +210,38 @@ class KISWebSocketStreamer:
         logger.info("Streamer stopped")
 
     async def _send_subscribe(self, ws: Any, codes: list[str], tr_type: str = "1") -> None:
-        """종목별 구독/해제 요청 전송. tr_type '1'=구독, '2'=해제."""
+        """종목별 구독/해제 요청 전송. tr_type '1'=구독, '2'=해제.
+
+        sink 가 연결돼 있으면 종목마다 체결+호가 두 채널을 등록한다 (KIS 등록 2건/종목).
+        """
+        tr_ids = [TR_ID_STOCK_EXEC]
+        if self._subscribe_orderbook:
+            tr_ids.append(TR_ID_STOCK_ASKP)
         for code in codes:
             if not self._is_running:
                 break
-            msg = json.dumps(
-                {
-                    "header": {
-                        "approval_key": self._approval_key,
-                        "custtype": "P",
-                        "tr_type": tr_type,
-                        "content-type": "utf-8",
-                    },
-                    "body": {
-                        "input": {
-                            "tr_id": TR_ID_STOCK_EXEC,
-                            "tr_key": code,
-                        }
-                    },
-                }
-            )
-            try:
-                await ws.send(msg)
-            except Exception:
-                break
-            await asyncio.sleep(0.05)  # 50ms 간격
+            for tr_id in tr_ids:
+                msg = json.dumps(
+                    {
+                        "header": {
+                            "approval_key": self._approval_key,
+                            "custtype": "P",
+                            "tr_type": tr_type,
+                            "content-type": "utf-8",
+                        },
+                        "body": {
+                            "input": {
+                                "tr_id": tr_id,
+                                "tr_key": code,
+                            }
+                        },
+                    }
+                )
+                try:
+                    await ws.send(msg)
+                except Exception:
+                    return
+                await asyncio.sleep(0.05)  # 50ms 간격
 
     async def _ws_loop(self, approval_key: str) -> None:
         """WebSocket 메인 루프 (장외 시간 대기 + exponential backoff)."""
@@ -293,16 +327,22 @@ class KISWebSocketStreamer:
         if message[0] not in ("0", "1"):
             return
 
+        parts = message.split("|")
+        if len(parts) < 4:
+            return
+        tr_id = parts[1]
+        fields = parts[3].split("^")
+
+        if tr_id == TR_ID_STOCK_EXEC:
+            await self._handle_tick(fields)
+        elif tr_id == TR_ID_STOCK_ASKP:
+            self._handle_orderbook(fields)
+
+    async def _handle_tick(self, fields: list[str]) -> None:
+        """체결(H0STCNT0) → 기존 Redis 발행 (fast_loop) + 적재 sink push."""
+        if len(fields) < 6:
+            return
         try:
-            parts = message.split("|")
-            if len(parts) < 4:
-                return
-
-            data_part = parts[3]
-            fields = data_part.split("^")
-            if len(fields) < 6:
-                return
-
             stock_code = fields[0]
             price = fields[2]
             high = fields[5]
@@ -326,6 +366,63 @@ class KISWebSocketStreamer:
             )
         except (IndexError, ValueError) as e:
             logger.debug("Tick parse error: %s", e)
+
+        if self._sink is not None:
+            self._push_tick_record(fields)
+
+    def _push_tick_record(self, fields: list[str]) -> None:
+        """체결 레코드를 적재 sink 로. 인덱스는 KIS H0STCNT0 표준 (스모크 확인 항목)."""
+        if len(fields) < 14:
+            return
+        price = _to_int(fields[2])
+        volume = _to_int(fields[12])  # 이 틱 체결량 (CNTG_VOL)
+        if price is None or volume is None:
+            return
+        record = (
+            fields[0],
+            self._build_ts(fields[1]),
+            price,
+            volume,
+            _to_int(fields[13]),  # 누적거래량
+            _to_int(fields[21]) if len(fields) > 21 else None,  # 체결구분
+            _to_float(fields[18]) if len(fields) > 18 else None,  # 체결강도
+            _to_int(fields[10]),  # 최우선 매도호가
+            _to_int(fields[11]),  # 최우선 매수호가
+        )
+        self._sink.add_tick(record)
+
+    def _handle_orderbook(self, fields: list[str]) -> None:
+        """호가(H0STASP0) → 적재 sink. 인덱스는 KIS H0STASP0 표준 (스모크 확인 항목)."""
+        if self._sink is None or len(fields) < 45:
+            return
+
+        def _levels(start: int) -> list[int]:
+            return [(_to_int(fields[start + i]) or 0) for i in range(10)]
+
+        record = (
+            fields[0],
+            self._build_ts(fields[1]),
+            _levels(3),  # 매도호가 1~10
+            _levels(23),  # 매도호가 잔량 1~10
+            _levels(13),  # 매수호가 1~10
+            _levels(33),  # 매수호가 잔량 1~10
+            _to_int(fields[43]),  # 총 매도호가 잔량
+            _to_int(fields[44]),  # 총 매수호가 잔량
+        )
+        self._sink.add_orderbook(record)
+
+    def _build_ts(self, hhmmss: str) -> datetime:
+        """KIS 시각(HHMMSS) + 당일(KST) → tz-aware datetime. 파싱 실패 시 현재 시각."""
+        now = datetime.now(_KST)
+        try:
+            return now.replace(
+                hour=int(hhmmss[0:2]),
+                minute=int(hhmmss[2:4]),
+                second=int(hhmmss[4:6]),
+                microsecond=0,
+            )
+        except (ValueError, IndexError):
+            return now.replace(microsecond=0)
 
     def get_status(self) -> dict[str, Any]:
         """상태 조회."""

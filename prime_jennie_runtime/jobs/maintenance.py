@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_CLEANUP_DAYS = 365
+# 실시간 체결·호가는 빠르게 커지므로 별도 보존 일수. Pre-flight 틱 양 실측 후 조정.
+DEFAULT_REALTIME_CLEANUP_DAYS = 90
 
 # v2 `/jobs/contract-smoke-test` 임계값/범위 — 값을 다시 튜닝하지 말 것.
 CONTRACT_SMOKE_SENTINEL = "005930"  # 삼성전자
@@ -46,30 +48,52 @@ class ContractSmokeError(RuntimeError):
     """크롤러 contract 가 깨졌을 때 raise — scheduler runner 가 실패로 기록."""
 
 
+def _deleted_count(result: Any) -> int:
+    if isinstance(result, str) and result.startswith("DELETE "):
+        try:
+            return int(result.split(" ", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+    return 0
+
+
 async def cleanup_old_data(
     pool: Any,
     *,
     days: int = DEFAULT_CLEANUP_DAYS,
+    realtime_days: int = DEFAULT_REALTIME_CLEANUP_DAYS,
 ) -> None:
-    """v2 `/jobs/cleanup-old-data` 포팅.
+    """v2 `/jobs/cleanup-old-data` 포팅 + 실시간 체결·호가 보존 정리.
 
     v2 는 `stock_daily_prices` 를 365 일 기준으로 청소. v3 에서는 동일 로직을
     `daily_prices` (003) 에 적용한다. v2 가 날짜만 기준으로 삼았듯 v3 도
     `price_date < cutoff` 단일 조건만 사용.
+
+    실시간 체결·호가(024) 는 빠르게 커지므로 `realtime_days` (기본 90) 로 별도 정리.
     """
     cutoff = date.today() - timedelta(days=days)
+    rt_cutoff = date.today() - timedelta(days=realtime_days)
     async with pool.acquire() as conn:
-        result = await conn.execute(
+        daily_res = await conn.execute(
             "DELETE FROM daily_prices WHERE price_date < $1",
             cutoff,
         )
-    deleted = 0
-    if isinstance(result, str) and result.startswith("DELETE "):
-        try:
-            deleted = int(result.split(" ", 1)[1])
-        except (IndexError, ValueError):
-            deleted = 0
-    logger.info("cleanup_old_data: cutoff=%s deleted=%d", cutoff.isoformat(), deleted)
+        ticks_res = await conn.execute(
+            "DELETE FROM realtime_ticks WHERE ts < $1",
+            rt_cutoff,
+        )
+        ob_res = await conn.execute(
+            "DELETE FROM realtime_orderbook WHERE ts < $1",
+            rt_cutoff,
+        )
+    logger.info(
+        "cleanup_old_data: daily<%s del=%d | realtime<%s ticks=%d orderbook=%d",
+        cutoff.isoformat(),
+        _deleted_count(daily_res),
+        rt_cutoff.isoformat(),
+        _deleted_count(ticks_res),
+        _deleted_count(ob_res),
+    )
 
 
 async def update_naver_sectors(

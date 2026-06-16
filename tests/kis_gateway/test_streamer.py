@@ -14,7 +14,11 @@ import pytest
 
 from prime_jennie_runtime.infra.redis_streams import STREAM_PRICES
 from prime_jennie_runtime.kis_gateway.market_hours import MarketCalendar
-from prime_jennie_runtime.kis_gateway.streamer import KISWebSocketStreamer
+from prime_jennie_runtime.kis_gateway.streamer import (
+    TR_ID_STOCK_ASKP,
+    TR_ID_STOCK_EXEC,
+    KISWebSocketStreamer,
+)
 
 _KST = timezone(timedelta(hours=9))
 
@@ -205,6 +209,137 @@ async def test_stop_flips_flag_and_cancels_task(fake_redis):
     await streamer.stop()
     assert streamer._is_running is False
     assert streamer._task is None
+
+
+class _FakeSink:
+    """add_tick / add_orderbook 호출을 기록하는 가짜 적재 버퍼."""
+
+    def __init__(self):
+        self.ticks: list[tuple] = []
+        self.orderbook: list[tuple] = []
+
+    def add_tick(self, record: tuple) -> None:
+        self.ticks.append(record)
+
+    def add_orderbook(self, record: tuple) -> None:
+        self.orderbook.append(record)
+
+
+async def test_handle_tick_pushes_record_to_sink(fake_redis):
+    sink = _FakeSink()
+    streamer = KISWebSocketStreamer(
+        redis_client=fake_redis, app_key="k", app_secret="s", is_paper=True, sink=sink
+    )
+    # H0STCNT0: [12]=이 틱 체결량 [13]=누적 [18]=체결강도 [21]=체결구분
+    fields = [
+        "005930",
+        "093015",
+        "71200",
+        "2",
+        "100",
+        "0.14",
+        "71100",
+        "70800",
+        "71500",
+        "70500",
+        "71210",
+        "71190",
+        "13",
+        "123456",
+        "9000000",
+        "5",
+        "6",
+        "1",
+        "112.5",
+        "500",
+        "600",
+        "1",
+        "0.5",
+    ]
+    msg = "0|H0STCNT0|001|" + "^".join(fields)
+
+    await streamer._handle_message(ws=FakeWebSocket([]), message=msg)
+
+    # 기존 Redis 발행은 그대로
+    entries = await fake_redis.xrange(STREAM_PRICES, "-", "+")
+    assert len(entries) == 1
+    # 적재 sink 에 풍부한 레코드 push
+    assert len(sink.ticks) == 1
+    rec = sink.ticks[0]
+    assert rec[0] == "005930"
+    assert rec[2] == 71200  # price
+    assert rec[3] == 13  # 이 틱 체결량
+    assert rec[4] == 123456  # 누적
+    assert rec[5] == 1  # 체결구분
+    assert rec[6] == 112.5  # 체결강도
+    assert rec[7] == 71210  # best_ask
+    assert rec[8] == 71190  # best_bid
+    assert rec[1].hour == 9 and rec[1].minute == 30 and rec[1].second == 15
+
+
+async def test_handle_orderbook_pushes_record_to_sink(fake_redis):
+    sink = _FakeSink()
+    streamer = KISWebSocketStreamer(
+        redis_client=fake_redis, app_key="k", app_secret="s", is_paper=True, sink=sink
+    )
+    # H0STASP0: [0]code [1]time [2]hour_cls [3..12]매도호가 [13..22]매수호가
+    #           [23..32]매도잔량 [33..42]매수잔량 [43]총매도잔량 [44]총매수잔량
+    ask_prices = [71300 + 100 * i for i in range(10)]
+    bid_prices = [71200 - 100 * i for i in range(10)]
+    ask_vols = [100 * (i + 1) for i in range(10)]
+    bid_vols = [110 * (i + 1) for i in range(10)]
+    fields = (
+        ["005930", "093015", "0"]
+        + [str(x) for x in ask_prices]
+        + [str(x) for x in bid_prices]
+        + [str(x) for x in ask_vols]
+        + [str(x) for x in bid_vols]
+        + ["5500", "6600"]
+    )
+    msg = "0|H0STASP0|001|" + "^".join(fields)
+
+    await streamer._handle_message(ws=FakeWebSocket([]), message=msg)
+
+    # 호가는 Redis 발행하지 않고 sink 로만
+    assert await fake_redis.xrange(STREAM_PRICES, "-", "+") == []
+    assert len(sink.orderbook) == 1
+    rec = sink.orderbook[0]
+    assert rec[0] == "005930"
+    assert rec[2] == ask_prices  # 매도호가 1~10
+    assert rec[3] == ask_vols  # 매도호가 잔량
+    assert rec[4] == bid_prices  # 매수호가 1~10
+    assert rec[5] == bid_vols  # 매수호가 잔량
+    assert rec[6] == 5500 and rec[7] == 6600
+
+
+async def test_send_subscribe_includes_orderbook_when_sink(fake_redis):
+    sink = _FakeSink()
+    streamer = KISWebSocketStreamer(
+        redis_client=fake_redis, app_key="k", app_secret="s", is_paper=True, sink=sink
+    )
+    streamer._approval_key = "APPROVAL"
+    streamer._is_running = True
+    ws = FakeWebSocket([])
+
+    await streamer._send_subscribe(ws, ["005930"], tr_type="1")
+
+    tr_ids = [json.loads(m)["body"]["input"]["tr_id"] for m in ws.sent]
+    assert TR_ID_STOCK_EXEC in tr_ids
+    assert TR_ID_STOCK_ASKP in tr_ids
+
+
+async def test_send_subscribe_skips_orderbook_without_sink(fake_redis):
+    streamer = KISWebSocketStreamer(
+        redis_client=fake_redis, app_key="k", app_secret="s", is_paper=True
+    )
+    streamer._approval_key = "APPROVAL"
+    streamer._is_running = True
+    ws = FakeWebSocket([])
+
+    await streamer._send_subscribe(ws, ["005930"], tr_type="1")
+
+    tr_ids = [json.loads(m)["body"]["input"]["tr_id"] for m in ws.sent]
+    assert tr_ids == [TR_ID_STOCK_EXEC]
 
 
 # pytest 네임스페이스 워닝 억제

@@ -9,7 +9,7 @@ import pytest
 import respx
 
 from prime_jennie_runtime.fast_loop.gateway_subscriber import (
-    KIS_WS_SUBSCRIPTION_LIMIT,
+    MAX_SUBSCRIPTION_CODES,
     load_subscription_codes,
     subscribe_on_startup,
 )
@@ -87,7 +87,7 @@ async def test_load_subscription_codes_positions_only_when_no_sheets():
 
 @pytest.mark.asyncio
 async def test_load_subscription_codes_caps_at_ws_limit():
-    """KIS WebSocket 등록 한도 (41) 초과 시 positions 우선 + 최신 시트순으로 자른다."""
+    """체결+호가 두 채널이라 실효 종목 한도(20) 초과 시 positions 우선 + 최신 시트순."""
     positions = [f"P{i:05d}" for i in range(3)]
     # 시트 ticker 50개 — SQL 정렬 (최신순) 그대로 들어온다고 가정.
     sheets = [f"S{i:05d}" for i in range(50)]
@@ -95,7 +95,7 @@ async def test_load_subscription_codes_caps_at_ws_limit():
 
     codes = await load_subscription_codes(pool)
 
-    assert len(codes) == KIS_WS_SUBSCRIPTION_LIMIT
+    assert len(codes) == MAX_SUBSCRIPTION_CODES
     # positions 전체 포함.
     for p in positions:
         assert p in codes

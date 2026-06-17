@@ -14,7 +14,6 @@ import pytest
 
 from prime_jennie_runtime.jobs.maintenance import (
     DEFAULT_CLEANUP_DAYS,
-    DEFAULT_REALTIME_CLEANUP_DAYS,
     cleanup_old_data,
 )
 
@@ -50,19 +49,24 @@ class _FakePool:
 async def test_cleanup_uses_365d_cutoff_by_default():
     pool = _FakePool()
     await cleanup_old_data(pool)
-    # daily_prices + realtime_ticks + realtime_orderbook
-    assert len(pool.conn.calls) == 3
+    # daily_prices 만 정리한다 (실시간 체결·호가는 영구 보관)
+    assert len(pool.conn.calls) == 1
     sql, args = pool.conn.calls[0]
     assert "DELETE FROM daily_prices" in sql
     assert "price_date < $1" in sql
     (cutoff,) = args
     assert cutoff == date.today() - timedelta(days=DEFAULT_CLEANUP_DAYS)
-    # 실시간 체결·호가도 별도 보존 일수로 정리
-    rt_sql = " ".join(c[0] for c in pool.conn.calls[1:])
-    assert "realtime_ticks" in rt_sql
-    assert "realtime_orderbook" in rt_sql
-    (rt_cutoff,) = pool.conn.calls[1][1]
-    assert rt_cutoff == date.today() - timedelta(days=DEFAULT_REALTIME_CLEANUP_DAYS)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_touches_realtime():
+    """실시간 체결·호가는 KIS 가 과거를 안 주는 휘발성 데이터라 영구 보관 —
+    cleanup 이 절대 건드리면 안 된다 (2026-06-17 결정 회귀 가드)."""
+    pool = _FakePool()
+    await cleanup_old_data(pool)
+    all_sql = " ".join(c[0] for c in pool.conn.calls)
+    assert "realtime_ticks" not in all_sql
+    assert "realtime_orderbook" not in all_sql
 
 
 @pytest.mark.asyncio

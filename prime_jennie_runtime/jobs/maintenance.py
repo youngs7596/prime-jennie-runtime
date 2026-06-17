@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_CLEANUP_DAYS = 365
-# 실시간 체결·호가는 빠르게 커지므로 별도 보존 일수. Pre-flight 틱 양 실측 후 조정.
-DEFAULT_REALTIME_CLEANUP_DAYS = 90
 
 # v2 `/jobs/contract-smoke-test` 임계값/범위 — 값을 다시 튜닝하지 말 것.
 CONTRACT_SMOKE_SENTINEL = "005930"  # 삼성전자
@@ -61,38 +59,28 @@ async def cleanup_old_data(
     pool: Any,
     *,
     days: int = DEFAULT_CLEANUP_DAYS,
-    realtime_days: int = DEFAULT_REALTIME_CLEANUP_DAYS,
 ) -> None:
-    """v2 `/jobs/cleanup-old-data` 포팅 + 실시간 체결·호가 보존 정리.
+    """v2 `/jobs/cleanup-old-data` 포팅 — `daily_prices` 만 365 일 기준으로 청소.
 
     v2 는 `stock_daily_prices` 를 365 일 기준으로 청소. v3 에서는 동일 로직을
     `daily_prices` (003) 에 적용한다. v2 가 날짜만 기준으로 삼았듯 v3 도
-    `price_date < cutoff` 단일 조건만 사용.
+    `price_date < cutoff` 단일 조건만 사용한다. 일봉은 KIS 에서 언제든 다시 받을 수
+    있어 정리해도 무방하다.
 
-    실시간 체결·호가(024) 는 빠르게 커지므로 `realtime_days` (기본 90) 로 별도 정리.
+    실시간 체결·호가(024) 는 KIS 가 과거를 안 주는 휘발성 데이터라 자동 삭제하지
+    않는다. prime-jennie 은퇴까지 영구 보관한다 (2026-06-17 결정). 따라서 정리 대상에서
+    제외 — 보존 한도가 필요해지면 별도 정책으로 다시 도입한다.
     """
     cutoff = date.today() - timedelta(days=days)
-    rt_cutoff = date.today() - timedelta(days=realtime_days)
     async with pool.acquire() as conn:
         daily_res = await conn.execute(
             "DELETE FROM daily_prices WHERE price_date < $1",
             cutoff,
         )
-        ticks_res = await conn.execute(
-            "DELETE FROM realtime_ticks WHERE ts < $1",
-            rt_cutoff,
-        )
-        ob_res = await conn.execute(
-            "DELETE FROM realtime_orderbook WHERE ts < $1",
-            rt_cutoff,
-        )
     logger.info(
-        "cleanup_old_data: daily<%s del=%d | realtime<%s ticks=%d orderbook=%d",
+        "cleanup_old_data: daily<%s del=%d",
         cutoff.isoformat(),
         _deleted_count(daily_res),
-        rt_cutoff.isoformat(),
-        _deleted_count(ticks_res),
-        _deleted_count(ob_res),
     )
 
 

@@ -273,9 +273,9 @@ async def _persist_quant_scores(
 ) -> None:
     """전 종목 quant 서브점수를 daily_quant_scores 에 upsert.
 
-    MA 평활의 다음 run 입력 + 죽어있던 weekly_factor_analysis(daily_quant_scores
-    의존) 재가동을 위함. daily_quant_scores 스키마에 sector_momentum_score 컬럼이
-    없으므로 (v2 동일) 6개 서브점수 + total 만 저장 — total 에는 7팩터 모두 반영됨.
+    MA 평활의 다음 run 입력 + weekly_factor_analysis(daily_quant_scores 의존)
+    의 IC 분석 입력. 7팩터 서브점수 + total 을 저장한다 — sector_momentum_score
+    는 migration 025 로 컬럼이 생겨 2026-06-18 부터 같이 적재한다(그 전 행은 NULL).
     """
     if engine is None or not quant_scores:
         return
@@ -284,13 +284,13 @@ async def _persist_quant_scores(
         INSERT INTO daily_quant_scores (
             score_date, stock_code, stock_name, total_quant_score,
             momentum_score, quality_score, value_score, technical_score,
-            news_score, supply_demand_score, is_tradable, is_final_selected,
-            run_id, is_active
+            news_score, supply_demand_score, sector_momentum_score,
+            is_tradable, is_final_selected, run_id, is_active
         ) VALUES (
             :score_date, :stock_code, :stock_name, :total,
             :momentum, :quality, :value, :technical,
-            :news, :supply_demand, TRUE, :selected,
-            :run_id, TRUE
+            :news, :supply_demand, :sector_momentum,
+            TRUE, :selected, :run_id, TRUE
         )
         ON CONFLICT (score_date, stock_code, run_id) DO UPDATE SET
             stock_name = EXCLUDED.stock_name,
@@ -301,6 +301,7 @@ async def _persist_quant_scores(
             technical_score = EXCLUDED.technical_score,
             news_score = EXCLUDED.news_score,
             supply_demand_score = EXCLUDED.supply_demand_score,
+            sector_momentum_score = EXCLUDED.sector_momentum_score,
             is_final_selected = EXCLUDED.is_final_selected
         """
     )
@@ -316,6 +317,7 @@ async def _persist_quant_scores(
             "technical": qs.technical_score,
             "news": qs.news_score,
             "supply_demand": qs.supply_demand_score,
+            "sector_momentum": qs.sector_momentum_score,
             "selected": code in selected_codes,
             "run_id": run_id,
         }

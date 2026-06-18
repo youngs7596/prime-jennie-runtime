@@ -409,4 +409,54 @@ async def test_run_risk_updater_swallows_fetch_errors(fake_redis, clock):
         max_iterations=2,
     )
     assert count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_risk_updater_skips_after_hours(fake_redis):
+    """장 마감 후(평일 18:00)엔 평가·알림을 건너뛴다 — fetch 미호출, 레벨 불변."""
+    throttle = IntradayRiskThrottle(fake_redis)
+    calls = {"n": 0}
+
+    async def fetch():
+        calls["n"] += 1
+        return (-3.0, 20.0, None)  # 평가됐다면 DANGER 로 갔을 값
+
+    evening = _FrozenClock(datetime(2026, 6, 17, 18, 0, 0))  # Wed 18:00 KST, 마감 후
+    count = await run_risk_updater(
+        throttle=throttle,
+        fetch_snapshot=fetch,
+        interval_sec=0,
+        off_hours_sleep_sec=0,
+        notifier=None,
+        clock=evening,
+        max_iterations=1,
+    )
+    assert count == 1
+    assert calls["n"] == 0  # 장외라 snapshot 자체를 안 읽음
+    assert throttle.current_level == "NORMAL"  # 레벨 변경 없음
+
+
+@pytest.mark.asyncio
+async def test_run_risk_updater_skips_weekend(fake_redis):
+    """주말(토요일 정오)엔 거래일이 아니므로 건너뛴다."""
+    throttle = IntradayRiskThrottle(fake_redis)
+    calls = {"n": 0}
+
+    async def fetch():
+        calls["n"] += 1
+        return (-3.0, 20.0, None)
+
+    saturday = _FrozenClock(datetime(2026, 6, 20, 12, 0, 0))  # Sat noon
+    count = await run_risk_updater(
+        throttle=throttle,
+        fetch_snapshot=fetch,
+        interval_sec=0,
+        off_hours_sleep_sec=0,
+        notifier=None,
+        clock=saturday,
+        max_iterations=1,
+    )
+    assert count == 1
+    assert calls["n"] == 0
+    assert throttle.current_level == "NORMAL"
     assert throttle.current_level == "NORMAL"

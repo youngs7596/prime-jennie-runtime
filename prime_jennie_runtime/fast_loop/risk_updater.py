@@ -20,6 +20,7 @@ from datetime import datetime
 from prime_jennie_runtime.fast_loop.risk_throttle import IntradayRiskThrottle
 from prime_jennie_runtime.fast_loop.schemas import RiskLevelChangeNotification
 from prime_jennie_runtime.infra.redis_streams import TypedStreamPublisher
+from prime_jennie_runtime.kis_gateway.market_hours import MarketCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -34,27 +35,48 @@ async def run_risk_updater(
     notifier: TypedStreamPublisher[RiskLevelChangeNotification] | None = None,
     clock: Callable[[], datetime] | None = None,
     max_iterations: int | None = None,
+    calendar: MarketCalendar | None = None,
+    off_hours_sleep_sec: int = 60,
 ) -> int:
     """5분 주기로 throttle을 업데이트. level 변경 시 notifier로 발행.
+
+    장중(거래일 08:50~15:35, `MarketCalendar.is_streaming_hours`)에만 평가·알림한다.
+    장외/휴장 시간엔 라이브 KOSPI 를 읽지 않고 짧게 대기만 한다 — 마감 후에도 24h
+    폴링하며 레벨 변경 알림이 새어나가던 문제 차단 (kis_gateway streamer 와 동일 가드).
 
     Args:
         throttle: IntradayRiskThrottle 인스턴스
         fetch_snapshot: 현재 market snapshot 조회 콜백
-        interval_sec: 업데이트 주기 (기본 300s = 5분)
+        interval_sec: 장중 업데이트 주기 (기본 300s = 5분)
         notifier: 선택적 발행자. None이면 로그만
-        clock: 현재 시각 반환 (알림 ts용)
+        clock: 현재 시각 반환 (알림 ts용 + 기본 calendar 의 장중 판정 기준)
         max_iterations: 테스트용 반복 제한. None이면 무한
+        calendar: 장중 판정용 MarketCalendar. None이면 clock 에 연동해 생성
+        off_hours_sleep_sec: 장외 시간일 때 재확인 대기 (기본 60s)
 
     Returns:
         실행된 iteration 횟수
     """
     clock_fn = clock if clock is not None else datetime.now
+    if calendar is None:
+        calendar = MarketCalendar()
+        # 명시적 calendar 미주입 시 장중 판정도 동일 clock 을 따르게 한다
+        # (테스트에서 frozen clock 으로 장중/장외를 제어 가능, prod 는 KST now).
+        calendar.set_clock(clock_fn)
     iterations = 0
     _now = clock_fn  # alias
 
     while True:
         if max_iterations is not None and iterations >= max_iterations:
             return iterations
+
+        # 장외/휴장 시간엔 평가·알림 모두 건너뛴다.
+        if not calendar.is_streaming_hours():
+            iterations += 1
+            if max_iterations is not None and iterations >= max_iterations:
+                return iterations
+            await _sleep_or_cancel(off_hours_sleep_sec)
+            continue
 
         try:
             snapshot = await fetch_snapshot()

@@ -420,9 +420,16 @@ async def run_slow_loop(
         await observer.emit(pj_event("pj.macro.stale_detected", role="macro_gate", ok=False))
         return SlowLoopResult(macro_post=post, skipped_reason="stale_macro")
 
-    # Macro gate closed → Scout 돌려도 어차피 engine이 전부 None 반환.
-    # 비용 절감 차 Scout phase 생략.
-    if post.output.gate == "closed":
+    # Macro gate closed.
+    # 종전에는 비용 절감 차 Scout phase 를 통째로 생략하고 early-return 했다.
+    # 그러나 paper alpha 실험에서 이는 데이터 파괴다 — 닫힌 날의 점수·후보가
+    # 영영 안 남아 "게이트가 옳았나"를 사후 측정할 길이 사라진다. STOP/PAUSE 도
+    # 같은 이유로 "분석·영속은 수행하되 fast_loop 핸드오프만 차단" 으로 옮겨갔다
+    # (섹션 0 주석). macro_closed 도 동일 원칙을 따른다: Scout 를 그대로 돌려
+    # daily_quant_scores(sector_momentum 포함)·screening_candidates 를 남기고,
+    # 매매 핸드오프 직전에 멈춘다. 결정론 Scout 는 LLM 호출 0회라 비용도 미미하다.
+    gate_closed = post.output.gate == "closed"
+    if gate_closed:
         await observer.emit(
             pj_event(
                 "pj.slow_loop.skipped_macro_closed",
@@ -431,7 +438,6 @@ async def run_slow_loop(
                 triggers=list(post.closed_triggers),
             )
         )
-        return SlowLoopResult(macro_post=post, skipped_reason="macro_closed")
 
     # --- 2. Scout phase ---
     macro_for_scout = MacroStateForScout(
@@ -516,6 +522,18 @@ async def run_slow_loop(
         scout_run_id=scout_run_id,
         candidates=raw_candidates,
     )
+
+    # paper alpha shadow — macro 게이트가 닫힌 날도 점수·후보까지는 영속했다.
+    # gate=closed 면 size_multiplier=0 이라 engine 이 시트를 전부 None 처리하고,
+    # 닫힌 날 매매도 없어야 하므로 시트 build/발행 단계로 진행하지 않는다. 여기서
+    # 멈춰도 반사실 측정에 필요한 데이터(점수·후보)는 확보된다 — 후보의 forward
+    # return 은 daily_prices 로 별도 산출(factor IC 분석과 동일 방식).
+    if gate_closed:
+        return SlowLoopResult(
+            macro_post=post,
+            scout_output=scout_out,
+            skipped_reason="macro_closed_shadow",
+        )
 
     # --- 4. 검증 ---
     validation = validate_candidates(raw_candidates, scout_ctx.universe)

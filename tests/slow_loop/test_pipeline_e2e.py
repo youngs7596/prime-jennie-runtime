@@ -230,12 +230,18 @@ async def test_normal_flow_publishes_three_sheets(fake_redis):
 
 
 # =====================================================================
-# 2. Macro closed — Scout 생략, 시트 0개
+# 2. Macro closed (paper shadow) — Scout 는 돌려 점수·후보 영속, 매매는 0
 # =====================================================================
 
 
 @pytest.mark.asyncio
-async def test_macro_closed_skips_scout_no_sheets(fake_redis):
+async def test_macro_closed_shadow_records_scout_no_trading(fake_redis):
+    """게이트가 닫혀도 Scout 를 돌려 점수·후보를 남기고, 매매 핸드오프만 차단한다.
+
+    종전엔 닫히면 Scout 를 통째로 생략해 닫힌 날 데이터가 사라졌다. paper alpha
+    실험에선 그 데이터가 "게이트가 옳았나"를 측정하는 유일한 근거라, STOP/PAUSE 와
+    동일하게 "분석·영속은 수행, fast_loop 핸드오프만 차단" 으로 바꿨다.
+    """
     observer = CollectingObserver()
     comp = _make_components(
         fake_redis,
@@ -250,17 +256,19 @@ async def test_macro_closed_skips_scout_no_sheets(fake_redis):
         macro_run_id="macro_20260416_0800",
         scout_run_id="scout_20260416_0830",
     )
-    assert result.skipped_reason == "macro_closed"
+    # 매매는 안 했지만 Scout 는 돌았다 — shadow.
+    assert result.skipped_reason == "macro_closed_shadow"
     assert result.sheets_published == []
+    assert result.scout_output is not None  # Scout 실행됨
 
-    # Redis 시트 0건
+    # fast_loop 핸드오프(시트 stream) 0건 — 닫힌 날 매매 없음.
     length = await fake_redis.xlen(STREAM_POSITION_SHEETS)
     assert length == 0
 
     names = {e.name for e in observer.events}
     assert "pj.macro.gate_closed" in names
     assert "pj.slow_loop.skipped_macro_closed" in names
-    assert "pj.scout.code_generated" not in names  # Scout 생략
+    assert "pj.scout.code_generated" in names  # Scout 가 돌아 점수·후보 영속
 
 
 # =====================================================================

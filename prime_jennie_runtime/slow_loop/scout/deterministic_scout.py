@@ -222,10 +222,19 @@ async def _load_score_history(
     try:
         async with engine.connect() as conn:
             # 직전 (window-1) run — scout_runs.generated_at 기준.
+            # macro 게이트가 닫힌 날(shadow run)은 점수·후보를 분석용으로 영속하되
+            # 매매 경로 입력에서는 제외한다 — MA 평활·히스테리시스 incumbency 가
+            # "실제 매매 안 한 가짜 선정"을 물려받지 않도록(2026-06-19). 매크로 영향
+            # 자체는 각 run 의 점수(is_bull·섹터 모멘텀)에 이미 반영돼 있으므로,
+            # 여기서 거르는 건 닫힌 날의 *지속성 전파*일 뿐 매크로 반영이 아니다.
+            # context_snapshot_json 의 macro_gate 로 판별(없는 옛 행은 open 간주 =
+            # 종전 동작 유지).
             run_rows = await conn.execute(
                 text(
                     "SELECT scout_run_id FROM scout_runs "
-                    "WHERE generated_at < :now ORDER BY generated_at DESC LIMIT :n"
+                    "WHERE generated_at < :now "
+                    "AND COALESCE(context_snapshot_json->>'macro_gate', 'open') = 'open' "
+                    "ORDER BY generated_at DESC LIMIT :n"
                 ),
                 {"now": as_of_dt, "n": max(0, window - 1)},
             )

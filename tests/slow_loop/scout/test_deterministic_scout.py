@@ -269,3 +269,50 @@ async def test_run_deterministic_scout_empty_universe_returns_empty():
         scout_run_id="sr_test",
     )
     assert result.result.candidates == []
+
+
+@pytest.mark.asyncio
+async def test_load_score_history_excludes_macro_closed_runs():
+    """매매 경로(MA 평활·히스테리시스) 이력은 게이트 열린 run 만 본다.
+
+    macro 닫힌 날(shadow run)은 daily_quant_scores 에 영속돼 IC 분석엔 쓰이되,
+    MA·히스테리시스 incumbency 에는 안 들어와야 한다 — "매매 안 한 가짜 선정"이
+    다음 열린 날 선정을 앵커링하지 않도록(2026-06-19). run 선택 쿼리가
+    macro_gate='open' 필터를 들고 있는지 확인한다.
+    """
+    from prime_jennie_runtime.slow_loop.scout.deterministic_scout import _load_score_history
+
+    class _Result:
+        def fetchall(self) -> list:
+            return []
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.sql: list[str] = []
+
+        async def execute(self, stmt, params=None) -> _Result:
+            self.sql.append(str(stmt))
+            return _Result()
+
+        async def __aenter__(self) -> _Conn:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    class _Engine:
+        def __init__(self, conn: _Conn) -> None:
+            self._conn = conn
+
+        def connect(self) -> _Conn:
+            return self._conn
+
+    conn = _Conn()
+    historical, previous_codes = await _load_score_history(
+        _Engine(conn), as_of_dt=datetime(2026, 6, 19, 8, 30), window=5
+    )
+    # 닫힌 날만 있었다고 가정 → 매매 이력 비어 cold start.
+    assert historical == {}
+    assert previous_codes is None
+    # 직전 run 선택 쿼리가 게이트 필터를 들고 있어야 한다.
+    assert any("macro_gate" in s and "'open'" in s for s in conn.sql)

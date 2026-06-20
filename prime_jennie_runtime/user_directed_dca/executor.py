@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from datetime import time as dt_time
+from typing import Protocol
 
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
+from prime_jennie_runtime.fast_loop.schemas import GenericAlertNotification
 from prime_jennie_runtime.kis_gateway.schemas import OrderRequest, OrderStatusResult
 
 from .planning import compute_slice_budget, target_cumulative_for_slice
@@ -35,10 +37,34 @@ _CONFIRM_RETRIES = 5
 _CONFIRM_INTERVAL = 3.0
 
 
+class _Emitter(Protocol):
+    async def emit(self, notification: object) -> object: ...
+
+
 class SliceExecutor:
-    def __init__(self, repo: DcaRepository, kis: KisClient) -> None:
+    def __init__(
+        self, repo: DcaRepository, kis: KisClient, *, notifier: _Emitter | None = None
+    ) -> None:
         self._repo = repo
         self._kis = kis
+        self._notifier = notifier
+
+    async def _notify(self, *, title: str, body: str, severity: str, ts: datetime | None) -> None:
+        """텔레그램(v3:notifications) 알림 — 실패해도 매매를 막지 않는다(best-effort)."""
+        if self._notifier is None:
+            return
+        try:
+            await self._notifier.emit(
+                GenericAlertNotification(
+                    kind="alert",
+                    severity=severity,  # type: ignore[arg-type]
+                    title=title,
+                    body=body,
+                    ts=ts or datetime.now(UTC),
+                )
+            )
+        except Exception:
+            logger.exception("dca notify failed")
 
     # ----- 공개 진입점 -----
 
@@ -113,6 +139,7 @@ class SliceExecutor:
                 filled_krw=qty * price,
                 avg_price=float(price),
                 is_tail=is_tail,
+                dry=True,
             )
             return
 
@@ -280,6 +307,7 @@ class SliceExecutor:
         filled_krw: int,
         avg_price: float,
         is_tail: bool,
+        dry: bool = False,
     ) -> None:
         new_cumulative = campaign.cumulative_filled_krw + filled_krw
         cap_reached = new_cumulative >= campaign.cap_krw
@@ -303,6 +331,25 @@ class SliceExecutor:
             set_final_tail_done=is_tail,
             new_campaign_status=new_status,
         )
+        prefix = "(모의) " if dry else ""
+        word = "부분체결" if status == SliceStatus.PARTIAL.value else "체결"
+        await self._notify(
+            title=f"{prefix}DCA {word}",
+            body=(
+                f"{campaign.ticker} {filled_qty}주 @{round(avg_price):,}원\n"
+                f"슬라이스 {slice_row.slice_no}/{campaign.total_slices} · "
+                f"누적 {new_cumulative:,}/{campaign.cap_krw:,}원"
+            ),
+            severity="info",
+            ts=now,
+        )
+        if new_status is not None:
+            await self._notify(
+                title="DCA 캠페인 종료",
+                body=f"{campaign.ticker} — {new_status} · 누적 {new_cumulative:,}원",
+                severity="info",
+                ts=now,
+            )
 
     async def _pass(
         self, campaign: Campaign, slice_row: SliceExecution, *, reason: str, is_tail: bool
@@ -320,6 +367,12 @@ class SliceExecutor:
             set_final_tail_done=is_tail,
             new_campaign_status=CampaignStatus.COMPLETED.value if is_tail else None,
         )
+        await self._notify(
+            title="DCA 슬라이스 패스",
+            body=f"{campaign.ticker} — {reason} · 예산 다음 슬라이스로 이월",
+            severity="warning",
+            ts=None,
+        )
 
     async def _vi_retry_or_pass(
         self, campaign: Campaign, slice_row: SliceExecution, now: datetime, *, reason: str
@@ -335,6 +388,12 @@ class SliceExecutor:
             )
             logger.warning(
                 "dca order rejected campaign=%s reason=%s — 5분 후 1회 재시도", campaign.id, reason
+            )
+            await self._notify(
+                title="DCA 주문 거부",
+                body=f"{campaign.ticker} — {reason} · 5분 후 1회 재시도",
+                severity="warning",
+                ts=now,
             )
         else:
             logger.warning(

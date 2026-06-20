@@ -14,7 +14,7 @@ from prime_jennie_runtime.user_directed_dca.presets import PRESETS, build_campai
 from prime_jennie_runtime.user_directed_dca.state import SliceExecution
 from prime_jennie_runtime.user_directed_dca.tick import run_dca_tick
 
-from .fakes import FakeKis, InMemoryDcaRepo
+from .fakes import FakeKis, FakeNotifier, InMemoryDcaRepo
 
 KST = timezone(timedelta(hours=9))
 
@@ -99,6 +99,22 @@ async def test_live_full_fill(fake_redis):
     assert kis.buy_calls[0].order_type == "market"
     assert camp.cumulative_filled_krw == qty * 80_000
     assert camp.slices_done == 1
+
+
+@pytest.mark.asyncio
+async def test_fill_emits_telegram_notification(fake_redis):
+    repo = InMemoryDcaRepo()
+    kis = FakeKis(price=80_000)
+    notifier = FakeNotifier()
+    await seed(repo, "production")
+
+    await run_dca_tick(
+        repo=repo, kis=kis, redis_client=fake_redis, now=at(0, 14, 0), notifier=notifier
+    )
+    assert any(
+        getattr(n, "kind", None) == "alert" and "체결" in getattr(n, "title", "")
+        for n in notifier.sent
+    )
 
 
 @pytest.mark.asyncio

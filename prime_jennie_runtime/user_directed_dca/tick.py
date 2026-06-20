@@ -18,6 +18,7 @@ import redis.asyncio as aioredis
 
 from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
+from prime_jennie_runtime.fast_loop.notifier import Notifier
 
 from .executor import SliceExecutor
 from .planning import (
@@ -60,6 +61,7 @@ async def run_dca_tick(
     kis: KisClient,
     redis_client: aioredis.Redis,
     now: datetime | None = None,
+    notifier: object | None = None,
 ) -> None:
     """한 tick. 활성 캠페인을 순차 처리하며, 어떤 예외도 밖으로 던지지 않는다."""
     try:
@@ -68,7 +70,7 @@ async def run_dca_tick(
         if snap.stopped or snap.paused:
             logger.info("dca_tick skip: system %s", "stopped" if snap.stopped else "paused")
             return
-        executor = SliceExecutor(repo, kis)
+        executor = SliceExecutor(repo, kis, notifier=notifier or Notifier(redis_client))
         for camp in await repo.fetch_active_campaigns():
             try:
                 # crash 복구를 먼저 — 새 주문 전에 in-flight 정리. 이후 상태 재조회.

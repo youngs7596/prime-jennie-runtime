@@ -110,6 +110,17 @@ class FakeKis:
         return list(self.daily_execs)
 
 
+class FakeNotifier:
+    """Notifier 대역 — 발행된 알림을 기록."""
+
+    def __init__(self) -> None:
+        self.sent: list[object] = []
+
+    async def emit(self, notification: object) -> str:
+        self.sent.append(notification)
+        return "1"
+
+
 class InMemoryDcaRepo:
     """DcaRepository in-memory 대역."""
 

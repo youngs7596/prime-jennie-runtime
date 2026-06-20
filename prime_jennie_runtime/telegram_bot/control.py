@@ -140,7 +140,7 @@ RESPONSE_HELP = (
     "/adopt 종목 회복선% — 보유 편입 + 조건부 매도\n"
     "/adopt list — 조건부 주문 조회\n"
     "/adopt cancel 종목 — 조건부 주문 취소\n"
-    "/dca status|arm <preset>|cancel — 지정 종목 분할매수\n\n"
+    "/dca status|arm preset|cancel — 지정 종목 분할매수\n\n"
     "<b>강제 청산</b>\n"
     "/liquidate add|remove|list|clear|arm|disarm|status\n\n"
     "<b>진단</b>\n"

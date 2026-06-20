@@ -77,7 +77,7 @@ def resolve_legs(preset: Preset, ticker: str | None) -> list[PresetLeg]:
     """프리셋의 종목 구성. smoke 는 운영자가 준 종목 1개로 구성한다."""
     if preset.needs_ticker:
         if not ticker:
-            raise ValueError("smoke 프리셋은 종목코드가 필요합니다 (/dca arm smoke <종목코드>)")
+            raise ValueError("smoke 프리셋은 종목코드가 필요합니다 (/dca arm smoke 종목코드)")
         return [PresetLeg(ticker, preset.smoke_cap_krw)]
     return list(preset.legs)
 

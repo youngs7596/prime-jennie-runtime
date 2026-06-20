@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from prime_jennie_runtime.telegram_bot import dca_command
+from prime_jennie_runtime.telegram_bot.control import RESPONSE_HELP
+from prime_jennie_runtime.user_directed_dca.presets import PRESETS
 
 from .fakes import InMemoryDcaRepo
 
 KST = timezone(timedelta(hours=9))
 NOW = datetime(2026, 6, 20, 11, 0, tzinfo=KST)
+
+# 텔레그램 HTML parse_mode 가 허용하는 태그만 — 그 외 <...> 는 send 400 으로 무응답.
+_ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "code", "pre", "a"}
+
+
+def _html_safe(text: str) -> bool:
+    for inner in re.findall(r"<([^>]*)>", text):
+        name = inner.lstrip("/").split()[0].lower() if inner.strip() else ""
+        if name not in _ALLOWED_TAGS:
+            return False
+    return True
 
 
 @pytest.mark.asyncio
@@ -169,3 +183,21 @@ async def test_cancel_all(fake_redis):
 
 def test_status_text_empty_and_populated():
     assert "없습니다" in dca_command.status_text([])
+
+
+def test_telegram_strings_html_safe():
+    # /help 가 <preset> 같은 미지원 태그로 400 무응답 됐던 회귀 방지(2026-06-20).
+    assert _html_safe(RESPONSE_HELP)
+    assert _html_safe(dca_command.DCA_USAGE)
+    assert _html_safe(dca_command.ARM_USAGE)
+    legs = list(PRESETS["production"].legs)
+    assert _html_safe(dca_command.format_arm_echo(PRESETS["production"], legs))
+
+
+@pytest.mark.asyncio
+async def test_smoke_no_ticker_message_html_safe(fake_redis):
+    repo = InMemoryDcaRepo()
+    reply = await dca_command.arm(
+        repo, fake_redis, chat_id="42", preset_name="smoke", ticker=None, confirm=False, now=NOW
+    )
+    assert _html_safe(reply)

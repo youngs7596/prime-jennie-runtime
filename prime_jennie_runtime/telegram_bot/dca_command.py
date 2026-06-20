@@ -27,10 +27,10 @@ DCA_PENDING_TTL_SEC = 600
 DCA_USAGE = (
     "<b>/dca</b> — 사용자 지정 종목 분할매수\n"
     "/dca status — 진행 상황\n"
-    "/dca arm <preset> [종목] — 무장 (echo)\n"
-    "/dca arm <preset> [종목] 확인 — 무장 실행\n"
-    "/dca cancel <종목|all> — 중단\n\n"
-    "preset: production | smoke <종목코드> | dryrun"
+    "/dca arm preset [종목] — 무장 (echo)\n"
+    "/dca arm preset [종목] 확인 — 무장 실행\n"
+    "/dca cancel 종목|all — 중단\n\n"
+    "preset: production | smoke 종목코드 | dryrun"
 )
 ARM_USAGE = "사용법: <code>/dca arm production|dryrun|smoke [종목코드]</code>"
 

@@ -32,7 +32,9 @@ from prime_jennie_runtime.infra.redis_streams import (
     STREAM_CONTROL_COMMANDS,
     TypedStreamPublisher,
 )
+from prime_jennie_runtime.user_directed_dca.repository import DcaRepository
 
+from . import dca_command
 from .acceptance import (
     clear_pending_accept,
     compute_accept_quantity,
@@ -145,6 +147,7 @@ class CommandHandler:
             "/sellall": self._handle_sellall,
             "/adopt": self._handle_adopt,
             "/accept": self._handle_accept,
+            "/dca": self._handle_dca,
         }
 
     def is_allowed(self, chat_id: str | int) -> bool:
@@ -837,6 +840,47 @@ class CommandHandler:
             ),
             published=cmd,
         )
+
+    async def _handle_dca(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
+        """사용자 지정 종목 buy-only 분할매수 무장·조회·취소 (user_directed_dca).
+
+        무장은 echo + "확인" 2단계 (/accept 패턴). 실제 슬라이스 집행은 job-worker
+        tick 이 하고, 여기서는 캠페인을 PG 에 무장만 한다. "확인" 은 직접 친 슬래시에서만.
+        """
+        if self._pool is None:
+            return CommandResult(reply="DB 미연결 — /dca 를 처리할 수 없습니다.")
+        repo = DcaRepository(self._pool)
+        parts = args.strip().split()
+        sub = parts[0].lower() if parts else "status"
+
+        if sub == "status":
+            campaigns = await repo.fetch_campaigns(["active", "cap_reached", "completed"])
+            return CommandResult(reply=dca_command.status_text(campaigns))
+        if sub == "cancel":
+            target = parts[1] if len(parts) > 1 else ""
+            if not target:
+                return CommandResult(reply="사용법: <code>/dca cancel 종목|all</code>")
+            return CommandResult(reply=await dca_command.cancel(repo, target))
+        if sub == "arm":
+            rest = parts[1:]
+            confirm = bool(rest) and rest[-1] == "확인"
+            if confirm:
+                rest = rest[:-1]
+            if not rest:
+                return CommandResult(reply=dca_command.ARM_USAGE)
+            preset_name = rest[0].lower()
+            ticker = rest[1] if len(rest) > 1 else None
+            reply = await dca_command.arm(
+                repo,
+                self._redis,
+                chat_id=chat_id,
+                preset_name=preset_name,
+                ticker=ticker,
+                confirm=confirm,
+                now=self._now(),
+            )
+            return CommandResult(reply=reply)
+        return CommandResult(reply=dca_command.DCA_USAGE)
 
     async def _handle_adopt(self, args: str, chat_id: str = "", **_: object) -> CommandResult:
         """실보유 종목 v3 편입 + 조건부 매도(recovery_exit) 등록 / 조회 / 취소.

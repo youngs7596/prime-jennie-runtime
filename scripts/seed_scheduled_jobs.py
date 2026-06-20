@@ -291,6 +291,16 @@ SEEDS: list[SeedJob] = [
         cron="20 7 * * 1-5",
         kwargs={},
     ),
+    # 사용자 지정 종목 buy-only 분할매수 tick (user_directed_dca). 매 영업일 장중 매 분.
+    # 활성 캠페인이 없으면 즉시 no-op — 텔레그램 /dca arm 으로 무장돼야 일을 한다.
+    # 매 분인 이유: 급락 가속을 조기 감지하고 VI 5분 재시도를 제때 집어야 하기 때문.
+    SeedJob(
+        id="job_worker.user_directed_dca_tick",
+        owner="job_worker",
+        handler_key="user_directed_dca_tick",
+        cron="* 9-15 * * 1-5",
+        kwargs={},
+    ),
 ]
 
 

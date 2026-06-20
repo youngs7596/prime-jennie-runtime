@@ -16,6 +16,7 @@ import httpx
 
 from prime_jennie_runtime.infra.config import KISConfig
 from prime_jennie_runtime.kis_gateway.schemas import (
+    DailyExecution,
     OrderRequest,
     OrderResult,
     OrderStatusResult,
@@ -129,6 +130,17 @@ class KisClient:
         resp = await self._client.get(f"/api/snapshot/{stock_code}")
         resp.raise_for_status()
         return StockSnapshot.model_validate(resp.json())
+
+    async def get_daily_executions(
+        self, *, start_date: str, end_date: str, stock_code: str = ""
+    ) -> list[DailyExecution]:
+        """일별 주문체결 조회 (YYYYMMDD). crash 복구 시 KIS 원장 대조용."""
+        params: dict[str, str] = {"start_date": start_date, "end_date": end_date}
+        if stock_code:
+            params["stock_code"] = stock_code
+        resp = await self._client.get("/api/executions", params=params)
+        resp.raise_for_status()
+        return [DailyExecution.model_validate(r) for r in resp.json()]
 
     async def subscribe(self, codes: list[str]) -> dict[str, Any]:
         """실시간 구독 요청."""

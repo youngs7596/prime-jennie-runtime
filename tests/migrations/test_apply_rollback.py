@@ -65,6 +65,9 @@ EXPECTED_TABLES_AFTER_APPLY = {
     "watchlist_histories",
     "daily_quant_scores",
     # 010 — legacy_news_sentiments 는 migration 016 으로 drop
+    # 026
+    "dca_campaigns",
+    "dca_slice_executions",
 }
 
 

@@ -27,6 +27,7 @@ import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from prime_jennie_runtime.briefing.reporter import LLMCaller, build_chat_llm_caller
+from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.infra.config import (
     AppConfig,
     TelegramConfig,
@@ -44,6 +45,8 @@ from prime_jennie_runtime.news_pipeline_global.pipeline import (
 from prime_jennie_runtime.news_pipeline_kor.adapters.naver_crawler import (
     NaverNewsCrawler,
 )
+from prime_jennie_runtime.user_directed_dca.repository import DcaRepository
+from prime_jennie_runtime.user_directed_dca.tick import run_dca_tick
 
 from .asset_snapshot import daily_asset_snapshot
 from .briefing_glue import daily_briefing_report
@@ -110,6 +113,7 @@ def build_handlers(
     http: httpx.AsyncClient,
     redis_client: aioredis.Redis,
     kis_gateway_url: str,
+    kis_client: KisClient,
     engine: AsyncEngine,
     telegram_config: TelegramConfig | None,
 ) -> dict[str, Callable[..., Awaitable[Any]]]:
@@ -287,6 +291,14 @@ def build_handlers(
             llm_caller=briefing_llm_caller,
         )
 
+    async def h_user_directed_dca_tick() -> None:
+        # 사용자 지정 종목 buy-only 분할매수 — 매 영업일 장중 매 분 tick.
+        # 활성 캠페인이 없으면 즉시 no-op. 휴장일 가드는 다른 핸들러와 같은 패턴.
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("user_directed_dca_tick skipped: non-trading day")
+            return
+        await run_dca_tick(repo=DcaRepository(pool), kis=kis_client, redis_client=redis_client)
+
     return {
         "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
@@ -316,6 +328,7 @@ def build_handlers(
         "global_news_crawl": h_global_news_crawl,
         "global_news_digest": h_global_news_digest,
         "wsj_gmail_ingest": h_wsj_gmail_ingest,
+        "user_directed_dca_tick": h_user_directed_dca_tick,
     }
 
 
@@ -354,6 +367,10 @@ async def run() -> None:
         # (daily_asset_snapshot 2026-04-20~30) 재발 방지. fast_loop/app.py 와 동일 패턴.
         kis_gateway_url = validate_kis_gateway_url(cfg.kis, strict=cfg.env == "production")
 
+        # user_directed_dca tick 가 게이트웨이 주문 API 를 직접 호출 — 전용 KisClient.
+        kis_client = KisClient(cfg.kis)
+        stack.push_async_callback(kis_client.close)
+
         engine = create_engine(cfg.postgres)
         stack.push_async_callback(engine.dispose)
 
@@ -368,6 +385,7 @@ async def run() -> None:
             http=http,
             redis_client=redis_client,
             kis_gateway_url=kis_gateway_url,
+            kis_client=kis_client,
             engine=engine,
             telegram_config=telegram_cfg,
         )

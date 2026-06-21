@@ -201,3 +201,134 @@ async def test_smoke_no_ticker_message_html_safe(fake_redis):
         repo, fake_redis, chat_id="42", preset_name="smoke", ticker=None, confirm=False, now=NOW
     )
     assert _html_safe(reply)
+
+
+# ── arm-custom (임의 무장) ─────────────────────────────────────────────
+
+
+def test_parse_krw_formats():
+    assert dca_command.parse_krw("50000000") == 50_000_000
+    assert dca_command.parse_krw("50,000,000") == 50_000_000
+    assert dca_command.parse_krw("5000만") == 50_000_000
+    assert dca_command.parse_krw("1.18억") == 118_000_000
+    assert dca_command.parse_krw("0.5억") == 50_000_000
+    assert dca_command.parse_krw("abc") is None
+    assert dca_command.parse_krw("5.5") is None  # 평문은 정수 원만
+
+
+def test_parse_hhmm():
+    assert dca_command.parse_hhmm("14:00") == "14:00"
+    assert dca_command.parse_hhmm("9:5") == "09:05"
+    assert dca_command.parse_hhmm("25:00") is None
+    assert dca_command.parse_hhmm("1400") is None
+
+
+def test_build_custom_preset_derives_caps():
+    # KODEX200 5천만, 10슬라이스 → 슬라이스당 500만, 건별 3배·일별 4배.
+    p = dca_command.build_custom_preset("069500", 50_000_000, 10, "14:00")
+    leg = p.legs[0]
+    assert leg.ticker == "069500" and leg.cap_krw == 50_000_000
+    assert p.total_slices == 10 and p.dry_run is False
+    assert p.per_order_cost_cap == 15_000_000  # 5,000,000 × 3
+    assert p.per_day_cost_cap == 20_000_000  # 5,000,000 × 4
+    assert p.execute_at_kst == "14:00"
+
+
+@pytest.mark.asyncio
+async def test_arm_custom_echo_then_confirm(fake_redis):
+    repo = InMemoryDcaRepo()
+    echo = await dca_command.arm_custom(
+        repo,
+        fake_redis,
+        chat_id="42",
+        ticker="069500",
+        cap_krw=50_000_000,
+        slices=8,
+        execute_at="14:30",
+        confirm=False,
+        now=NOW,
+    )
+    assert "069500" in echo and "확인" in echo
+    assert _html_safe(echo)
+    assert not repo.campaigns  # echo 만으론 무장 안 됨
+
+    done = await dca_command.arm_custom(
+        repo,
+        fake_redis,
+        chat_id="42",
+        ticker="069500",
+        cap_krw=50_000_000,
+        slices=8,
+        execute_at="14:30",
+        confirm=True,
+        now=NOW,
+    )
+    assert "무장 완료" in done
+    camp = repo.campaigns["dca:069500:20260620"]
+    assert camp.ticker == "069500"
+    assert camp.cap_krw == 50_000_000
+    assert camp.total_slices == 8
+    assert camp.execute_at_kst == "14:30"
+    assert camp.dry_run is False
+    assert camp.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_arm_custom_confirm_mismatch_rejected(fake_redis):
+    # echo 한 총액과 다른 총액으로 확인하면 거부(2단계 안전).
+    repo = InMemoryDcaRepo()
+    await dca_command.arm_custom(
+        repo,
+        fake_redis,
+        chat_id="42",
+        ticker="069500",
+        cap_krw=50_000_000,
+        slices=10,
+        execute_at="14:00",
+        confirm=False,
+        now=NOW,
+    )
+    reply = await dca_command.arm_custom(
+        repo,
+        fake_redis,
+        chat_id="42",
+        ticker="069500",
+        cap_krw=99_000_000,
+        slices=10,
+        execute_at="14:00",
+        confirm=True,
+        now=NOW,
+    )
+    assert "확인할 무장 내역이 없습니다" in reply
+    assert not repo.campaigns
+
+
+@pytest.mark.asyncio
+async def test_arm_custom_validation(fake_redis):
+    repo = InMemoryDcaRepo()
+
+    async def _arm(**kw):
+        base = dict(
+            chat_id="42",
+            ticker="069500",
+            cap_krw=50_000_000,
+            slices=10,
+            execute_at="14:00",
+            confirm=False,
+            now=NOW,
+        )
+        base.update(kw)
+        return await dca_command.arm_custom(repo, fake_redis, **base)
+
+    assert "6자리" in await _arm(ticker="69500")
+    assert "너무 작습니다" in await _arm(cap_krw=5_000)
+    assert "슬라이스 수는" in await _arm(slices=0)
+    assert "슬라이스 수는" in await _arm(slices=99)
+    assert "집행 시각은" in await _arm(execute_at="16:00")
+    assert not repo.campaigns  # 검증 실패는 무장 안 됨
+
+
+def test_arm_custom_strings_html_safe():
+    assert _html_safe(dca_command.ARM_CUSTOM_USAGE)
+    p = dca_command.build_custom_preset("069500", 50_000_000, 10, "14:00")
+    assert _html_safe(dca_command.format_custom_echo(p))

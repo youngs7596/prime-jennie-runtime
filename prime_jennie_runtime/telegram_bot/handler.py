@@ -880,6 +880,44 @@ class CommandHandler:
                 now=self._now(),
             )
             return CommandResult(reply=reply)
+        if sub == "arm-custom":
+            rest = parts[1:]
+            confirm = bool(rest) and rest[-1] == "확인"
+            if confirm:
+                rest = rest[:-1]
+            if len(rest) < 2:
+                return CommandResult(reply=dca_command.ARM_CUSTOM_USAGE)
+            ticker = rest[0]
+            cap_krw = dca_command.parse_krw(rest[1])
+            if cap_krw is None:
+                return CommandResult(
+                    reply="총액을 숫자로 입력하세요. 예: 50000000 · 5000만 · 0.5억"
+                )
+            # 슬라이스수·시각은 순서 무관 — ':' 있으면 시각, 아니면 슬라이스수.
+            slices = dca_command.CUSTOM_DEFAULT_SLICES
+            execute_at = dca_command.CUSTOM_DEFAULT_TIME
+            for tok in rest[2:]:
+                if ":" in tok:
+                    parsed = dca_command.parse_hhmm(tok)
+                    if parsed is None:
+                        return CommandResult(reply="시각은 HH:MM 형식입니다. 예: 14:00")
+                    execute_at = parsed
+                elif tok.isdigit():
+                    slices = int(tok)
+                else:
+                    return CommandResult(reply=dca_command.ARM_CUSTOM_USAGE)
+            reply = await dca_command.arm_custom(
+                repo,
+                self._redis,
+                chat_id=chat_id,
+                ticker=ticker,
+                cap_krw=cap_krw,
+                slices=slices,
+                execute_at=execute_at,
+                confirm=confirm,
+                now=self._now(),
+            )
+            return CommandResult(reply=reply)
         return CommandResult(reply=dca_command.DCA_USAGE)
 
     async def _handle_adopt(self, args: str, chat_id: str = "", **_: object) -> CommandResult:

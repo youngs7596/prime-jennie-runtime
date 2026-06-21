@@ -241,14 +241,17 @@ async def test_stop_gate_blocks_everything(fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_pause_gate_blocks_everything(fake_redis):
+async def test_pause_does_not_block_dca(fake_redis):
+    # PAUSE 는 무확인 자동 진입만 막는다. DCA 는 운영자가 직접 지시한 매수라 승인 매수처럼
+    # PAUSE 를 통과한다 (상시 PAUSE = exit_only_human_approved 아래서도 집행돼야 함).
     repo = InMemoryDcaRepo()
     kis = FakeKis(price=80_000)
     cid = await seed(repo, "production")
-    await fake_redis.set("control.state:pause", b"manual")
+    await fake_redis.set("control.state:pause", b"exit_only_human_approved_v1")
 
-    await run_dca_tick(repo=repo, kis=kis, redis_client=fake_redis, now=at(0, 14, 30))
-    assert repo.campaigns[cid].slices_done == 0
+    await run_dca_tick(repo=repo, kis=kis, redis_client=fake_redis, now=at(0, 14, 0))
+    assert repo.campaigns[cid].slices_done == 1
+    assert len(kis.buy_calls) == 1
 
 
 @pytest.mark.asyncio

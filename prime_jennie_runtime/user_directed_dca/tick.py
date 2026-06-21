@@ -67,8 +67,12 @@ async def run_dca_tick(
     try:
         now = now or datetime.now(KST)
         snap = await SystemState(redis_client).snapshot()
-        if snap.stopped or snap.paused:
-            logger.info("dca_tick skip: system %s", "stopped" if snap.stopped else "paused")
+        # STOP(긴급정지)만 전면 차단한다. PAUSE 는 통과 — DCA 는 운영자가 /dca arm 으로
+        # 직접 지시한 매수라 승인 매수(approved_buy)와 같은 부류다. 시스템 PAUSE 는 무확인
+        # 자동 진입만 막고 지시·승인 매수는 흘려보낸다(consumer.py 의 manual_buy 만 차단).
+        # 사람-승인 매매 체제의 상시 PAUSE(exit_only_human_approved) 아래서도 DCA 는 돈다.
+        if snap.stopped:
+            logger.info("dca_tick skip: system stopped")
             return
         executor = SliceExecutor(repo, kis, notifier=notifier or Notifier(redis_client))
         for camp in await repo.fetch_active_campaigns():

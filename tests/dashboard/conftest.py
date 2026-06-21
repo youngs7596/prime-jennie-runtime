@@ -235,6 +235,40 @@ _SCHEMA_STATEMENTS = [
         PRIMARY KEY (stock_code, price_date)
     )
     """,
+    # dca_campaigns / dca_slice_executions (migration 026) — /dca 진행률 카드
+    """
+    CREATE TABLE IF NOT EXISTS dca_campaigns (
+        id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        preset TEXT NOT NULL,
+        cap_krw BIGINT NOT NULL,
+        total_slices INT NOT NULL DEFAULT 10,
+        execute_at_kst TEXT NOT NULL DEFAULT '14:00',
+        cumulative_filled_krw BIGINT NOT NULL DEFAULT 0,
+        cumulative_filled_qty BIGINT NOT NULL DEFAULT 0,
+        slices_done INT NOT NULL DEFAULT 0,
+        dry_run INT NOT NULL DEFAULT 1,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dca_slice_executions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slice_key TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        ticker TEXT NOT NULL,
+        slice_no INT NOT NULL,
+        trigger_kind TEXT NOT NULL,
+        trade_date DATE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        budget_krw BIGINT NOT NULL,
+        filled_qty INT NOT NULL DEFAULT 0,
+        filled_krw BIGINT NOT NULL DEFAULT 0,
+        avg_price NUMERIC NOT NULL DEFAULT 0,
+        reject_reason TEXT
+    )
+    """,
 ]
 
 

@@ -31,6 +31,7 @@ from prime_jennie_runtime.infra.db import create_engine, create_session_factory
 from .routers import (
     airflow,
     control,
+    dca,
     llm_stats,
     logs,
     macro,
@@ -99,6 +100,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.include_router(control.router, prefix="/api")
     app.include_router(news.router, prefix="/api")
     app.include_router(paper.router, prefix="/api")
+    app.include_router(dca.router, prefix="/api")
 
     @app.get("/health")
     async def health() -> dict:

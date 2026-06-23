@@ -39,7 +39,9 @@ DCA_USAGE = (
     "/dca status — 진행 상황\n"
     "/dca arm preset [종목] — 프리셋 무장 (echo)\n"
     "/dca arm-custom 종목 총액 [슬라이스] [HH:MM] — 임의 무장 (echo)\n"
-    "/dca cancel 종목|all — 중단\n\n"
+    "/dca pause 종목|all — 일시중지 (재개 가능)\n"
+    "/dca resume 종목|all — 재개\n"
+    "/dca cancel 종목|all — 영구 중단 (취소)\n\n"
     "preset: production | smoke 종목코드 | dryrun"
 )
 ARM_USAGE = "사용법: <code>/dca arm production|dryrun|smoke [종목코드]</code>"
@@ -309,23 +311,69 @@ async def _confirm_custom(
     )
 
 
-async def cancel(repo: Any, target: str) -> str:
+async def _transition(
+    repo: Any, target: str, *, from_status: str, to_status: str, verb: str, note: str = ""
+) -> str:
+    """target(all | campaign id | 종목코드)의 from_status 캠페인을 to_status 로 전이.
+
+    cancel(중단)·pause(일시중지)·resume(재개)가 같은 표적 해석을 공유한다. 보유 주식은
+    건드리지 않고 캠페인 row 의 상태만 바꾼다 — 이후 tick 이 active 만 집행하므로 멈추거나
+    이어진다.
+    """
     if target == "all":
-        actives = await repo.fetch_active_campaigns()
-        for c in actives:
-            await repo.set_status(c.id, "halted")
-        return f"{len(actives)}개 캠페인을 중단했습니다 (매도는 하지 않음)."
+        matches = await repo.fetch_campaigns([from_status])
+        for c in matches:
+            await repo.set_status(c.id, to_status)
+        if not matches:
+            return f"{verb}할 캠페인이 없습니다."
+        return f"{len(matches)}개 캠페인을 {verb}했습니다{note}."
     # campaign id 또는 종목코드
     camp = await repo.fetch_campaign(target)
-    if camp is not None and camp.status == "active":
-        await repo.set_status(camp.id, "halted")
-        return f"캠페인 {camp.id} 중단."
-    actives = [c for c in await repo.fetch_active_campaigns() if c.ticker == target]
-    if not actives:
-        return f"활성 캠페인을 찾지 못했습니다: {target}"
-    for c in actives:
-        await repo.set_status(c.id, "halted")
-    return f"{target} 캠페인 {len(actives)}개 중단 (매도는 하지 않음)."
+    if camp is not None and camp.status == from_status:
+        await repo.set_status(camp.id, to_status)
+        return f"캠페인 {camp.id} {verb}{note}."
+    matches = [c for c in await repo.fetch_campaigns([from_status]) if c.ticker == target]
+    if not matches:
+        return f"{verb}할 캠페인을 찾지 못했습니다: {target}"
+    for c in matches:
+        await repo.set_status(c.id, to_status)
+    return f"{target} 캠페인 {len(matches)}개 {verb}{note}."
+
+
+async def cancel(repo: Any, target: str) -> str:
+    """active 캠페인을 영구 중단(halted). 이어가려면 다시 무장해야 한다."""
+    return await _transition(
+        repo,
+        target,
+        from_status="active",
+        to_status="halted",
+        verb="중단",
+        note=" (매도는 하지 않음)",
+    )
+
+
+async def pause(repo: Any, target: str) -> str:
+    """active 캠페인을 일시중지(paused). 진행상태를 보존해 resume 으로 이어갈 수 있다."""
+    return await _transition(
+        repo,
+        target,
+        from_status="active",
+        to_status="paused",
+        verb="일시중지",
+        note=" (매도 없음, <code>/dca resume</code> 으로 재개)",
+    )
+
+
+async def resume(repo: Any, target: str) -> str:
+    """일시중지(paused)된 캠페인을 다시 active 로. 멈춘 슬라이스부터 이어간다."""
+    return await _transition(
+        repo,
+        target,
+        from_status="paused",
+        to_status="active",
+        verb="재개",
+        note=" — 다음 집행 시각부터 이어갑니다",
+    )
 
 
 __all__ = [
@@ -342,6 +390,8 @@ __all__ = [
     "load_pending_arm",
     "parse_hhmm",
     "parse_krw",
+    "pause",
+    "resume",
     "status_text",
     "store_pending_arm",
 ]

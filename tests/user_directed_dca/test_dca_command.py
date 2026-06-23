@@ -181,6 +181,97 @@ async def test_cancel_all(fake_redis):
     assert all(c.status == "halted" for c in repo.campaigns.values())
 
 
+async def _arm_production(repo, fake_redis):
+    """production 2종목(005930·000660) 무장 — pause/resume 테스트 공통 준비."""
+    await dca_command.arm(
+        repo,
+        fake_redis,
+        chat_id="42",
+        preset_name="production",
+        ticker=None,
+        confirm=False,
+        now=NOW,
+    )
+    await dca_command.arm(
+        repo, fake_redis, chat_id="42", preset_name="production", ticker=None, confirm=True, now=NOW
+    )
+
+
+@pytest.mark.asyncio
+async def test_pause_then_resume_by_ticker(fake_redis):
+    repo = InMemoryDcaRepo()
+    await _arm_production(repo, fake_redis)
+
+    paused = await dca_command.pause(repo, "005930")
+    assert "일시중지" in paused
+    by_ticker = {c.ticker: c for c in repo.campaigns.values()}
+    assert by_ticker["005930"].status == "paused"
+    # 나머지 종목은 그대로 active — 한 종목만 멈춘다
+    assert by_ticker["000660"].status == "active"
+
+    resumed = await dca_command.resume(repo, "005930")
+    assert "재개" in resumed
+    assert by_ticker["005930"].status == "active"
+
+
+@pytest.mark.asyncio
+async def test_pause_all_then_resume_all(fake_redis):
+    repo = InMemoryDcaRepo()
+    await _arm_production(repo, fake_redis)
+
+    reply = await dca_command.pause(repo, "all")
+    assert "2개" in reply
+    assert all(c.status == "paused" for c in repo.campaigns.values())
+
+    reply = await dca_command.resume(repo, "all")
+    assert "2개" in reply
+    assert all(c.status == "active" for c in repo.campaigns.values())
+
+
+@pytest.mark.asyncio
+async def test_pause_preserves_progress(fake_redis):
+    # 일시중지는 보유·진행상태를 보존한다 — slices_done·누적이 그대로여야 한다.
+    repo = InMemoryDcaRepo()
+    await _arm_production(repo, fake_redis)
+    camp = next(c for c in repo.campaigns.values() if c.ticker == "005930")
+    camp.slices_done = 2
+    camp.cumulative_filled_krw = 23_000_000
+    camp.cumulative_filled_qty = 300
+
+    await dca_command.pause(repo, "005930")
+    assert camp.status == "paused"
+    assert camp.slices_done == 2
+    assert camp.cumulative_filled_krw == 23_000_000
+    assert camp.cumulative_filled_qty == 300
+
+
+@pytest.mark.asyncio
+async def test_resume_only_targets_paused(fake_redis):
+    # active 캠페인을 resume 하려 하면 대상이 없다(이미 돌고 있음). halted 도 마찬가지.
+    repo = InMemoryDcaRepo()
+    await _arm_production(repo, fake_redis)
+    reply = await dca_command.resume(repo, "005930")
+    assert "찾지 못했습니다" in reply
+    assert all(c.status == "active" for c in repo.campaigns.values())
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_not_found(fake_redis):
+    repo = InMemoryDcaRepo()
+    assert "없습니다" in await dca_command.pause(repo, "all")
+    assert "없습니다" in await dca_command.resume(repo, "all")
+    assert "찾지 못했습니다" in await dca_command.pause(repo, "999999")
+
+
+@pytest.mark.asyncio
+async def test_pause_resume_messages_html_safe(fake_redis):
+    repo = InMemoryDcaRepo()
+    await _arm_production(repo, fake_redis)
+    assert _html_safe(await dca_command.pause(repo, "005930"))
+    assert _html_safe(await dca_command.resume(repo, "005930"))
+    assert _html_safe(dca_command.DCA_USAGE)
+
+
 def test_status_text_empty_and_populated():
     assert "없습니다" in dca_command.status_text([])
 

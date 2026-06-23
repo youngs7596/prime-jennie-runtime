@@ -44,7 +44,7 @@ class DcaCampaign(BaseModel):
     id: str
     ticker: str
     stock_name: str | None = None
-    status: str  # active | completed | cap_reached | halted
+    status: str  # active | paused | completed | cap_reached | halted
     preset: str
     cap_krw: int
     total_slices: int
@@ -67,7 +67,7 @@ class DcaState(BaseModel):
 async def get_campaigns(
     session: AsyncSession = Depends(get_session),
 ) -> DcaState:
-    """전체 DCA 캠페인 + 캠페인별 최근 슬라이스. active 캠페인을 먼저 정렬."""
+    """전체 DCA 캠페인 + 캠페인별 최근 슬라이스. active·paused 를 먼저 정렬."""
     camp_rows = (
         (
             await session.execute(
@@ -77,7 +77,7 @@ async def get_campaigns(
                     "c.cumulative_filled_qty, c.execute_at_kst, c.dry_run "
                     "FROM dca_campaigns c "
                     "LEFT JOIN stock_masters sm ON sm.stock_code = c.ticker "
-                    "ORDER BY CASE WHEN c.status='active' THEN 0 ELSE 1 END, c.id"
+                    "ORDER BY CASE WHEN c.status IN ('active','paused') THEN 0 ELSE 1 END, c.id"
                 )
             )
         )

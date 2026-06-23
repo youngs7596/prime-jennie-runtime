@@ -29,7 +29,8 @@ class CampaignStatus(StrEnum):
     ACTIVE = "active"
     COMPLETED = "completed"
     CAP_REACHED = "cap_reached"
-    HALTED = "halted"
+    PAUSED = "paused"  # 일시중지 — 슬라이스 집행만 멈추고 진행상태 보존, resume 으로 복귀
+    HALTED = "halted"  # 영구 중단(취소) — 이어가려면 다시 무장
 
 
 class SliceStatus(StrEnum):

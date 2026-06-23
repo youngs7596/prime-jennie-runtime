@@ -854,13 +854,18 @@ class CommandHandler:
         sub = parts[0].lower() if parts else "status"
 
         if sub == "status":
-            campaigns = await repo.fetch_campaigns(["active", "cap_reached", "completed"])
+            campaigns = await repo.fetch_campaigns(["active", "paused", "cap_reached", "completed"])
             return CommandResult(reply=dca_command.status_text(campaigns))
-        if sub == "cancel":
+        if sub in ("cancel", "pause", "resume"):
             target = parts[1] if len(parts) > 1 else ""
             if not target:
-                return CommandResult(reply="사용법: <code>/dca cancel 종목|all</code>")
-            return CommandResult(reply=await dca_command.cancel(repo, target))
+                return CommandResult(reply=f"사용법: <code>/dca {sub} 종목|all</code>")
+            fn = {
+                "cancel": dca_command.cancel,
+                "pause": dca_command.pause,
+                "resume": dca_command.resume,
+            }[sub]
+            return CommandResult(reply=await fn(repo, target))
         if sub == "arm":
             rest = parts[1:]
             confirm = bool(rest) and rest[-1] == "확인"

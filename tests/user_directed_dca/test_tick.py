@@ -153,7 +153,9 @@ async def test_rollover_after_partial_fill(fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_acceleration_pulls_forward_and_blocks_scheduled(fake_redis):
+async def test_acceleration_pulls_forward_and_blocks_scheduled(fake_redis, monkeypatch):
+    # 가속은 영구 기본값 A 에서 비활성이므로, 잠든 경로를 검증하려면 명시적으로 켠다.
+    monkeypatch.setattr("prime_jennie_runtime.user_directed_dca.tick.ACCELERATION_ENABLED", True)
     repo = InMemoryDcaRepo()
     kis = FakeKis(price=76_000, open_price=80_000, change_pct=-1.0)  # 시가대비 -5%
     cid = await seed(repo, "production")
@@ -173,7 +175,8 @@ async def test_acceleration_pulls_forward_and_blocks_scheduled(fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_acceleration_cooldown_blocks_next_day(fake_redis):
+async def test_acceleration_cooldown_blocks_next_day(fake_redis, monkeypatch):
+    monkeypatch.setattr("prime_jennie_runtime.user_directed_dca.tick.ACCELERATION_ENABLED", True)
     repo = InMemoryDcaRepo()
     kis = FakeKis(price=70_000, open_price=80_000, change_pct=-12.0)
     await seed(repo, "production")
@@ -183,6 +186,27 @@ async def test_acceleration_cooldown_blocks_next_day(fake_redis):
     await run_dca_tick(repo=repo, kis=kis, redis_client=fake_redis, now=at(1, 9, 30))
     accel_count = sum(1 for s in repo.slices if s.trigger_kind == "acceleration")
     assert accel_count == 1  # 둘째 날 가속 없음
+
+
+@pytest.mark.asyncio
+async def test_acceleration_disabled_by_default_runs_strategy_a(fake_redis):
+    """영구 기본값 A: 급락일 장중에도 가속하지 않고, 예정 시각에만 base 슬라이스 집행."""
+    repo = InMemoryDcaRepo()
+    kis = FakeKis(price=70_000, open_price=80_000, change_pct=-12.0)  # 급락이어도
+    cid = await seed(repo, "production")
+
+    # 오전 10:00 — 가속 임계를 한참 넘는 급락이지만 기본값에선 아무 집행 없음
+    await run_dca_tick(repo=repo, kis=kis, redis_client=fake_redis, now=at(0, 10, 0))
+    assert repo.campaigns[cid].slices_done == 0
+    assert len(kis.buy_calls) == 0
+    assert not any(s.trigger_kind == "acceleration" for s in repo.slices)
+
+    # 같은 날 14:00 예정 시각 — base 슬라이스 1개만 예정(scheduled)으로 집행
+    await run_dca_tick(repo=repo, kis=kis, redis_client=fake_redis, now=at(0, 14, 0))
+    assert repo.campaigns[cid].slices_done == 1
+    sched = [s for s in repo.slices if s.trigger_kind == "scheduled"]
+    assert len(sched) == 1 and sched[0].status == "filled"
+    assert not any(s.trigger_kind == "acceleration" for s in repo.slices)
 
 
 @pytest.mark.asyncio

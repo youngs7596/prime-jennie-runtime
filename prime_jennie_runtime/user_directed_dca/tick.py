@@ -45,6 +45,13 @@ _DEFAULT_SCHED_TIME = dt_time(14, 0)
 _MARKET_OPEN = dt_time(9, 0)
 _NEW_ORDER_CUTOFF = dt_time(15, 20)  # 이후엔 새 주문 시작 안 함
 
+# 영구 기본값 = 전략 A(무조건부 균등). 급락 가속(시점 당겨오기)은 기본 비활성.
+# 2026-06-23 백테스트(.ai/analyses/2026-06-23-dca-backtest-a-vs-c/REPORT.md) 결정:
+# 과거 한국 폭락 4건에서 가속(C)이 균등(A)을 못 이겼고(6개월 -0.86%p, MDD 더 깊음),
+# 배수·트리거를 흔들어도 결론이 음(-)으로 robust 했다. 가속 코드는 살려두되 잠근다
+# (재설계 여지: 단일일 트리거 + 완만한 배수 + 예산 유보). 켜려면 이 상수만 True.
+ACCELERATION_ENABLED = False
+
 
 def _sched_time(campaign: Campaign) -> dt_time:
     """캠페인 집행 시각(execute_at_kst, 'HH:MM') 파싱. 불량값이면 기본값."""
@@ -116,8 +123,12 @@ async def _process_campaign(
         await _maybe_complete(repo, camp)
         return
 
-    # G3. 급락 가속 — 장중이면 다음 예정 슬라이스를 당겨 집행
-    if _MARKET_OPEN <= now.time() <= _NEW_ORDER_CUTOFF and await _accel_fires(kis, camp, now):
+    # G3. 급락 가속 — 장중이면 다음 예정 슬라이스를 당겨 집행 (영구 기본값 A 라 비활성)
+    if (
+        ACCELERATION_ENABLED
+        and _MARKET_OPEN <= now.time() <= _NEW_ORDER_CUTOFF
+        and await _accel_fires(kis, camp, now)
+    ):
         acc = accel_slot(camp)
         if acc is not None:
             slot, slice_no, trigger = acc

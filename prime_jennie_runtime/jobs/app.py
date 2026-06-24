@@ -71,6 +71,7 @@ from .market_data import (
     collect_us_market,
     refresh_market_caps,
 )
+from .market_inputs import collect_market_investor_flows, collect_vkospi
 from .minute_chart import collect_minute_chart
 from .paper_outcomes import measure_paper_outcomes
 from .positions import sync_positions
@@ -175,6 +176,12 @@ def build_handlers(
 
     async def h_collect_foreign_holding() -> None:
         await collect_foreign_holding(pool, http)
+
+    async def h_collect_vkospi(range_token: str = "1M") -> None:
+        await collect_vkospi(pool, http, range_token=range_token)
+
+    async def h_collect_market_investor_flows() -> None:
+        await collect_market_investor_flows(pool, http)
 
     async def h_collect_dart_filings(days: int = 7) -> None:
         await collect_dart_filings(pool, http, api_key=dart_api_key, days=days)
@@ -312,6 +319,8 @@ def build_handlers(
         "collect_us_market": h_collect_us_market,
         "collect_investor_trading": h_collect_investor_trading,
         "collect_foreign_holding": h_collect_foreign_holding,
+        "collect_vkospi": h_collect_vkospi,
+        "collect_market_investor_flows": h_collect_market_investor_flows,
         "collect_dart_filings": h_collect_dart_filings,
         "collect_consensus": h_collect_consensus,
         "collect_naver_roe": h_collect_naver_roe,

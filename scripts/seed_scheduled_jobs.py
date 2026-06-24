@@ -171,6 +171,24 @@ SEEDS: list[SeedJob] = [
         cron="0 19 * * 1-5",
         kwargs={},
     ),
+    # 매크로 게이트 입력 (2026-06-24) — VKOSPI 일별 (CNBC). KRX 장마감 후 반영되므로
+    # 16:10 KST 평일. range 1M 이 실제론 ~1년치라 증분·공백 self-heal 충분.
+    SeedJob(
+        id="job_worker.collect_vkospi",
+        owner="job_worker",
+        handler_key="collect_vkospi",
+        cron="10 16 * * 1-5",
+        kwargs={"range_token": "1M"},
+    ),
+    # 매크로 게이트 입력 (2026-06-24) — 시장전체 투자자 수급(연기금 분리, 네이버).
+    # 장후 수급 확정 후 18:40 KST 평일 (종목별 collect_investor_trading 30 18 다음).
+    SeedJob(
+        id="job_worker.collect_market_investor_flows",
+        owner="job_worker",
+        handler_key="collect_market_investor_flows",
+        cron="40 18 * * 1-5",
+        kwargs={},
+    ),
     # Track B — collect_dart_filings (v2 utility_jobs_dag: 45 18 * * 1-5, DART 정기공시).
     SeedJob(
         id="job_worker.collect_dart_filings",

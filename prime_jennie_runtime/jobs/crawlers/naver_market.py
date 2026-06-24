@@ -47,6 +47,24 @@ class InvestorFlows:
 
 
 @dataclass
+class MarketInvestorBreakdown:
+    """시장전체 일별 투자자유형별 순매수 — 연기금이 기관에서 분리된 전체 분해."""
+
+    trade_date: date
+    market: str
+    individual_net: float  # 개인
+    foreign_net: float  # 외국인
+    institution_net: float  # 기관계
+    financial_inv_net: float  # 금융투자
+    insurance_net: float  # 보험
+    trust_net: float  # 투신(사모)
+    bank_net: float  # 은행
+    etc_finance_net: float  # 기타금융기관
+    pension_net: float  # 연기금등
+    etc_corp_net: float  # 기타법인
+
+
+@dataclass
 class MarketStock:
     stock_code: str
     stock_name: str
@@ -158,6 +176,103 @@ async def fetch_investor_flows(
     except Exception as e:
         logger.warning("Naver investor flows fetch failed (%s): %s", market, e)
         return None
+
+
+# 네이버 investorDealTrendDay 컬럼명 → MarketInvestorBreakdown 필드. 헤더 텍스트에
+# 부분일치로 매핑한다(투신(사모)·기타금융기관·연기금등 표기 변형 흡수). 충돌 없음 검증됨.
+_INVESTOR_COL_KEYS: list[tuple[str, str]] = [
+    ("개인", "individual_net"),
+    ("외국인", "foreign_net"),
+    ("기관계", "institution_net"),
+    ("금융투자", "financial_inv_net"),
+    ("보험", "insurance_net"),
+    ("투신", "trust_net"),
+    ("은행", "bank_net"),
+    ("기타금융", "etc_finance_net"),
+    ("연기금", "pension_net"),
+    ("기타법인", "etc_corp_net"),
+]
+
+
+def _parse_net(raw: str) -> float:
+    raw = raw.strip().replace(",", "").replace("−", "-").replace("–", "-")
+    if not raw or raw == "-":
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
+async def fetch_market_investor_breakdown(
+    client: httpx.AsyncClient, market: str, bizdate: str
+) -> list[MarketInvestorBreakdown]:
+    """시장전체 일별 투자자유형별 순매수(연기금 분리). 한 페이지가 최근 ~20거래일을
+    담으므로 행 전부를 반환한다(수집기가 일괄 upsert → 공백 self-heal). 단위는 네이버
+    원시값(백만원), 부호=순매수. sosession: kospi=01, kosdaq=02."""
+    sosession = "01" if market.lower() == "kospi" else "02"
+    market_label = "KOSPI" if market.lower() == "kospi" else "KOSDAQ"
+    url = "https://finance.naver.com/sise/investorDealTrendDay.naver"
+    try:
+        resp = await client.get(
+            url,
+            headers=NAVER_HEADERS,
+            params={"bizdate": bizdate, "sosession": sosession},
+            timeout=10,
+        )
+        resp.encoding = "euc-kr"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        table = soup.select_one("table.type_1")
+        if not table:
+            logger.warning("Naver investor breakdown: table not found (%s)", market)
+            return []
+
+        # 2단 헤더: row0 의 '기관'(colspan) 그룹을 row1 의 하위 컬럼으로 펼쳐 평탄화.
+        header_rows = [tr for tr in table.select("tr") if tr.select("th")][:2]
+        if len(header_rows) < 2:
+            logger.warning("Naver investor breakdown: header rows missing (%s)", market)
+            return []
+        row0 = [th.get_text(strip=True) for th in header_rows[0].select("th")]
+        row1 = [th.get_text(strip=True) for th in header_rows[1].select("th")]
+        flat: list[str] = []
+        for name in row0:
+            if name == "기관":  # colspan 그룹 헤더 → 하위 컬럼으로 치환
+                flat.extend(row1)
+            else:
+                flat.append(name)
+
+        # 평탄화한 컬럼명 → 데이터 td 인덱스 → 필드. 0번은 날짜.
+        idx_to_field: dict[int, str] = {}
+        for i, name in enumerate(flat):
+            for key, field in _INVESTOR_COL_KEYS:
+                if key in name:
+                    idx_to_field[i] = field
+                    break
+        if "pension_net" not in idx_to_field.values():
+            logger.warning("Naver investor breakdown: 연기금 컬럼 미발견 (%s)", market)
+            return []
+
+        results: list[MarketInvestorBreakdown] = []
+        for row in table.select("tr"):
+            tds = row.select("td")
+            if len(tds) < len(flat):
+                continue
+            date_txt = tds[0].get_text(strip=True).replace(".", "")  # "260623"
+            if len(date_txt) != 6 or not date_txt.isdigit():
+                continue
+            trade_date = date(2000 + int(date_txt[0:2]), int(date_txt[2:4]), int(date_txt[4:6]))
+            fields = {field: 0.0 for _, field in _INVESTOR_COL_KEYS}
+            for i, field in idx_to_field.items():
+                fields[field] = _parse_net(tds[i].get_text(strip=True))
+            results.append(
+                MarketInvestorBreakdown(trade_date=trade_date, market=market_label, **fields)
+            )
+        if not results:
+            logger.warning("Naver investor breakdown: no data rows (%s, %s)", market, bizdate)
+        return results
+    except Exception as e:
+        logger.warning("Naver investor breakdown fetch failed (%s): %s", market, e)
+        return []
 
 
 async def fetch_market_stocks(

@@ -31,8 +31,9 @@ _VKOSPI_MIN, _VKOSPI_MAX = 1.0, 300.0
 async def collect_vkospi(
     pool: Any, http: httpx.AsyncClient, *, range_token: str = "1M"
 ) -> dict[str, int]:
-    """CNBC 에서 VKOSPI 일별을 받아 vkospi_daily 에 upsert. range_token 기본 1M(≈1년,
-    증분·공백 self-heal 충분). 최초 백필은 '5Y'(2016~)로 한 번 호출."""
+    """CNBC 에서 VKOSPI 일별을 받아 vkospi_daily 에 upsert. range_token 기본 1M(≈1년 일봉,
+    증분·공백 self-heal 충분). 최초 백필은 '6M'(≈3년 일봉, 가장 깊음) — 5Y/ALL 은 주봉/월봉
+    이라 일봉 백필엔 쓰지 말 것(토큰 이름이 깊이·주기와 안 맞음, cnbc_market 참조)."""
     bars = await fetch_vkospi_daily(http, range_token)
     valid = [b for b in bars if _VKOSPI_MIN <= b.close_price <= _VKOSPI_MAX]
     dropped = len(bars) - len(valid)

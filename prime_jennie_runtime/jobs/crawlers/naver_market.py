@@ -205,32 +205,34 @@ def _parse_net(raw: str) -> float:
 
 
 async def fetch_market_investor_breakdown(
-    client: httpx.AsyncClient, market: str, bizdate: str
+    client: httpx.AsyncClient, bizdate: str
 ) -> list[MarketInvestorBreakdown]:
-    """시장전체 일별 투자자유형별 순매수(연기금 분리). 한 페이지가 최근 ~20거래일을
+    """KOSPI 시장전체 일별 투자자유형별 순매수(연기금 분리). 한 페이지가 최근 ~20거래일을
     담으므로 행 전부를 반환한다(수집기가 일괄 upsert → 공백 self-heal). 단위는 네이버
-    원시값(백만원), 부호=순매수. sosession: kospi=01, kosdaq=02."""
-    sosession = "01" if market.lower() == "kospi" else "02"
-    market_label = "KOSPI" if market.lower() == "kospi" else "KOSDAQ"
+    원시값(백만원), 부호=순매수.
+
+    이 페이지는 KOSPI 시장전체만 준다. sosession=02(코스닥)를 넣어도 같은 KOSPI 값을
+    돌려주므로(2026-06-24 실측) market 인자를 두지 않고 KOSPI 로 고정한다. 코스닥 수급이
+    필요해지면 sosession 이 아닌 별도 출처(키움 REST 등)로 받아야 한다."""
     url = "https://finance.naver.com/sise/investorDealTrendDay.naver"
     try:
         resp = await client.get(
             url,
             headers=NAVER_HEADERS,
-            params={"bizdate": bizdate, "sosession": sosession},
+            params={"bizdate": bizdate, "sosession": "01"},
             timeout=10,
         )
         resp.encoding = "euc-kr"
         soup = BeautifulSoup(resp.text, "html.parser")
         table = soup.select_one("table.type_1")
         if not table:
-            logger.warning("Naver investor breakdown: table not found (%s)", market)
+            logger.warning("Naver investor breakdown: table not found")
             return []
 
         # 2단 헤더: row0 의 '기관'(colspan) 그룹을 row1 의 하위 컬럼으로 펼쳐 평탄화.
         header_rows = [tr for tr in table.select("tr") if tr.select("th")][:2]
         if len(header_rows) < 2:
-            logger.warning("Naver investor breakdown: header rows missing (%s)", market)
+            logger.warning("Naver investor breakdown: header rows missing")
             return []
         row0 = [th.get_text(strip=True) for th in header_rows[0].select("th")]
         row1 = [th.get_text(strip=True) for th in header_rows[1].select("th")]
@@ -249,7 +251,7 @@ async def fetch_market_investor_breakdown(
                     idx_to_field[i] = field
                     break
         if "pension_net" not in idx_to_field.values():
-            logger.warning("Naver investor breakdown: 연기금 컬럼 미발견 (%s)", market)
+            logger.warning("Naver investor breakdown: 연기금 컬럼 미발견")
             return []
 
         results: list[MarketInvestorBreakdown] = []
@@ -264,14 +266,12 @@ async def fetch_market_investor_breakdown(
             fields = {field: 0.0 for _, field in _INVESTOR_COL_KEYS}
             for i, field in idx_to_field.items():
                 fields[field] = _parse_net(tds[i].get_text(strip=True))
-            results.append(
-                MarketInvestorBreakdown(trade_date=trade_date, market=market_label, **fields)
-            )
+            results.append(MarketInvestorBreakdown(trade_date=trade_date, market="KOSPI", **fields))
         if not results:
-            logger.warning("Naver investor breakdown: no data rows (%s, %s)", market, bizdate)
+            logger.warning("Naver investor breakdown: no data rows (%s)", bizdate)
         return results
     except Exception as e:
-        logger.warning("Naver investor breakdown fetch failed (%s): %s", market, e)
+        logger.warning("Naver investor breakdown fetch failed: %s", e)
         return []
 
 

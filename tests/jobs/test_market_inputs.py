@@ -104,7 +104,7 @@ async def test_collect_market_investor_flows_upserts_pension():
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_INVESTOR_URL_RE).respond(200, content=_BREAKDOWN_HTML.encode("euc-kr"))
         async with httpx.AsyncClient() as client:
-            stats = await collect_market_investor_flows(pool, client, markets=("kospi",))
+            stats = await collect_market_investor_flows(pool, client)
     assert stats == {"upserted": 1}
     inserts = [c for c in pool.conn.execute_calls if "INSERT INTO market_investor_flows" in c[0]]
     assert len(inserts) == 1

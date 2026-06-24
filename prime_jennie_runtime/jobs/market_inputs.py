@@ -59,45 +59,43 @@ async def collect_vkospi(
     return {"upserted": upserted, "dropped": dropped}
 
 
-async def collect_market_investor_flows(
-    pool: Any, http: httpx.AsyncClient, *, markets: tuple[str, ...] = ("kospi", "kosdaq")
-) -> dict[str, int]:
-    """네이버 시장전체 투자자유형별 순매수(연기금 분리)를 market_investor_flows 에 upsert.
-    한 페이지가 최근 ~20거래일을 담으므로 한 번 호출로 최근 윈도우를 통째로 적재한다."""
+async def collect_market_investor_flows(pool: Any, http: httpx.AsyncClient) -> dict[str, int]:
+    """네이버 시장전체(KOSPI) 투자자유형별 순매수(연기금 분리)를 market_investor_flows 에
+    upsert. 출처가 KOSPI 시장전체만 줘서(sosession 무시, 2026-06-24 실측) KOSPI 한 시장만
+    적재한다. 한 페이지가 최근 ~20거래일을 담으므로 한 번 호출로 최근 윈도우를 통째로 적재."""
     bizdate = datetime.now(KST).strftime("%Y%m%d")
+    rows = await fetch_market_investor_breakdown(http, bizdate)
     upserted = 0
     async with pool.acquire() as conn:
-        for market in markets:
-            rows = await fetch_market_investor_breakdown(http, market, bizdate)
-            for r in rows:
-                await conn.execute(
-                    "INSERT INTO market_investor_flows "
-                    "(trade_date, market, individual_net, foreign_net, institution_net, "
-                    " financial_inv_net, insurance_net, trust_net, bank_net, etc_finance_net, "
-                    " pension_net, etc_corp_net, unit, source, updated_at) "
-                    "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'million_krw','naver',NOW()) "
-                    "ON CONFLICT (trade_date, market) DO UPDATE SET "
-                    "individual_net=EXCLUDED.individual_net, foreign_net=EXCLUDED.foreign_net, "
-                    "institution_net=EXCLUDED.institution_net, "
-                    "financial_inv_net=EXCLUDED.financial_inv_net, "
-                    "insurance_net=EXCLUDED.insurance_net, trust_net=EXCLUDED.trust_net, "
-                    "bank_net=EXCLUDED.bank_net, etc_finance_net=EXCLUDED.etc_finance_net, "
-                    "pension_net=EXCLUDED.pension_net, etc_corp_net=EXCLUDED.etc_corp_net, "
-                    "updated_at=NOW()",
-                    r.trade_date,
-                    r.market,
-                    r.individual_net,
-                    r.foreign_net,
-                    r.institution_net,
-                    r.financial_inv_net,
-                    r.insurance_net,
-                    r.trust_net,
-                    r.bank_net,
-                    r.etc_finance_net,
-                    r.pension_net,
-                    r.etc_corp_net,
-                )
-                upserted += 1
+        for r in rows:
+            await conn.execute(
+                "INSERT INTO market_investor_flows "
+                "(trade_date, market, individual_net, foreign_net, institution_net, "
+                " financial_inv_net, insurance_net, trust_net, bank_net, etc_finance_net, "
+                " pension_net, etc_corp_net, unit, source, updated_at) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'million_krw','naver',NOW()) "
+                "ON CONFLICT (trade_date, market) DO UPDATE SET "
+                "individual_net=EXCLUDED.individual_net, foreign_net=EXCLUDED.foreign_net, "
+                "institution_net=EXCLUDED.institution_net, "
+                "financial_inv_net=EXCLUDED.financial_inv_net, "
+                "insurance_net=EXCLUDED.insurance_net, trust_net=EXCLUDED.trust_net, "
+                "bank_net=EXCLUDED.bank_net, etc_finance_net=EXCLUDED.etc_finance_net, "
+                "pension_net=EXCLUDED.pension_net, etc_corp_net=EXCLUDED.etc_corp_net, "
+                "updated_at=NOW()",
+                r.trade_date,
+                r.market,
+                r.individual_net,
+                r.foreign_net,
+                r.institution_net,
+                r.financial_inv_net,
+                r.insurance_net,
+                r.trust_net,
+                r.bank_net,
+                r.etc_finance_net,
+                r.pension_net,
+                r.etc_corp_net,
+            )
+            upserted += 1
     logger.info("collect_market_investor_flows: upserted=%d", upserted)
     return {"upserted": upserted}
 

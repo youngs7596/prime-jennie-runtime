@@ -112,7 +112,7 @@ async def test_fetch_market_investor_breakdown_separates_pension():
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_INVESTOR_URL_RE).respond(200, content=_BREAKDOWN_HTML.encode("euc-kr"))
         async with httpx.AsyncClient() as client:
-            rows = await fetch_market_investor_breakdown(client, "kospi", "20260623")
+            rows = await fetch_market_investor_breakdown(client, "20260623")
     assert len(rows) == 2
     r = rows[0]
     assert r.trade_date == date(2026, 6, 23)
@@ -137,5 +137,5 @@ async def test_fetch_market_investor_breakdown_empty_when_no_pension_column():
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_INVESTOR_URL_RE).respond(200, content=html.encode("euc-kr"))
         async with httpx.AsyncClient() as client:
-            rows = await fetch_market_investor_breakdown(client, "kospi", "20260623")
+            rows = await fetch_market_investor_breakdown(client, "20260623")
     assert rows == []

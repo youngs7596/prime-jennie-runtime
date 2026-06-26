@@ -108,6 +108,10 @@ async def test_collect_market_investor_flows_upserts_pension():
     assert stats == {"upserted": 1}
     inserts = [c for c in pool.conn.execute_calls if "INSERT INTO market_investor_flows" in c[0]]
     assert len(inserts) == 1
+    # 단위 라벨은 억원(eok_krw) — 네이버 investorDealTrendDay 가 억원으로 준다.
+    # 'million_krw' 로 잘못 박혀 100배 과소였던 것을 2026-06-26 정정.
+    assert "'eok_krw'" in inserts[0][0]
+    assert "'million_krw'" not in inserts[0][0]
     args = inserts[0][1]
     assert args[1] == "KOSPI"
     assert args[2] == 85910.0  # individual_net

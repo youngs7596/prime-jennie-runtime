@@ -309,6 +309,24 @@ SEEDS: list[SeedJob] = [
         cron="20 7 * * 1-5",
         kwargs={},
     ),
+    # 딴지 증시 요약(김경록 PB, 닉 정대만mitsui) 수집. global_macro_news_articles 에
+    # source='ddanzi_kimkr' upsert → 07:30 global_news_digest 가 흡수 → 매크로 카운슬.
+    # 미국=개장 전(07:00, WSJ 와 같은 슬롯), 한국=마감 후(18:30, 다음 아침 digest 에 포함).
+    # 결측 허용 — 맥락 입력이지 하드 의존이 아님(설계 doc·잡 docstring 참고).
+    SeedJob(
+        id="job_worker.ddanzi_ingest_us",
+        owner="job_worker",
+        handler_key="ddanzi_ingest",
+        cron="0 7 * * 1-5",
+        kwargs={"market": "US"},
+    ),
+    SeedJob(
+        id="job_worker.ddanzi_ingest_kr",
+        owner="job_worker",
+        handler_key="ddanzi_ingest",
+        cron="30 18 * * 1-5",
+        kwargs={"market": "KR"},
+    ),
     # 사용자 지정 종목 buy-only 분할매수 tick (user_directed_dca). 매 영업일 장중 매 분.
     # 활성 캠페인이 없으면 즉시 no-op — 텔레그램 /dca arm 으로 무장돼야 일을 한다.
     # 매 분인 이유: 급락 가속을 조기 감지하고 VI 5분 재시도를 제때 집어야 하기 때문.

@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS vkospi_daily (
 
 -- 시장전체(KOSPI/KOSDAQ) 일별 투자자유형별 순매수 — 네이버 investorDealTrendDay.
 -- 핵심은 연기금(pension_net)이 기관계(institution_net)와 별개로 떨어진다는 것.
--- 값 단위는 네이버 페이지 원시값(백만원), 부호는 순매수(+매수/−매도).
+-- 값 단위는 네이버 페이지 원시값(억원 = 1e8 KRW), 부호는 순매수(+매수/−매도).
+-- (2026-06-26 정정: investorDealTrendDay 는 억원으로 준다. 종목별 frgn 수급과 100배
+--  안 맞아 발견 — 종목별 합이 시장전체보다 커지는 모순. 단위 라벨이 'million_krw' 로
+--  잘못 박혀 있었다. 값 자체는 raw 라 맞고 라벨만 100배 틀렸음.)
 CREATE TABLE IF NOT EXISTS market_investor_flows (
     trade_date        DATE        NOT NULL,
     market            VARCHAR(10) NOT NULL,           -- KOSPI | KOSDAQ
@@ -38,7 +41,7 @@ CREATE TABLE IF NOT EXISTS market_investor_flows (
     etc_finance_net   DOUBLE PRECISION,               -- 기타금융기관
     pension_net       DOUBLE PRECISION,               -- 연기금등
     etc_corp_net      DOUBLE PRECISION,               -- 기타법인
-    unit              TEXT        NOT NULL DEFAULT 'million_krw',
+    unit              TEXT        NOT NULL DEFAULT 'eok_krw',
     source            TEXT        NOT NULL DEFAULT 'naver',
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (trade_date, market)

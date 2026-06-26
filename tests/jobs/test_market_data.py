@@ -48,12 +48,17 @@ class _FakePool:
 async def test_refresh_market_caps_updates_from_snapshot():
     pool = _FakePool(rows=[{"stock_code": "005930"}, {"stock_code": "000660"}])
     base = "http://kis-gateway:8080"
+    # snapshot.market_cap 은 KIS hts_avls = 억원. stock_masters.market_cap 캐논은
+    # 백만원이라 ×100 으로 저장돼야 한다(2026-06-26 정정: ×100 누락이 유니버스 순위를
+    # 100배 뒤집은 회귀).
     with respx.mock(assert_all_called=False) as mock:
         mock.get(f"{base}/api/snapshot/005930").respond(
-            200, json={"stock_code": "005930", "market_cap": 420_000_000_000_000}
+            200,
+            json={"stock_code": "005930", "market_cap": 20_958_909},  # 억원
         )
         mock.get(f"{base}/api/snapshot/000660").respond(
-            200, json={"stock_code": "000660", "market_cap": 100_000_000_000_000}
+            200,
+            json={"stock_code": "000660", "market_cap": 20_789_528},  # 억원
         )
         async with httpx.AsyncClient() as client:
             # rate_per_sec 큰 값으로 sleep 회피
@@ -62,8 +67,8 @@ async def test_refresh_market_caps_updates_from_snapshot():
     updates = [c for c in pool.conn.calls if "UPDATE stock_masters" in c[0]]
     assert len(updates) == 2
     mapped = {c[1][1]: c[1][0] for c in updates}
-    assert mapped["005930"] == 420_000_000_000_000
-    assert mapped["000660"] == 100_000_000_000_000
+    assert mapped["005930"] == 20_958_909 * 100  # 억원 → 백만원
+    assert mapped["000660"] == 20_789_528 * 100
 
 
 @pytest.mark.asyncio

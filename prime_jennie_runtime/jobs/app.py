@@ -56,6 +56,7 @@ from .council_macro import (
     macro_quick,
     macro_validate_store,
 )
+from .ddanzi_ingest import ddanzi_ingest
 from .disclosures import collect_dart_filings
 from .factor_analysis import weekly_factor_analysis
 from .full_market_daily import collect_full_market_data
@@ -298,6 +299,11 @@ def build_handlers(
             llm_caller=briefing_llm_caller,
         )
 
+    async def h_ddanzi_ingest(market: str = "US") -> None:
+        # 딴지 증시 요약(미국=개장 전, 한국=마감 후)을 global_macro_news_articles 에 적재.
+        # 결측 허용 — 글 없으면 조용히 skip. cron 두 줄이 market kwarg 로 분기.
+        await ddanzi_ingest(pool, http, market=market)
+
     async def h_user_directed_dca_tick() -> None:
         # 사용자 지정 종목 buy-only 분할매수 — 매 영업일 장중 매 분 tick.
         # 활성 캠페인이 없으면 즉시 no-op. 휴장일 가드는 다른 핸들러와 같은 패턴.
@@ -337,6 +343,7 @@ def build_handlers(
         "global_news_crawl": h_global_news_crawl,
         "global_news_digest": h_global_news_digest,
         "wsj_gmail_ingest": h_wsj_gmail_ingest,
+        "ddanzi_ingest": h_ddanzi_ingest,
         "user_directed_dca_tick": h_user_directed_dca_tick,
     }
 

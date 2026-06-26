@@ -73,7 +73,7 @@ async def collect_market_investor_flows(pool: Any, http: httpx.AsyncClient) -> d
                 "(trade_date, market, individual_net, foreign_net, institution_net, "
                 " financial_inv_net, insurance_net, trust_net, bank_net, etc_finance_net, "
                 " pension_net, etc_corp_net, unit, source, updated_at) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'million_krw','naver',NOW()) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'eok_krw','naver',NOW()) "
                 "ON CONFLICT (trade_date, market) DO UPDATE SET "
                 "individual_net=EXCLUDED.individual_net, foreign_net=EXCLUDED.foreign_net, "
                 "institution_net=EXCLUDED.institution_net, "

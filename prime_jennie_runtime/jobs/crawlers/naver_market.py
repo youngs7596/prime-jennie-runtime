@@ -209,7 +209,8 @@ async def fetch_market_investor_breakdown(
 ) -> list[MarketInvestorBreakdown]:
     """KOSPI 시장전체 일별 투자자유형별 순매수(연기금 분리). 한 페이지가 최근 ~20거래일을
     담으므로 행 전부를 반환한다(수집기가 일괄 upsert → 공백 self-heal). 단위는 네이버
-    원시값(백만원), 부호=순매수.
+    원시값(억원 = 1e8 KRW), 부호=순매수. (구 docstring·migration 027 은 '백만원' 으로
+    잘못 적었었다 — 2026-06-26 종목별 frgn 과 100배 대조로 정정.)
 
     이 페이지는 KOSPI 시장전체만 준다. sosession=02(코스닥)를 넣어도 같은 KOSPI 값을
     돌려주므로(2026-06-24 실측) market 인자를 두지 않고 KOSPI 로 고정한다. 코스닥 수급이

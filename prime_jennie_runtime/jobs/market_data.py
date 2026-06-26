@@ -77,10 +77,16 @@ async def refresh_market_caps(
                 snap = resp.json()
                 market_cap = snap.get("market_cap")
                 if market_cap and market_cap > 0:
+                    # KIS hts_avls 는 억원 단위. stock_masters.market_cap 캐논은 백만원
+                    # (네이버 시드의 cap_eok×100 과 같은 단위)이라 ×100 으로 맞춘다.
+                    # 2026-06-26 정정: 이 ×100 누락으로 KIS 갱신 행이 100배 작게 들어가,
+                    # 유니버스의 ORDER BY market_cap 순위가 네이버 백만원 행과 뒤집혔다
+                    # (1.27조 ETN 이 103조 현대차 위에 랭크되는 라이브 사고).
+                    market_cap_mwon = market_cap * 100
                     await conn.execute(
                         "UPDATE stock_masters SET market_cap=$1, updated_at=NOW() "
                         "WHERE stock_code=$2",
-                        market_cap,
+                        market_cap_mwon,
                         code,
                     )
                     updated += 1

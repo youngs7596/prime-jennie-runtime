@@ -96,6 +96,14 @@ class MarketSnapshot(BaseModel):
     vix_prev: float | None = None
     vkospi: float | None = None
 
+    # 시장전체 투자자 순매수 (억원, +순매수/−순매도). LLM 맥락 참고용 — 결정론 closed
+    # 조건엔 미사용. 2026-06-24 백테스트상 게이트 예측력이 없어(VKOSPI 는 공포 뒤 반등하는
+    # 역방향, 연기금은 노이즈) 하드 트리거로 두지 않고 LLM 종합 판단의 참고 수치로만 노출한다.
+    # 외국인만 시장 방향과 동행하나 그것도 단독 closed 가 아니라 size 하향 근거. None=미수집.
+    market_foreign_net: float | None = None
+    market_institution_net: float | None = None
+    market_pension_net: float | None = None
+
     # 변동성
     kospi_20d_vol: float
     kospi_60d_vol: float

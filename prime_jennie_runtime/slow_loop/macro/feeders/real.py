@@ -106,6 +106,44 @@ async def _fetch_kospi_vol(engine: AsyncEngine) -> tuple[float, float]:
     return vol20, vol60
 
 
+async def _fetch_vkospi(engine: AsyncEngine) -> float | None:
+    """vkospi_daily 최신 종가 (CNBC, T-1 지연). 없으면 None.
+
+    게이트 프롬프트의 맥락 수치로만 쓰인다 — 결정론 closed 조건은 참조하지 않는다.
+    """
+    async with engine.begin() as conn:
+        res = await conn.execute(
+            text("SELECT close_price FROM vkospi_daily ORDER BY price_date DESC LIMIT 1")
+        )
+        row = res.one_or_none()
+    return _as_float(row[0]) if row is not None else None
+
+
+async def _fetch_market_flows(
+    engine: AsyncEngine,
+) -> tuple[float | None, float | None, float | None]:
+    """market_investor_flows(KOSPI 시장전체) 최신 1행에서 외국인/기관계/연기금 순매수(억원).
+
+    행이 없으면 셋 다 None. 맥락 참고용 — 결정론 closed 조건엔 안 쓴다.
+    """
+    async with engine.begin() as conn:
+        res = await conn.execute(
+            text(
+                "SELECT foreign_net, institution_net, pension_net "
+                "FROM market_investor_flows WHERE market = 'KOSPI' "
+                "ORDER BY trade_date DESC LIMIT 1"
+            )
+        )
+        row = res.mappings().one_or_none()
+    if row is None:
+        return None, None, None
+    return (
+        _as_float(row["foreign_net"]),
+        _as_float(row["institution_net"]),
+        _as_float(row["pension_net"]),
+    )
+
+
 async def _fetch_sector_drops(engine: AsyncEngine, as_of: datetime) -> list[SectorDrop]:
     """오늘 (또는 최신 장일) 섹터별 평균 change_pct 중 -2% 이하를 SectorDrop 으로 리턴."""
     target = as_of.date()
@@ -187,6 +225,11 @@ class RealMarketSnapshotFeeder:
         # VIX
         vix = _as_float(snap.get("vix"), 20.0)
 
+        # VKOSPI (vkospi_daily, CNBC T-1) + 시장전체 투자자 수급(연기금 분리, 억원).
+        # 둘 다 게이트 프롬프트의 맥락 수치 — 결정론 closed 조건엔 미사용(2026-06-24 결정).
+        vkospi = await _fetch_vkospi(self._engine)
+        mkt_foreign, mkt_inst, mkt_pension = await _fetch_market_flows(self._engine)
+
         # 변동성 계산
         vol20, vol60 = await _fetch_kospi_vol(self._engine)
 
@@ -210,7 +253,10 @@ class RealMarketSnapshotFeeder:
             gold_change_pct=gold_change_pct,
             vix=vix,
             vix_prev=None,
-            vkospi=None,
+            vkospi=vkospi,
+            market_foreign_net=mkt_foreign,
+            market_institution_net=mkt_inst,
+            market_pension_net=mkt_pension,
             kospi_20d_vol=vol20,
             kospi_60d_vol=vol60,
             major_sector_drops=sector_drops,

@@ -35,6 +35,10 @@ gate = "closed" 조건 (하나라도 충족 시 반드시 closed):
 - `event_type=other` 비중이 높으면 노이즈로 취급 — size 판단에 가중치 낮게
 - sentiment_score 절댓값보다 event_type 과 impact 를 먼저 본다. "-0.3 earnings high" 는 작은 숫자지만 중요 신호.
 
+변동성·수급 수치 해석 (VKOSPI / 시장 수급):
+- VKOSPI 와 연기금 순매수는 참고용 맥락이며 그 자체로 closed 트리거가 아니다. 우리 백테스트상 고VKOSPI 뒤는 오히려 반등하는 역방향이었고, 연기금 순매도도 하락 예고가 아니었다. 이 두 수치만 보고 게이트를 닫지 마십시오.
+- 외국인 순매수는 시장 방향과 동행하는 신호다(대량 순매도 = 약세 동행). 단독 closed 조건은 아니나, 다른 위험 신호와 겹치면 size_multiplier 를 한 단계 낮추는 근거로 봅니다.
+
 size_multiplier 가이드 (open 은 2단계 — 0.75 / 1.0):
 - 1.00: 거시 양호, 뚜렷한 상승 환경 또는 명확한 긍정 신호 우세
 - 0.75: 중립 ~ 혼재 신호. open 의 기본값. 보수적이지만 매수는 진행
@@ -56,7 +60,7 @@ reasoning은 500자 이내. 결론→근거 순서. 감정어 배제, 사실과 
 """
 
 
-MACRO_PROMPT_VERSION = "v0.3"
+MACRO_PROMPT_VERSION = "v0.4"
 """Macro Gate 프롬프트 버전.
 
 prompt 텍스트 또는 위 SYSTEM_PROMPT 의 의미론적 변경 시 bump. macro_runs.prompt_version
@@ -65,7 +69,16 @@ prompt 텍스트 또는 위 SYSTEM_PROMPT 의 의미론적 변경 시 bump. macr
 - v0.1 (2026-04-16): 초안
 - v0.2 (2026-04-16): open+0.0 모순 명시, 이산화 가이드 보강
 - v0.3 (2026-05-10): open 2단계 (0.75/1.0) 로 축소
+- v0.4 (2026-06-29): VKOSPI 실값 + 시장전체 수급(외국인/기관/연기금) 맥락 노출 + 해석 가이드
+  (VKOSPI·연기금은 참고용·역방향 주의, 외국인만 size 하향 근거). 결정론 closed 조건은 불변.
 """
+
+
+def _fmt_net(v: float | None) -> str:
+    """시장 수급 표시 — None 은 N/A, 값은 부호+천단위 콤마(억원)."""
+    if v is None:
+        return "N/A"
+    return f"{v:+,.0f}"
 
 
 def build_user_prompt(ctx: MacroContext) -> str:
@@ -133,6 +146,11 @@ Trigger: {ctx.trigger_reason}
 공포 지수:
 - VIX: {snap.vix:.2f} (전일 {snap.vix_prev if snap.vix_prev is not None else "N/A"})
 - VKOSPI: {snap.vkospi if snap.vkospi is not None else "N/A"}
+
+시장 수급 (시장전체 순매수, 억원 — 음수=순매도, 참고용):
+- 외국인: {_fmt_net(snap.market_foreign_net)}
+- 기관계: {_fmt_net(snap.market_institution_net)}
+- 연기금: {_fmt_net(snap.market_pension_net)}
 
 변동성:
 - KOSPI 20d vol: {snap.kospi_20d_vol:.1%}

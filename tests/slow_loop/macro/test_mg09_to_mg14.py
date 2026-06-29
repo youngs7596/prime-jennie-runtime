@@ -148,6 +148,43 @@ async def test_mg09_attempt_hint_in_prompt():
     assert "체크리스트" in msg
 
 
+def test_prompt_renders_vkospi_and_market_flows():
+    """VKOSPI 실값 + 시장전체 수급(외국인/기관/연기금) 이 게이트 프롬프트에 노출되는지.
+    값이면 부호+콤마, 미수집(None)이면 N/A (2026-06-29 맥락 입력 연결)."""
+    from prime_jennie_runtime.slow_loop.macro.prompts import build_user_prompt
+
+    snap = _normal_snapshot().model_copy(
+        update={
+            "vkospi": 92.71,
+            "market_foreign_net": -77332.0,
+            "market_institution_net": 29327.0,
+            "market_pension_net": 581.0,
+        }
+    )
+    ctx = MacroContext(
+        as_of=datetime.now(UTC),
+        trigger_reason="test",
+        market_snapshot=snap,
+        wsj_digest_id="wsj_test",
+    )
+    msg = build_user_prompt(ctx)
+    assert "VKOSPI: 92.71" in msg
+    assert "시장 수급" in msg
+    assert "외국인: -77,332" in msg
+    assert "기관계: +29,327" in msg
+    assert "연기금: +581" in msg
+
+    # 미수집(None) → N/A 로 graceful 표시
+    ctx_na = MacroContext(
+        as_of=datetime.now(UTC),
+        trigger_reason="test",
+        market_snapshot=_normal_snapshot(),
+        wsj_digest_id="wsj_test",
+    )
+    msg_na = build_user_prompt(ctx_na)
+    assert "외국인: N/A" in msg_na
+
+
 # =====================================================================
 # MG10 — WSJ digest 부재: news_digest_ref="unavailable" 로 실행 계속
 # =====================================================================

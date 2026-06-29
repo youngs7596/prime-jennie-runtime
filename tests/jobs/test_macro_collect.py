@@ -163,3 +163,49 @@ async def test_macro_collect_global_preserves_existing_fields(fake_redis):
 
     assert snapshot["kospi_index"] == 3200.0  # 갱신
     assert snapshot["us_gdp"] == 2.5  # 보존
+
+
+@pytest.mark.asyncio
+async def test_macro_collect_fetches_kospi_flows_once_no_kosdaq_dup(fake_redis, monkeypatch):
+    """수급은 KOSPI 한 번만 받는다 — 네이버 investorDealTrendDay 가 sosession 과 무관하게
+    KOSPI 만 줘서, kosdaq 를 따로 받으면 같은 값이 kosdaq_foreign_net 으로 중복 적재됐던
+    버그(2026-06-29 수리)의 회귀 가드. KOSPI 수급만 한 번 호출하고 kosdaq 필드는 없어야 한다."""
+    from prime_jennie_runtime.jobs import council_macro
+    from prime_jennie_runtime.jobs.crawlers.naver_market import InvestorFlows
+
+    calls: list[str] = []
+
+    async def _fake_flows(http, market, bizdate):
+        calls.append(market)
+        return InvestorFlows(
+            foreign_net=-42906.0,
+            institutional_net=29327.0,
+            retail_net=13579.0,
+            trade_date=date.today(),
+        )
+
+    monkeypatch.setattr(council_macro, "fetch_investor_flows", _fake_flows)
+
+    today = date.today()
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(url__regex=_INDEX_URL_RE).mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json=_index_payload("3,100.50", "0.8", f"{today.isoformat()}T15:30:00+09:00"),
+                ),
+                httpx.Response(
+                    200,
+                    json=_index_payload("950.25", "-0.3", f"{today.isoformat()}T15:30:00+09:00"),
+                ),
+            ]
+        )
+        mock.get(url__regex=_YAHOO_URL_RE).respond(200, json=_yahoo_payload([18.0, 18.5, 19.2]))
+        async with httpx.AsyncClient() as client:
+            snapshot = await macro_collect_global(fake_redis, client)
+
+    assert calls == ["kospi"]  # 코스닥은 따로 받지 않는다
+    assert snapshot["kospi_foreign_net"] == -42906.0
+    assert snapshot["kospi_institutional_net"] == 29327.0
+    assert snapshot["kospi_retail_net"] == 13579.0
+    assert "kosdaq_foreign_net" not in snapshot

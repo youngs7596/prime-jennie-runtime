@@ -477,6 +477,18 @@ async def run_slow_loop(
     scout_out: ScoutOutput = validated_scout.scout_out
     raw_candidates: list[ScreeningCandidate] = list(validated_scout.result.candidates)
 
+    # daily_quant_scores 영속이 실패하면(예: PK 시퀀스 desync) 매매는 막지 않되 ok=False
+    # 이벤트를 event_log 에 남긴다 — 컨테이너 로그만으론 6일간 안 보였던 전례 재발 방지.
+    if not getattr(validated_scout, "quant_persisted", True):
+        await observer.emit(
+            pj_event(
+                "pj.scout.quant_persist_failed",
+                role="scout",
+                ok=False,
+                scout_run_id=scout_run_id,
+            )
+        )
+
     await observer.emit(
         pj_event(
             "pj.scout.code_generated",

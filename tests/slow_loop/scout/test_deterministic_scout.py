@@ -316,3 +316,64 @@ async def test_load_score_history_excludes_macro_closed_runs():
     assert previous_codes is None
     # 직전 run 선택 쿼리가 게이트 필터를 들고 있어야 한다.
     assert any("macro_gate" in s and "'open'" in s for s in conn.sql)
+
+
+# ─── _persist_quant_scores 반환 계약 (2026-06-29 PK 시퀀스 desync 사고 후) ────
+
+
+@pytest.mark.asyncio
+async def test_persist_quant_scores_true_when_nothing_to_write():
+    """엔진 없음 또는 빈 점수 → 영속할 게 없으니 성공(True). 매매 경로 비방해."""
+    from prime_jennie_runtime.slow_loop.scout.deterministic_scout import _persist_quant_scores
+
+    assert (
+        await _persist_quant_scores(
+            None,
+            run_id="sr_x",
+            as_of=date(2026, 6, 29),
+            quant_scores={"005930": _quant()},
+            selected_codes=set(),
+        )
+        is True
+    )
+    assert (
+        await _persist_quant_scores(
+            object(),
+            run_id="sr_x",
+            as_of=date(2026, 6, 29),
+            quant_scores={},
+            selected_codes=set(),
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_quant_scores_false_on_insert_failure():
+    """INSERT 가 예외(PK 시퀀스 desync 등)면 매매는 막지 않되 False 를 올려
+    pipeline 이 event_log 로 표면화하게 한다 — 6일간 숨었던 전례 재발 방지."""
+    from prime_jennie_runtime.slow_loop.scout.deterministic_scout import _persist_quant_scores
+
+    class _RaisingConn:
+        async def execute(self, *a: object, **k: object) -> None:
+            raise RuntimeError("duplicate key value violates unique constraint")
+
+    class _Begin:
+        async def __aenter__(self) -> _RaisingConn:
+            return _RaisingConn()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    class _Engine:
+        def begin(self) -> _Begin:
+            return _Begin()
+
+    ok = await _persist_quant_scores(
+        _Engine(),
+        run_id="sr_x",
+        as_of=date(2026, 6, 29),
+        quant_scores={"005930": _quant()},
+        selected_codes=set(),
+    )
+    assert ok is False

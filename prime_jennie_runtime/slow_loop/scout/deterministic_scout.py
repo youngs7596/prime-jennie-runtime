@@ -65,6 +65,8 @@ class DeterministicScoutResult:
 
     scout_out: ScoutOutput
     result: ScreeningResult
+    # daily_quant_scores 영속 성공 여부. False 면 pipeline 이 이벤트로 표면화한다.
+    quant_persisted: bool = True
 
 
 # =====================================================================
@@ -279,15 +281,20 @@ async def _persist_quant_scores(
     as_of: date,
     quant_scores: dict[str, QuantScore],
     selected_codes: set[str],
-) -> None:
+) -> bool:
     """전 종목 quant 서브점수를 daily_quant_scores 에 upsert.
 
     MA 평활의 다음 run 입력 + weekly_factor_analysis(daily_quant_scores 의존)
     의 IC 분석 입력. 7팩터 서브점수 + total 을 저장한다 — sector_momentum_score
     는 migration 025 로 컬럼이 생겨 2026-06-18 부터 같이 적재한다(그 전 행은 NULL).
+
+    반환값: 영속 성공 또는 스킵(엔진 없음/빈 점수)이면 True, INSERT 가 예외로
+    실패하면 False. 매매를 막지 않으려고 예외는 여기서 삼키되, False 를 위로 올려
+    pipeline 이 event_log 에 표면화한다 — 컨테이너 로그만으론 6일씩 숨었던 전례
+    (2026-06-29 시퀀스 desync 사고) 재발 방지.
     """
     if engine is None or not quant_scores:
-        return
+        return True
     sql = text(
         """
         INSERT INTO daily_quant_scores (
@@ -336,8 +343,10 @@ async def _persist_quant_scores(
         async with engine.begin() as conn:
             await conn.execute(sql, params)
         logger.info("daily_quant_scores upsert: %d rows (run_id=%s)", len(params), run_id)
+        return True
     except Exception:
         logger.exception("_persist_quant_scores 실패 (run_id=%s) — MA 이력 누락 가능", run_id)
+        return False
 
 
 # =====================================================================
@@ -432,7 +441,7 @@ async def run_deterministic_scout(
     ]
 
     # --- 점수 이력 영속 (다음 run MA 입력 + factor_analysis 재가동) ---
-    await _persist_quant_scores(
+    quant_persisted = await _persist_quant_scores(
         db_engine,
         run_id=scout_run_id,
         as_of=as_of,
@@ -465,6 +474,7 @@ async def run_deterministic_scout(
     return DeterministicScoutResult(
         scout_out=scout_out,
         result=ScreeningResult(ok=True, candidates=candidates, exec_time_ms=int(elapsed * 1000)),
+        quant_persisted=quant_persisted,
     )
 
 

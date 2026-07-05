@@ -1,0 +1,13 @@
+# eGPU(RTX 3090) 전력 제한 자동 재적용 udev 규칙
+#
+# 정전 후 재부팅에서 Thunderbolt eGPU 가 부팅 60초 안에 안 붙으면
+# nvidia-power-limit.service(oneshot) 가 GPU 를 못 찾고 실패한다.
+# 그 뒤 케이블을 꽂아 GPU 가 뒤늦게 등장해도 제한이 안 걸려 팬이 풀로 돈다.
+#
+# NVIDIA VGA 함수(vendor 0x10de, class 0x030000)가 PCI 에 나타나는 순간
+# 전력 제한 서비스를 재실행한다. 드라이버 바인딩 대기는 서비스의
+# ExecStartPre(nvidia-smi -L 준비 폴링, 최대 60초)가 담당하므로,
+# 이 규칙은 "GPU 가 붙었다" 신호만 전달하면 된다.
+# --no-block 으로 udev 이벤트를 막지 않는다. Audio 함수(0x040300)는 제외.
+
+ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x030000", RUN+="/bin/systemctl --no-block restart nvidia-power-limit.service"

@@ -1,12 +1,19 @@
 [Unit]
-# MS-01 eGPU RTX 3090 전력제한 영구화. 재부팅 시 자동으로 `nvidia-smi -pl 250`
-# 적용해 팬 소음을 완화한다. 2026-04-20 도입 시 278W 로 시작했다가 2026-04-24
-# 에 250W 로 추가 인하 (사용자 수동 조정 후 운영 기준이 250W 로 고정됨).
+# MS-01 eGPU RTX 3090 전력제한 영구화. 재부팅 시 자동으로 `nvidia-smi -pl 200`
+# 적용해 팬 소음을 완화한다. 278W(2026-04-20 도입) → 250W(2026-04-24) →
+# 200W(운영 기준) 로 단계적 인하. 값 변경 시 이 파일과 배포본을 함께 맞춘다.
+#
+# 정전 재부팅에서 썬더볼트 eGPU 가 부팅 60초 안에 안 붙으면 이 oneshot 이
+# GPU 를 못 찾고 실패한다(2026-07-05 실제 발생). 그 경우를 보완하려고 GPU 가
+# PCI 에 뒤늦게 등장하는 순간 이 서비스를 재실행하는 udev 규칙
+# (infra/udev/99-nvidia-power-limit.rules)을 함께 둔다. 설치 시 둘 다 배치할 것.
 #
 # 설치:
 #   sudo cp infra/systemd/nvidia-power-limit.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now nvidia-power-limit.service
+#   sudo install -m 644 infra/udev/99-nvidia-power-limit.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
 #   systemctl status nvidia-power-limit.service
 #
 # 제거:
@@ -21,7 +28,7 @@ Wants=nvidia-persistenced.service
 Type=oneshot
 # 드라이버가 완전히 올라올 때까지 대기 (최대 60초).
 ExecStartPre=/bin/sh -c 'i=0; until /usr/bin/nvidia-smi -L >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 30 ] && exit 1; sleep 2; done'
-ExecStart=/usr/bin/nvidia-smi -pl 250
+ExecStart=/usr/bin/nvidia-smi -pl 200
 RemainAfterExit=yes
 
 [Install]

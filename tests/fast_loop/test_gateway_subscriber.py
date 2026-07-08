@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -10,12 +11,15 @@ import respx
 
 from prime_jennie_runtime.fast_loop.gateway_subscriber import (
     MAX_SUBSCRIPTION_CODES,
+    ensure_subscribed,
     load_subscription_codes,
+    run_subscription_maintainer,
     subscribe_on_startup,
 )
 
 GATEWAY = "http://kis-gateway:8080"
 _SUB_RE = rf"{GATEWAY}/api/realtime/subscribe"
+_STATUS_RE = rf"{GATEWAY}/api/realtime/status"
 
 
 class _FakeConn:
@@ -146,3 +150,97 @@ async def test_subscribe_on_startup_swallows_gateway_error():
 
     assert result["codes"] == ["005930"]
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_noop_when_running_and_complete():
+    """streamer 가 살아있고 원하는 종목이 다 구독돼 있으면 재구독하지 않는다."""
+    pool = _FakePool(positions=["005930"], pending_sheets=["035720"])
+    with respx.mock(assert_all_called=True) as mock:
+        status = mock.get(url__regex=_STATUS_RE).respond(
+            200, json={"is_running": True, "codes": ["005930", "035720"]}
+        )
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert status.call_count == 1
+    assert result == {"codes": ["005930", "035720"], "noop": True}
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_resubscribes_when_not_running():
+    """streamer 가 죽어 있으면(is_running False) 재구독한다."""
+    pool = _FakePool(positions=["005930"], pending_sheets=[])
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).respond(200, json={"is_running": False, "codes": []})
+        sub = mock.post(url__regex=_SUB_RE).respond(
+            200, json={"added": ["005930"], "total_subscriptions": 1, "is_running": True}
+        )
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert sub.call_count == 1
+    assert result["response"]["is_running"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_resubscribes_when_codes_missing():
+    """running 이어도 원하는 종목이 구독에서 빠져 있으면 재구독한다."""
+    pool = _FakePool(positions=["005930", "000660"], pending_sheets=[])
+    with respx.mock(assert_all_called=True) as mock:
+        # 000660 이 구독 목록에서 빠졌다.
+        mock.get(url__regex=_STATUS_RE).respond(200, json={"is_running": True, "codes": ["005930"]})
+        sub = mock.post(url__regex=_SUB_RE).respond(
+            200, json={"added": ["000660"], "total_subscriptions": 2, "is_running": True}
+        )
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert sub.call_count == 1
+    body = sub.calls[0].request.content.decode()
+    assert "000660" in body and "005930" in body
+    assert result["response"]["total_subscriptions"] == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_resubscribes_when_status_unreachable():
+    """status 조회가 실패(게이트웨이 미준비)해도 일단 구독을 시도한다."""
+    pool = _FakePool(positions=["005930"], pending_sheets=[])
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).mock(side_effect=httpx.ConnectError("refused"))
+        sub = mock.post(url__regex=_SUB_RE).respond(
+            200, json={"added": ["005930"], "total_subscriptions": 1, "is_running": True}
+        )
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert sub.call_count == 1
+    assert result["response"]["is_running"] is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_skips_when_no_codes():
+    """구독 대상이 없으면 status 조회도 subscribe 도 하지 않는다."""
+    pool = _FakePool(positions=[], pending_sheets=[])
+    with respx.mock(assert_all_called=False) as mock:
+        status = mock.get(url__regex=_STATUS_RE)
+        sub = mock.post(url__regex=_SUB_RE)
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert status.call_count == 0
+    assert sub.call_count == 0
+    assert result == {"codes": [], "skipped": True}
+
+
+@pytest.mark.asyncio
+async def test_run_subscription_maintainer_ensures_at_least_once_then_stops():
+    """기동 직후 1회 보증(do-while) 후 stop_event 로 종료한다."""
+    pool = _FakePool(positions=["005930"], pending_sheets=[])
+    stop_event = asyncio.Event()
+    stop_event.set()  # 첫 iteration 을 돌고 곧장 종료
+    with respx.mock(assert_all_called=True) as mock:
+        status = mock.get(url__regex=_STATUS_RE).respond(
+            200, json={"is_running": True, "codes": ["005930"]}
+        )
+        await asyncio.wait_for(
+            run_subscription_maintainer(pool, GATEWAY, interval_sec=0.01, stop_event=stop_event),
+            timeout=1.0,
+        )
+
+    assert status.call_count == 1  # stop 이 미리 걸려 있어도 1회는 실행

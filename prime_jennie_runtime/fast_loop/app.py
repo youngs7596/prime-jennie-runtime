@@ -35,7 +35,7 @@ from prime_jennie_runtime.fast_loop.consumer import PositionSheetConsumer
 from prime_jennie_runtime.fast_loop.cooldown_check import PgCooldownChecker
 from prime_jennie_runtime.fast_loop.entry_executor import EntryExecutor
 from prime_jennie_runtime.fast_loop.exit_executor import ExitExecutor
-from prime_jennie_runtime.fast_loop.gateway_subscriber import subscribe_on_startup
+from prime_jennie_runtime.fast_loop.gateway_subscriber import run_subscription_maintainer
 from prime_jennie_runtime.fast_loop.kis_client import KisClient
 from prime_jennie_runtime.fast_loop.market_snapshot import RuntimeMarketSnapshotFetcher
 from prime_jennie_runtime.fast_loop.notifier import Notifier
@@ -308,10 +308,6 @@ async def run() -> None:
         )
         await tick_loop.ensure_group()
 
-        # gateway 에 실시간 체결가 구독 요청 (v2 monitor/scanner 포팅).
-        # 실패해도 tick_loop 은 계속 구동 — price-scheduler 폴링이 fallback.
-        await subscribe_on_startup(pool, cfg.kis.gateway_url)
-
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
 
@@ -326,7 +322,7 @@ async def run() -> None:
 
         logger.info(
             "fast_loop runner ready — starting sheet consumer + tick loop + purge loop"
-            " + control consumer + risk updater"
+            " + control consumer + risk updater + subscription maintainer"
         )
         consumer_task = asyncio.create_task(sheet_consumer.run(), name="sheet-consumer")
         tick_task = asyncio.create_task(tick_loop.run(), name="tick-loop")
@@ -343,6 +339,12 @@ async def run() -> None:
             ),
             name="risk-updater",
         )
+        # 실시간 체결·호가 구독 보증 — 기동 직후 1회 + 주기적 재구독. 기동 순서로
+        # 초기 구독이 유실되거나(2026-07-08 정전 사고) streamer 가 죽어도 자동 복구.
+        subscription_task = asyncio.create_task(
+            run_subscription_maintainer(pool, cfg.kis.gateway_url, stop_event=stop_event),
+            name="subscription-maintainer",
+        )
 
         done, pending = await asyncio.wait(
             {
@@ -351,6 +353,7 @@ async def run() -> None:
                 purge_task,
                 control_task,
                 risk_task,
+                subscription_task,
                 asyncio.create_task(stop_event.wait()),
             },
             return_when=asyncio.FIRST_COMPLETED,

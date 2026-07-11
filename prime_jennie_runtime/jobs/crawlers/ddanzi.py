@@ -66,18 +66,29 @@ def _parse_title_date(title: str) -> date | None:
         return None
 
 
-def _find_latest_srl(list_html: str, market: str) -> tuple[str, str] | None:
-    """작성자 검색 리스트에서 해당 market 의 가장 최근 (document_srl, title). 없으면 None."""
+def _find_recent_srls(list_html: str, market: str, limit: int) -> list[tuple[str, str]]:
+    """작성자 검색 리스트에서 해당 market 의 최근 (document_srl, title) 을 최신순으로 최대
+    limit 개 돌려준다. 리스트가 최신순이라 앞에서부터 매칭하면 그대로 최신순이다. 같은 글이
+    여러 앵커로 잡혀도 srl 로 한 번만 센다. 매칭이 없으면 빈 리스트."""
     keys = _TITLE_KEYS[market]
     soup = BeautifulSoup(list_html, "html.parser")
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for a in soup.select("a[href*='document_srl=']"):
         title = a.get_text(strip=True)
         if not title or not all(k in title for k in keys):
             continue
-        srl = _SRL_RE.search(a.get("href", ""))
-        if srl:
-            return srl.group(1), title  # 리스트 최신순 → 첫 매칭이 최신
-    return None
+        m = _SRL_RE.search(a.get("href", ""))
+        if not m:
+            continue
+        srl = m.group(1)
+        if srl in seen:
+            continue
+        seen.add(srl)
+        out.append((srl, title))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _extract_body(post_html: str) -> str:
@@ -86,10 +97,18 @@ def _extract_body(post_html: str) -> str:
     return el.get_text("\n", strip=True) if el else ""
 
 
-async def fetch_latest_summary(client: httpx.AsyncClient, market: str) -> DdanziSummary | None:
-    """market('US'|'KR')의 최신 증시 요약 글을 받아 DdanziSummary 반환. 실패·없음이면 None.
+DEFAULT_RECENT_LIMIT = 5
 
-    실패(네트워크/파싱)는 None 으로 흘려 호출측이 graceful skip 하게 한다.
+
+async def fetch_recent_summaries(
+    client: httpx.AsyncClient, market: str, limit: int = DEFAULT_RECENT_LIMIT
+) -> list[DdanziSummary]:
+    """market('US'|'KR')의 최근 증시 요약 글들을 최신순으로 최대 limit 개 받아 반환.
+
+    최신 한 건만 보던 옛 방식은 글이 07:00 이후·주말에 늦게 올라오면 그 글을 놓쳤다 —
+    다음 실행이 더 새 글을 집으면서 그 사이 글이 영영 누락됐다. 최근 몇 개를 훑으면 upsert
+    멱등과 맞물려 놓친 날이 다음 실행에서 저절로 메꿔진다. 개별 글 실패(본문 없음/네트워크)는
+    건너뛰고 계속 진행한다. 리스트 조회 자체가 실패하면 빈 리스트.
     """
     if market not in _TITLE_KEYS:
         raise ValueError(f"unknown market: {market}")
@@ -103,35 +122,44 @@ async def fetch_latest_summary(client: httpx.AsyncClient, market: str) -> Ddanzi
             DDANZI_SEARCH_URL, params=params, headers=DDANZI_HEADERS, timeout=15.0
         )
         resp.raise_for_status()
-        found = _find_latest_srl(resp.text, market)
-        if found is None:
-            logger.warning("ddanzi: no %s summary in author list", market)
-            return None
-        srl, title = found
+    except Exception as e:
+        logger.warning("ddanzi list fetch failed (%s): %s", market, e)
+        return []
 
+    found = _find_recent_srls(resp.text, market, limit)
+    if not found:
+        logger.warning("ddanzi: no %s summary in author list", market)
+        return []
+
+    summaries: list[DdanziSummary] = []
+    for srl, title in found:
         url = f"{DDANZI_BASE}/free/{srl}"
-        post = await client.get(url, headers=DDANZI_HEADERS, timeout=15.0)
-        post.raise_for_status()
+        try:
+            post = await client.get(url, headers=DDANZI_HEADERS, timeout=15.0)
+            post.raise_for_status()
+        except Exception as e:
+            logger.warning("ddanzi post fetch failed (%s srl=%s): %s", market, srl, e)
+            continue
         body = _extract_body(post.text)
         if not body:
             logger.warning("ddanzi: empty body for %s (srl=%s)", market, srl)
-            return None
-
-        return DdanziSummary(
-            document_srl=srl,
-            title=title,
-            market=market,
-            summary_date=_parse_title_date(title),
-            url=url,
-            body=body,
+            continue
+        summaries.append(
+            DdanziSummary(
+                document_srl=srl,
+                title=title,
+                market=market,
+                summary_date=_parse_title_date(title),
+                url=url,
+                body=body,
+            )
         )
-    except Exception as e:
-        logger.warning("ddanzi fetch failed (%s): %s", market, e)
-        return None
+    return summaries
 
 
 __all__ = [
     "DDANZI_AUTHOR_NICK",
+    "DEFAULT_RECENT_LIMIT",
     "DdanziSummary",
-    "fetch_latest_summary",
+    "fetch_recent_summaries",
 ]

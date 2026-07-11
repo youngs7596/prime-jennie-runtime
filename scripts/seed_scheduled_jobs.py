@@ -313,11 +313,14 @@ SEEDS: list[SeedJob] = [
     # source='ddanzi_kimkr' upsert → 07:30 global_news_digest 가 흡수 → 매크로 카운슬.
     # 미국=개장 전(07:00, WSJ 와 같은 슬롯), 한국=마감 후(18:30, 다음 아침 digest 에 포함).
     # 결측 허용 — 맥락 입력이지 하드 의존이 아님(설계 doc·잡 docstring 참고).
+    # 미국은 매일(*) 돈다: 미국 요약은 07:00 이후에 올라오는 경우가 있고 금요일 미국장
+    # 요약은 토요일 아침에 올라와, 평일만 돌면 놓친다. ingest 가 최근 몇 개를 멱등 upsert
+    # 하므로 매일 돌아도 이미 있는 글은 조용히 스킵된다. 한국은 거래일에만 요약이 있어 1-5.
     SeedJob(
         id="job_worker.ddanzi_ingest_us",
         owner="job_worker",
         handler_key="ddanzi_ingest",
-        cron="0 7 * * 1-5",
+        cron="0 7 * * *",
         kwargs={"market": "US"},
     ),
     SeedJob(

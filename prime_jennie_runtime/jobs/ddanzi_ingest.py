@@ -28,7 +28,7 @@ import httpx
 from prime_jennie_runtime.news_pipeline_global.models import GlobalNewsArticle
 from prime_jennie_runtime.news_pipeline_global.storage import upsert_articles
 
-from .crawlers.ddanzi import fetch_latest_summary
+from .crawlers.ddanzi import DEFAULT_RECENT_LIMIT, fetch_recent_summaries
 
 logger = logging.getLogger(__name__)
 
@@ -40,32 +40,51 @@ def _article_id(url: str) -> str:
 
 
 async def ddanzi_ingest(
-    pool: Any, http: httpx.AsyncClient, *, market: str = "US"
+    pool: Any,
+    http: httpx.AsyncClient,
+    *,
+    market: str = "US",
+    limit: int = DEFAULT_RECENT_LIMIT,
 ) -> dict[str, Any]:
-    """딴지 최신 증시 요약을 global_macro_news_articles 에 upsert. 결측 허용."""
-    summary = await fetch_latest_summary(http, market)
-    if summary is None:
-        logger.info("ddanzi_ingest(%s): no summary found — skip", market)
-        return {"found": False, "upserted": 0}
+    """딴지 최근 증시 요약들을 global_macro_news_articles 에 upsert. 결측 허용.
 
-    article = GlobalNewsArticle(
-        article_id=_article_id(summary.url),
-        source=DDANZI_SOURCE,
-        feed_name=f"ddanzi_{market.lower()}_market_summary",
-        title=summary.title,
-        description=summary.body,
-        source_url=summary.url,
-        published_at=datetime.now(UTC),
-    )
-    inserted = await upsert_articles(pool, [article])
+    최근 limit 개를 훑어 멱등 upsert 한다 — 07:00 이후·주말에 늦게 올라와 지난 실행이
+    놓친 글이 다음 실행에서 저절로 메꿔지도록. 이미 있는 글은 ON CONFLICT DO NOTHING 으로
+    조용히 스킵되니 재실행 비용은 크롤 몇 번뿐이다.
+    """
+    summaries = await fetch_recent_summaries(http, market, limit=limit)
+    if not summaries:
+        logger.info("ddanzi_ingest(%s): no summary found — skip", market)
+        return {"found": False, "upserted": 0, "checked": 0}
+
+    articles = [
+        GlobalNewsArticle(
+            article_id=_article_id(s.url),
+            source=DDANZI_SOURCE,
+            feed_name=f"ddanzi_{market.lower()}_market_summary",
+            title=s.title,
+            description=s.body,
+            source_url=s.url,
+            published_at=datetime.now(UTC),
+        )
+        for s in summaries
+    ]
+    inserted = await upsert_articles(pool, articles)
+    latest = summaries[0]
     logger.info(
-        "ddanzi_ingest(%s): srl=%s title=%r upserted=%d",
+        "ddanzi_ingest(%s): checked=%d upserted=%d latest_srl=%s title=%r",
         market,
-        summary.document_srl,
-        summary.title,
+        len(summaries),
         inserted,
+        latest.document_srl,
+        latest.title,
     )
-    return {"found": True, "upserted": inserted, "document_srl": summary.document_srl}
+    return {
+        "found": True,
+        "upserted": inserted,
+        "checked": len(summaries),
+        "document_srl": latest.document_srl,
+    }
 
 
 __all__ = ["DDANZI_SOURCE", "ddanzi_ingest"]

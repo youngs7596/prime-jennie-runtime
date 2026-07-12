@@ -72,7 +72,7 @@ from .market_data import (
     collect_us_market,
     refresh_market_caps,
 )
-from .market_inputs import collect_market_investor_flows, collect_vkospi
+from .market_inputs import collect_futures_oi, collect_market_investor_flows, collect_vkospi
 from .minute_chart import collect_minute_chart
 from .paper_outcomes import measure_paper_outcomes
 from .positions import sync_positions
@@ -183,6 +183,17 @@ def build_handlers(
 
     async def h_collect_market_investor_flows() -> None:
         await collect_market_investor_flows(pool, http)
+
+    async def h_collect_futures_oi(slot: str = "close") -> None:
+        # night_close 는 익일 05:05 에 도는 슬롯이라 '오늘' 기준 거래일 가드가 어긋난다
+        # (금요일 밤 세션은 토요일 새벽에 끝난다). 대신 collect_futures_oi 안에서 전일
+        # close 스냅샷 존재 여부로 세션 유무를 판정한다.
+        if slot != "night_close" and not await is_trading_day_via_gateway(
+            kis_gateway_url, http=http
+        ):
+            logger.info("collect_futures_oi[%s] skipped: non-trading day", slot)
+            return
+        await collect_futures_oi(pool, http, kis_gateway_url, slot=slot)
 
     async def h_collect_dart_filings(days: int = 7) -> None:
         await collect_dart_filings(pool, http, api_key=dart_api_key, days=days)
@@ -327,6 +338,7 @@ def build_handlers(
         "collect_foreign_holding": h_collect_foreign_holding,
         "collect_vkospi": h_collect_vkospi,
         "collect_market_investor_flows": h_collect_market_investor_flows,
+        "collect_futures_oi": h_collect_futures_oi,
         "collect_dart_filings": h_collect_dart_filings,
         "collect_consensus": h_collect_consensus,
         "collect_naver_roe": h_collect_naver_roe,

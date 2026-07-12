@@ -189,6 +189,38 @@ SEEDS: list[SeedJob] = [
         cron="40 18 * * 1-5",
         kwargs={},
     ),
+    # 매크로 게이트 입력 후보 (2026-07-12) — KOSPI200 선물 미결제약정·베이시스 (KIS).
+    # 하루 4슬롯: 장 시작 전 / 정규장 마감 후 / 야간장 개장 후 / 야간장 종료 후.
+    # night_close 만 익일 새벽(05:05, 화~토)이며 trade_date 를 하루 당겨 적재한다 —
+    # close → night_close OI 차이가 '야간 청산분'(딴지 글의 핵심 주장) 이 된다.
+    SeedJob(
+        id="job_worker.collect_futures_oi_preopen",
+        owner="job_worker",
+        handler_key="collect_futures_oi",
+        cron="50 8 * * 1-5",
+        kwargs={"slot": "preopen"},
+    ),
+    SeedJob(
+        id="job_worker.collect_futures_oi_close",
+        owner="job_worker",
+        handler_key="collect_futures_oi",
+        cron="50 15 * * 1-5",
+        kwargs={"slot": "close"},
+    ),
+    SeedJob(
+        id="job_worker.collect_futures_oi_night_open",
+        owner="job_worker",
+        handler_key="collect_futures_oi",
+        cron="10 18 * * 1-5",
+        kwargs={"slot": "night_open"},
+    ),
+    SeedJob(
+        id="job_worker.collect_futures_oi_night_close",
+        owner="job_worker",
+        handler_key="collect_futures_oi",
+        cron="5 5 * * 2-6",
+        kwargs={"slot": "night_close"},
+    ),
     # Track B — collect_dart_filings (v2 utility_jobs_dag: 45 18 * * 1-5, DART 정기공시).
     SeedJob(
         id="job_worker.collect_dart_filings",

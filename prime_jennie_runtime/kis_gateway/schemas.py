@@ -148,6 +148,29 @@ class DailyExecution(BaseModel):
     cancelled: bool  # 취소 여부
 
 
+class FuturesQuote(BaseModel):
+    """KOSPI200 지수선물 시세 (FHMIF10000000).
+
+    미결제약정(open_interest)·베이시스가 핵심 — 투자자별 선물 수급은 KIS 가 주지
+    않으므로(2026-07-12 실측, 선물 시장구분 넣으면 전 항목 0), 위조 불가능한
+    집계치인 OI·베이시스로 대체한다.
+    """
+
+    contract_code: str  # A01609 = 정규 KOSPI200 선물 2026-09월물
+    contract_name: str  # "F 202609"
+    price: float
+    open_interest: int  # hts_otst_stpl_qty — 미결제약정 수량
+    oi_change: int  # otst_stpl_qty_icdc — 미결제약정 증감 (전일 대비)
+    volume: int
+    basis: float | None = None  # 선물 - 현물
+    market_basis: float | None = None
+    theoretical_price: float | None = None
+    disparity: float | None = None  # 괴리율 (선물 - 이론가)
+    remaining_days: int | None = None  # 잔존일수 — 롤오버 판정용
+    kospi_index: float | None = None  # 코스피 종합지수 (output2)
+    timestamp: datetime
+
+
 # ─── Gateway request bodies ──────────────────────────────────────
 
 

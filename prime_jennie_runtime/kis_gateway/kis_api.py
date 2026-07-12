@@ -27,7 +27,7 @@ from prime_jennie_runtime.infra.config import KISConfig
 from .call_meter import KisCallMeter
 from .order_client import OrderClient
 from .rate_limiter import AsyncRateLimiter
-from .schemas import DailyPrice, MinutePrice, StockSnapshot
+from .schemas import DailyPrice, FuturesQuote, MinutePrice, StockSnapshot
 from .token_manager import TokenRecord, load_token, save_token
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,14 @@ logger = logging.getLogger(__name__)
 # 5xx 재시도 정책 (EGW00201 throttle 은 별도 1회 backoff 로 처리)
 _RETRY_5XX_MAX = 3
 _RETRY_5XX_BASE_SEC = 1.0
+
+# 지수선물 단축코드 = A + 상품(01=정규 KOSPI200, 05=미니) + 연도 끝자리 + 월(2자리).
+# 2026-07-12 실측: A01609="F 202609"(정규), A05608="미니F 202608". 결제월은 분기물뿐.
+_FUTURES_QUARTERLY_MONTHS = (3, 6, 9, 12)
+
+
+def _kospi200_contract_code(year: int, month: int) -> str:
+    return f"A01{year % 10}{month:02d}"
 
 
 def _is_egw_throttle(resp: httpx.Response) -> bool:
@@ -452,6 +460,74 @@ class KISApi:
                 continue
 
         return prices
+
+    # ─── Futures (KOSPI200 지수선물) ─────────────────────────────
+
+    async def get_futures_quote(self, contract_code: str) -> FuturesQuote | None:
+        """지수선물 시세 (FHMIF10000000) — 미결제약정·베이시스.
+
+        미상장/오타 코드에도 KIS 는 rt_cd=0 을 주고 output1 만 비워 보내므로
+        (2026-07-12 실측), 종목명 부재를 None 으로 번역한다.
+        """
+        data = await self._request(
+            "GET",
+            "/uapi/domestic-futureoption/v1/quotations/inquire-price",
+            tr_id="FHMIF10000000",
+            params={
+                "FID_COND_MRKT_DIV_CODE": "F",  # F: 지수선물
+                "FID_INPUT_ISCD": contract_code,
+            },
+        )
+        o1 = data.get("output1") or {}
+        name = o1.get("hts_kor_isnm")
+        if not name:
+            return None
+        o2 = data.get("output2") or {}
+
+        return FuturesQuote(
+            contract_code=contract_code,
+            contract_name=name,
+            price=float(o1.get("futs_prpr", 0)),
+            open_interest=int(o1.get("hts_otst_stpl_qty", 0)),
+            oi_change=int(o1.get("otst_stpl_qty_icdc", 0)),
+            volume=int(o1.get("acml_vol", 0)),
+            basis=_safe_float(o1.get("basis")),
+            market_basis=_safe_float(o1.get("mrkt_basis")),
+            theoretical_price=_safe_float(o1.get("hts_thpr")),
+            disparity=_safe_float(o1.get("dprt")),
+            remaining_days=_safe_int(o1.get("hts_rmnn_dynu")),
+            kospi_index=_safe_float(o2.get("bstp_nmix_prpr")),
+            timestamp=datetime.now(UTC),
+        )
+
+    async def get_kospi200_front_quote(self) -> FuturesQuote | None:
+        """정규 KOSPI200 선물 최근월물 시세 — 만기 롤오버 자동 추종.
+
+        분기물(3/6/9/12) 중 가장 가까운 두 개를 조회해 미결제약정이 큰 쪽을 최근월물로
+        본다. 만기가 다가오면 OI 가 차월물로 옮겨가므로 이 규칙만으로 롤오버가 따라온다
+        (2026-07-12 실측: 9월물 157,869 vs 12월물 7,986).
+        """
+        today = date.today()
+        candidates: list[str] = []
+        year, month = today.year, today.month
+        for _ in range(24):
+            if len(candidates) == 2:
+                break
+            if month in _FUTURES_QUARTERLY_MONTHS:
+                candidates.append(_kospi200_contract_code(year, month))
+            month += 1
+            if month > 12:
+                month, year = 1, year + 1
+
+        quotes: list[FuturesQuote] = []
+        for code in candidates:
+            quote = await self.get_futures_quote(code)
+            if quote is not None and quote.open_interest > 0:
+                quotes.append(quote)
+        if not quotes:
+            logger.warning("KOSPI200 선물 최근월물 해석 실패 (candidates=%s)", candidates)
+            return None
+        return max(quotes, key=lambda q: q.open_interest)
 
     # ─── Trading (delegated to OrderClient) ──────────────────────
 

@@ -41,6 +41,7 @@ from .schemas import (
     DailyExecution,
     DailyPrice,
     DailyPricesRequest,
+    FuturesQuote,
     MinutePrice,
     MinutePricesRequest,
     OrderRequest,
@@ -375,6 +376,26 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
             gw.calendar.prime_trading_day(today_kst, is_trading)
         open_flag, session_str = gw.calendar.is_market_open()
         return {"is_open": open_flag, "session": session_str}
+
+    @app.get("/api/futures/kospi200", response_model=FuturesQuote)
+    async def api_futures_kospi200() -> FuturesQuote:
+        """KOSPI200 선물 최근월물 시세 — 미결제약정·베이시스 (2026-07-12).
+
+        투자자별 선물 수급은 KIS 가 안 주므로(선물 시장구분 넣으면 전 항목 0),
+        위조 불가능한 집계치인 OI·베이시스를 매크로 입력 후보로 적재한다.
+        """
+        gw = _gw(app.state)
+        gw.record_request("futures_kospi200", "KOSPI200")
+        await gw.market_limiter.acquire()
+        try:
+            quote = await gw.circuit_breaker.call(gw.kis_api.get_kospi200_front_quote)
+        except CircuitBreakerError as err:
+            raise HTTPException(503, "Circuit breaker open") from err
+        except KISApiError as e:
+            raise HTTPException(502, f"KIS API error: {e}") from e
+        if quote is None:
+            raise HTTPException(404, "KOSPI200 선물 최근월물 해석 실패")
+        return quote
 
     @app.get("/api/quotations/search-info/{stock_code}")
     async def api_search_info(stock_code: str) -> dict[str, Any]:

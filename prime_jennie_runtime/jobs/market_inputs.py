@@ -6,6 +6,8 @@
 
 - collect_vkospi: CNBC .KSVKOSPI → vkospi_daily.
 - collect_market_investor_flows: 네이버 investorDealTrendDay → market_investor_flows.
+- collect_futures_oi: KIS 선물 시세(gateway) → futures_oi_snapshots. 2026-07-12 추가.
+  이쪽만 출처가 공식(KIS)이라 sanity 가드는 얇지만, 과거치를 안 줘서 백필이 불가능하다.
 """
 
 from __future__ import annotations
@@ -100,4 +102,91 @@ async def collect_market_investor_flows(pool: Any, http: httpx.AsyncClient) -> d
     return {"upserted": upserted}
 
 
-__all__ = ["collect_market_investor_flows", "collect_vkospi"]
+_FUTURES_SLOTS = ("preopen", "close", "night_open", "night_close")
+
+# 미결제약정 sanity 가드 — 코스피200 선물 OI 는 역사적으로 10만~40만 계약대.
+# 0 이나 비현실적 값이면 파싱/응답 이상으로 보고 버린다.
+_OI_MIN, _OI_MAX = 1, 5_000_000
+
+
+async def collect_futures_oi(
+    pool: Any, http: httpx.AsyncClient, kis_gateway_url: str, *, slot: str
+) -> dict[str, Any]:
+    """KOSPI200 선물 최근월물의 미결제약정·베이시스 스냅샷을 futures_oi_snapshots 에 적재.
+
+    하루 4슬롯(preopen/close/night_open/night_close). night_close 는 익일 05:05 에 돌아
+    전일 야간장을 관측하므로 trade_date 를 하루 당겨 적재한다 — 같은 trade_date 안에서
+    close → night_close OI 차이가 '야간 청산분'이 된다.
+
+    night_close 의 휴장일 가드는 gateway 대신 DB 로 한다: 그 trade_date 에 close 스냅샷이
+    없으면 애초에 거래일이 아니었으므로 야간장도 없다. (05:05 시점의 '오늘' 거래일 판정은
+    금요일 밤 세션이 토요일 새벽에 끝나는 구조와 어긋나 못 쓴다.)
+    """
+    if slot not in _FUTURES_SLOTS:
+        raise ValueError(f"unknown slot: {slot} (allowed: {_FUTURES_SLOTS})")
+
+    now = datetime.now(KST)
+    trade_date = (now - timedelta(days=1)).date() if slot == "night_close" else now.date()
+
+    if slot == "night_close":
+        async with pool.acquire() as conn:
+            has_close = await conn.fetchval(
+                "SELECT 1 FROM futures_oi_snapshots WHERE trade_date=$1 AND slot='close' LIMIT 1",
+                trade_date,
+            )
+        if not has_close:
+            logger.info("collect_futures_oi[night_close] skipped: %s 는 거래일 아님", trade_date)
+            return {"skipped": True, "trade_date": str(trade_date)}
+
+    resp = await http.get(f"{kis_gateway_url}/api/futures/kospi200", timeout=20.0)
+    resp.raise_for_status()
+    q = resp.json()
+
+    oi = int(q["open_interest"])
+    if not _OI_MIN <= oi <= _OI_MAX:
+        logger.warning("collect_futures_oi[%s] dropped: OI=%d 범위 밖", slot, oi)
+        return {"dropped": True, "open_interest": oi}
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO futures_oi_snapshots "
+            "(trade_date, slot, contract_code, contract_name, captured_at, futures_price, "
+            " open_interest, oi_change, volume, basis, market_basis, theoretical_price, "
+            " disparity, kospi_index, remaining_days, source) "
+            "VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'kis') "
+            "ON CONFLICT (trade_date, slot, contract_code) DO UPDATE SET "
+            "contract_name=EXCLUDED.contract_name, captured_at=NOW(), "
+            "futures_price=EXCLUDED.futures_price, open_interest=EXCLUDED.open_interest, "
+            "oi_change=EXCLUDED.oi_change, volume=EXCLUDED.volume, basis=EXCLUDED.basis, "
+            "market_basis=EXCLUDED.market_basis, "
+            "theoretical_price=EXCLUDED.theoretical_price, disparity=EXCLUDED.disparity, "
+            "kospi_index=EXCLUDED.kospi_index, remaining_days=EXCLUDED.remaining_days",
+            trade_date,
+            slot,
+            q["contract_code"],
+            q.get("contract_name"),
+            q.get("price"),
+            oi,
+            int(q.get("oi_change") or 0),
+            int(q.get("volume") or 0),
+            q.get("basis"),
+            q.get("market_basis"),
+            q.get("theoretical_price"),
+            q.get("disparity"),
+            q.get("kospi_index"),
+            q.get("remaining_days"),
+        )
+
+    logger.info(
+        "collect_futures_oi[%s] %s %s OI=%d (증감 %+d) basis=%s",
+        slot,
+        trade_date,
+        q["contract_code"],
+        oi,
+        int(q.get("oi_change") or 0),
+        q.get("basis"),
+    )
+    return {"trade_date": str(trade_date), "slot": slot, "open_interest": oi}
+
+
+__all__ = ["collect_futures_oi", "collect_market_investor_flows", "collect_vkospi"]

@@ -377,25 +377,28 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         open_flag, session_str = gw.calendar.is_market_open()
         return {"is_open": open_flag, "session": session_str}
 
-    @app.get("/api/futures/kospi200", response_model=FuturesQuote)
-    async def api_futures_kospi200() -> FuturesQuote:
-        """KOSPI200 선물 최근월물 시세 — 미결제약정·베이시스 (2026-07-12).
+    @app.get("/api/futures/kospi200", response_model=list[FuturesQuote])
+    async def api_futures_kospi200() -> list[FuturesQuote]:
+        """KOSPI200 선물 근월·차월물 시세 — 미결제약정·베이시스 (2026-07-12).
 
         투자자별 선물 수급은 KIS 가 안 주므로(선물 시장구분 넣으면 전 항목 0),
         위조 불가능한 집계치인 OI·베이시스를 매크로 입력 후보로 적재한다.
+
+        근월물만 주면 만기 주간에 OI 가 차월물로 넘어가면서 '청산'과 '롤오버'가 섞이므로
+        (민지 리뷰), 두 계약을 다 돌려주고 is_front 로 근월물을 표시한다.
         """
         gw = _gw(app.state)
         gw.record_request("futures_kospi200", "KOSPI200")
         await gw.market_limiter.acquire()
         try:
-            quote = await gw.circuit_breaker.call(gw.kis_api.get_kospi200_front_quote)
+            quotes = await gw.circuit_breaker.call(gw.kis_api.get_kospi200_quotes)
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err
         except KISApiError as e:
             raise HTTPException(502, f"KIS API error: {e}") from e
-        if quote is None:
-            raise HTTPException(404, "KOSPI200 선물 최근월물 해석 실패")
-        return quote
+        if not quotes:
+            raise HTTPException(404, "KOSPI200 선물 계약 해석 실패")
+        return quotes
 
     @app.get("/api/quotations/search-info/{stock_code}")
     async def api_search_info(stock_code: str) -> dict[str, Any]:

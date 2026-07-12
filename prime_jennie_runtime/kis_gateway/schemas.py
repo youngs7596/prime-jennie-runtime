@@ -166,8 +166,10 @@ class FuturesQuote(BaseModel):
     market_basis: float | None = None
     theoretical_price: float | None = None
     disparity: float | None = None  # 괴리율 (선물 - 이론가)
-    remaining_days: int | None = None  # 잔존일수 — 롤오버 판정용
+    remaining_days: int | None = None  # 잔존일수
+    last_trade_date: date | None = None  # 최종거래일 — 롤오버 구간 판정용
     kospi_index: float | None = None  # 코스피 종합지수 (output2)
+    is_front: bool = False  # 근월물(미결제약정 최대) 여부
     timestamp: datetime
 
 

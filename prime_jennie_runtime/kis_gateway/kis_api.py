@@ -496,16 +496,20 @@ class KISApi:
             theoretical_price=_safe_float(o1.get("hts_thpr")),
             disparity=_safe_float(o1.get("dprt")),
             remaining_days=_safe_int(o1.get("hts_rmnn_dynu")),
+            last_trade_date=_safe_date(o1.get("futs_last_tr_date")),
             kospi_index=_safe_float(o2.get("bstp_nmix_prpr")),
+            is_front=False,  # 호출자(get_kospi200_quotes)가 OI 비교 후 채운다
             timestamp=datetime.now(UTC),
         )
 
-    async def get_kospi200_front_quote(self) -> FuturesQuote | None:
-        """정규 KOSPI200 선물 최근월물 시세 — 만기 롤오버 자동 추종.
+    async def get_kospi200_quotes(self) -> list[FuturesQuote]:
+        """정규 KOSPI200 선물 근월·차월물 시세 — 롤오버 구간까지 안전하게.
 
-        분기물(3/6/9/12) 중 가장 가까운 두 개를 조회해 미결제약정이 큰 쪽을 최근월물로
-        본다. 만기가 다가오면 OI 가 차월물로 옮겨가므로 이 규칙만으로 롤오버가 따라온다
-        (2026-07-12 실측: 9월물 157,869 vs 12월물 7,986).
+        근월물만 찍으면 만기 주간에 OI 가 차월물로 넘어가면서 '청산'과 '롤오버'가 구분되지
+        않는다 (2026-07-12 민지 리뷰). 그래서 가까운 분기물(3/6/9/12) 두 개를 **둘 다**
+        돌려주고, 미결제약정이 큰 쪽에 is_front 를 세운다. 분석은 두 계약 합산 OI 를 쓰면
+        롤오버가 중화되고, 계약별 행이 그대로 남아 있으니 이전량도 따로 볼 수 있다.
+        (실측 2026-07-12: 9월물 157,869 / 12월물 7,986.)
         """
         today = date.today()
         candidates: list[str] = []
@@ -525,9 +529,12 @@ class KISApi:
             if quote is not None and quote.open_interest > 0:
                 quotes.append(quote)
         if not quotes:
-            logger.warning("KOSPI200 선물 최근월물 해석 실패 (candidates=%s)", candidates)
-            return None
-        return max(quotes, key=lambda q: q.open_interest)
+            logger.warning("KOSPI200 선물 계약 해석 실패 (candidates=%s)", candidates)
+            return []
+
+        front = max(quotes, key=lambda q: q.open_interest)
+        front.is_front = True
+        return quotes
 
     # ─── Trading (delegated to OrderClient) ──────────────────────
 
@@ -778,4 +785,14 @@ def _safe_int(val: Any) -> int | None:
     try:
         return int(float(val))
     except (ValueError, TypeError):
+        return None
+
+
+def _safe_date(val: Any) -> date | None:
+    """KIS 의 YYYYMMDD 문자열 → date. 선물 최종거래일(futs_last_tr_date) 파싱용."""
+    if not val:
+        return None
+    try:
+        return datetime.strptime(str(val), "%Y%m%d").date()
+    except ValueError:
         return None

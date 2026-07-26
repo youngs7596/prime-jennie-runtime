@@ -367,3 +367,114 @@ async def test_make_invoker_passes_trigger_to_run_slow_loop():
     # macro_run_id / scout_run_id 는 timestamp + 8-hex suffix
     assert captured["macro_run_id"].startswith("mr_20260511_1330_")
     assert captured["scout_run_id"].startswith("sr_20260511_1330_")
+
+
+# =====================================================================
+# 거래시간 가드 (2026-07-26)
+# =====================================================================
+#
+# 스냅샷이 하루치 키라 임계를 한 번 넘기면 그날 내내 조건이 참으로 남고, 30분 디바운스가
+# 풀릴 때마다 장 마감 뒤에도 계속 재발화했다 (7월 573회 중 342회가 장외). 아래 테스트는
+# 장외에는 평가 자체를 건너뛰고 디바운스도 소모하지 않는지 확인한다.
+
+
+async def _drop_watcher(fake_redis, now: datetime, invoked: list[str], **kwargs):
+    """KOSPI −3.2% 가 이미 깔린 상태의 watcher — 가드가 없으면 반드시 발화한다."""
+    await _seed_snapshot(fake_redis, now.date(), kospi_change_pct=-3.2)
+
+    async def _invoker(reason: str) -> None:
+        invoked.append(reason)
+
+    return TriggerWatcher(
+        redis_client=fake_redis,
+        invoker=_invoker,
+        observer=_RecorderObserver(),
+        clock=_fixed_clock(now),
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("now", "label"),
+    [
+        (datetime(2026, 5, 11, 8, 59), "개장 1분 전"),
+        (datetime(2026, 5, 11, 15, 31), "마감 1분 후"),
+        (datetime(2026, 5, 11, 22, 0), "금요일 밤 유형"),
+        (datetime(2026, 5, 11, 1, 0), "새벽"),
+    ],
+)
+async def test_process_once_skips_outside_trading_hours(fake_redis, now, label):
+    invoked: list[str] = []
+    watcher = await _drop_watcher(fake_redis, now, invoked)
+    assert await watcher.process_once() == [], label
+    assert invoked == [], label
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("now", [datetime(2026, 5, 16, 13, 30), datetime(2026, 5, 17, 13, 30)])
+async def test_process_once_skips_on_weekend(fake_redis, now):
+    """토·일은 장중 시각이어도 발화하지 않는다 — 실제로 토요일 01:00 까지 돌았던 사례."""
+    invoked: list[str] = []
+    watcher = await _drop_watcher(fake_redis, now, invoked)
+    assert await watcher.process_once() == []
+    assert invoked == []
+
+
+@pytest.mark.asyncio
+async def test_process_once_skips_on_holiday(fake_redis):
+    """평일 장중이어도 휴장일이면 건너뛴다."""
+    invoked: list[str] = []
+
+    async def _closed() -> bool:
+        return False
+
+    watcher = await _drop_watcher(
+        fake_redis, datetime(2026, 5, 11, 13, 30), invoked, trading_day_check=_closed
+    )
+    assert await watcher.process_once() == []
+    assert invoked == []
+
+
+@pytest.mark.asyncio
+async def test_process_once_fires_on_trading_day_within_window(fake_redis):
+    """장중 거래일이면 그대로 발화한다 — 가드가 정상 경로를 막지 않는지."""
+    invoked: list[str] = []
+
+    async def _open() -> bool:
+        return True
+
+    watcher = await _drop_watcher(
+        fake_redis, datetime(2026, 5, 11, 13, 30), invoked, trading_day_check=_open
+    )
+    assert [s.reason for s in await watcher.process_once()] == [KOSPI_REASON]
+    assert invoked == [KOSPI_REASON]
+
+
+@pytest.mark.asyncio
+async def test_holiday_check_failure_assumes_trading_day(fake_redis):
+    """휴장일 판정이 터지면 거래일로 가정한다 — gateway 장애가 급변 감지를 죽이면 안 된다."""
+    invoked: list[str] = []
+
+    async def _boom() -> bool:
+        raise RuntimeError("gateway down")
+
+    watcher = await _drop_watcher(
+        fake_redis, datetime(2026, 5, 11, 13, 30), invoked, trading_day_check=_boom
+    )
+    assert [s.reason for s in await watcher.process_once()] == [KOSPI_REASON]
+
+
+@pytest.mark.asyncio
+async def test_off_hours_skip_does_not_consume_debounce(fake_redis):
+    """장외 skip 은 디바운스를 쓰지 않는다 — 다음 개장 때 곧바로 한 번 발화해야 한다."""
+    invoked: list[str] = []
+    friday_night = datetime(2026, 5, 15, 22, 0)
+    watcher = await _drop_watcher(fake_redis, friday_night, invoked)
+    assert await watcher.process_once() == []
+    assert await fake_redis.get(f"{DEBOUNCE_KEY_PREFIX}{KOSPI_REASON}") is None
+
+    # 같은 스냅샷 그대로 장중 시각으로 시계만 옮기면 곧바로 발화한다.
+    watcher.clock = _fixed_clock(datetime(2026, 5, 15, 13, 30))
+    assert [s.reason for s in await watcher.process_once()] == [KOSPI_REASON]
+    assert invoked == [KOSPI_REASON]

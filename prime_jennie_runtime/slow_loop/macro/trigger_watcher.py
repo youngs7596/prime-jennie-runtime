@@ -16,6 +16,16 @@ MACRO_GATE_SPEC §1.3 의 "자동 트리거" 구현. 정시 cron (08:00/09:30/10
 debounce: 같은 reason 으로 30분 내 재트리거 방지 — Redis SET with EX 1800.
 key: `macro:trigger_watcher:debounce:{reason}`.
 
+거래시간 가드 (2026-07-26 추가):
+  스냅샷은 하루치 키라 한 번 임계를 넘기면 조건이 그날 내내 참으로 남는다. 디바운스는
+  30분짜리라 풀릴 때마다 다시 발화했고, 그래서 장 마감 뒤에도 30분 간격으로 계속
+  ad-hoc 실행이 돌았다 (7-24 금요일 마감 후 토요일 01:00 까지 관측). 2026-07 한 달
+  573회 중 342회(60%)가 장외 실행이었다. 비용은 무시할 수준이지만 게이트 일별 상태
+  집계를 부풀려 분석을 오염시킨다.
+  → 주말·장외 시각·휴장일에는 평가 자체를 건너뛴다. 디바운스도 소모하지 않는다.
+  휴장일 판정은 `is_trading_day_via_gateway` 를 app.py 가 주입한다 (2026-05-25 사고
+  이후 규율 — cron 에 캘린더를 박지 않고 실행 직전에 확인).
+
 트리거 시 동작:
   - 새 macro_run_id 생성 후 `run_slow_loop(comp, ..., macro_trigger=reason, ...)` 호출
   - 결과는 기존 cron path 와 동일 흐름으로 macro_runs DB 에 persist
@@ -33,7 +43,7 @@ import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -62,6 +72,12 @@ MAX_SNAPSHOT_LOOKBACK_DAYS = 5  # 주말/공휴일 (전일 USD/KRW lookup)
 KOSPI_REASON = "ad_hoc_kospi_drop_3pct"
 VIX_REASON = "ad_hoc_vix_spike_30"
 FX_REASON = "ad_hoc_fx_shock_1p5pct"
+
+# 거래시간 창 (KST). 정규장 09:00~15:30 에 맞춘다. ad-hoc 트리거의 목적은 정시 cron
+# 사이의 급변을 잡아 게이트에 closed 판정 기회를 주는 것이므로, 장이 닫힌 뒤에 다시
+# 판정해 봐야 그날 매매에 반영될 곳이 없다. 개장 전은 08:00 정시 cron 이 이미 본다.
+TRADING_WINDOW_START = time(9, 0)
+TRADING_WINDOW_END = time(15, 30)
 
 
 @dataclass(frozen=True)
@@ -211,11 +227,36 @@ class TriggerWatcher:
     interval_sec: int = DEFAULT_POLL_INTERVAL_SEC
     clock: Callable[[], datetime] | None = None
     debounce_ttl_sec: int = DEBOUNCE_TTL_SEC
+    window_start: time = TRADING_WINDOW_START
+    window_end: time = TRADING_WINDOW_END
+    # 휴장일 판정. app.py 가 gateway 경유 체커를 주입한다. None 이면 주말·시각 가드만
+    # 걸리고 평일 휴장일은 통과한다 (테스트 기본값).
+    trading_day_check: Callable[[], Awaitable[bool]] | None = None
 
     def _now(self) -> datetime:
         if self.clock is not None:
             return self.clock()
         return datetime.now(tz=KST)
+
+    async def market_is_open(self, now: datetime) -> bool:
+        """지금 ad-hoc 발화를 허용할 시각인가. 주말·장외·휴장일이면 False.
+
+        HTTP 판정이 실패하면 거래일로 가정한다 — gateway 일시 장애가 급변 감지를
+        통째로 죽이는 쪽이 더 위험하다. `is_trading_day_via_gateway` 와 같은 정책.
+        """
+        if now.weekday() >= 5:
+            return False
+        if not (self.window_start <= now.time() <= self.window_end):
+            return False
+        if self.trading_day_check is None:
+            return True
+        try:
+            return await self.trading_day_check()
+        except Exception:
+            logger.warning(
+                "trigger_watcher: 휴장일 판정 실패 — 거래일로 가정하고 진행", exc_info=True
+            )
+            return True
 
     async def evaluate_once(self) -> list[TriggerSignal]:
         """1 회 폴링 — snapshot 로드 + 임계 평가. side-effect 없음 (디바운스/트리거 X)."""
@@ -227,7 +268,16 @@ class TriggerWatcher:
         return evaluate_triggers(latest, prior)
 
     async def process_once(self) -> list[TriggerSignal]:
-        """1 cycle: 평가 + 디바운스 통과 시 invoker 호출. 실제 트리거된 신호 반환."""
+        """1 cycle: 평가 + 디바운스 통과 시 invoker 호출. 실제 트리거된 신호 반환.
+
+        장외에는 평가 전에 빠져나간다. 디바운스를 소모하지 않으므로, 다음 개장 때
+        급변이 그대로면 곧바로 한 번 발화한다.
+        """
+        now = self._now()
+        if not await self.market_is_open(now):
+            logger.debug("trigger_watcher: 장외 시각이라 건너뜀 (now=%s)", now.isoformat())
+            return []
+
         try:
             signals = await self.evaluate_once()
         except Exception:
@@ -368,6 +418,8 @@ __all__ = [
     "FX_SHOCK_THRESHOLD_PCT",
     "KOSPI_DROP_THRESHOLD_PCT",
     "KOSPI_REASON",
+    "TRADING_WINDOW_END",
+    "TRADING_WINDOW_START",
     "TriggerSignal",
     "TriggerWatcher",
     "VIX_REASON",

@@ -68,6 +68,8 @@ from .macro.role import MacroGateRole
 from .macro.state_store import MacroStateStore
 from .macro.trigger_watcher import (
     DEFAULT_POLL_INTERVAL_SEC,
+    TRADING_WINDOW_END,
+    TRADING_WINDOW_START,
     TriggerWatcher,
     make_invoker,
 )
@@ -393,14 +395,26 @@ async def run() -> None:
             interval = int(
                 os.environ.get("MACRO_TRIGGER_WATCHER_INTERVAL_SEC", str(DEFAULT_POLL_INTERVAL_SEC))
             )
+            # 거래시간 가드 (2026-07-26): 장외 재발화 차단. 휴장일 판정은 gateway 경유로,
+            # scout_daily 가 쓰는 것과 같은 검증된 주소를 그대로 쓴다.
+            async def _is_trading_day() -> bool:
+                return await is_trading_day_via_gateway(kis_gateway_url)
+
             watcher = TriggerWatcher(
                 redis_client=redis_client,
                 invoker=make_invoker(components, run_slow_loop_fn=run_slow_loop),
                 observer=components.observer,
                 interval_sec=interval,
+                trading_day_check=_is_trading_day,
             )
             watcher_task = asyncio.create_task(watcher.run(), name="macro_trigger_watcher")
-            logger.info("macro trigger_watcher spawned (interval=%ds)", interval)
+            logger.info(
+                "macro trigger_watcher spawned (interval=%ds, window=%s~%s KST, gateway=%s)",
+                interval,
+                TRADING_WINDOW_START,
+                TRADING_WINDOW_END,
+                kis_gateway_url,
+            )
 
             async def _stop_watcher() -> None:
                 if watcher_task is None or watcher_task.done():

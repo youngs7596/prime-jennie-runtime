@@ -116,6 +116,10 @@ services:
       dockerfile: infra/docker/Dockerfile.slow_loop
     environment:
       <<: *common-env
+      # scout_daily 휴장일 가드 + 급변 트리거 거래시간 가드가 이 주소로 chk-holiday 를
+      # 확인한다. 코드 기본값과 같지만 명시한다 — env 누락이 조용한 localhost fallback
+      # 으로 번진 전례가 있다 (asset snapshot ConnectError).
+      KIS_GATEWAY_URL: http://kis-gateway:8080
       VLLM_LLM_URL: ${VLLM_LLM_URL:-http://vllm-llm:8001/v1}
       VLLM_LLM_MODEL: ${VLLM_LLM_MODEL:-jart25/Qwen3-30B-A3B-Instruct-2507-Autoround-Int-4bit-gptq}
       # Primary = DeepSeek chat (Scout + Macro). Shadow = Claude Opus 4.7 (회귀 검증).

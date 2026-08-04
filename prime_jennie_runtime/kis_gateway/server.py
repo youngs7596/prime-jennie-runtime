@@ -87,6 +87,8 @@ class GatewayState:
         self.request_history: deque = deque(maxlen=100)
         self.price_repo = price_repo
         self.observer = observer
+        # 야간선물 OI 수집기 — lifespan 이 채운다. 테스트/주입 상태에선 None.
+        self.futures_night: Any = None
         # Phase 2.3: price_repo 주입 시 fallback 서비스 활성화 (D2).
         self.fallback: FallbackPriceService | None = (
             FallbackPriceService(kis_api, self.circuit_breaker, price_repo, observer=observer)
@@ -174,6 +176,7 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
         redis_client = None
         pg_pool = None
         realtime_buffer = None
+        futures_night = None
         if state is None:
             cfg = config or KISConfig()
             # paper/real 모드 안전장치 — real 모드 시 KIS_REAL_CONFIRMED 누락이면 RuntimeError.
@@ -241,6 +244,25 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                     "price_repo init failed — daily/minute prices will not have PG fallback"
                 )
 
+            # 야간선물 미결제약정 수집 — REST 가 야간을 못 보므로 웹소켓 전용 경로.
+            # 주간 스트리머와 시간대가 겹치지 않아(야간 18:00~05:00 vs 주간 08:50~15:35)
+            # 같은 계정으로 연결을 나눠 쓴다. 매매 경로와 분리하려고 별도 태스크로 둔다.
+            if pg_pool is not None:
+                try:
+                    from .futures_night import FuturesNightCollector
+
+                    futures_night = FuturesNightCollector(
+                        pool=pg_pool,
+                        kis_api=api,
+                        app_key=cfg.app_key,
+                        app_secret=cfg.app_secret,
+                        is_paper=cfg.is_paper,
+                    )
+                    await futures_night.start(cfg.base_url)
+                except Exception:
+                    logger.exception("야간선물 수집기 기동 실패 — 야간 OI 적재 비활성")
+                    futures_night = None
+
             # 실시간 체결·호가 적재 버퍼 — 게이트웨이가 pg_pool 로 직접 기록.
             if pg_pool is not None and isinstance(streamer, KISWebSocketStreamer):
                 try:
@@ -261,6 +283,9 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                 price_repo=price_repo,
             )
 
+        if futures_night is not None:
+            state.futures_night = futures_night
+
         app.state.gateway = state
         try:
             yield
@@ -269,6 +294,8 @@ def create_app(state: GatewayState | None = None, *, config: KISConfig | None = 
                 await state.streamer.stop()
             if state is not None:
                 await state.kis_api.close()
+            if futures_night is not None:
+                await futures_night.stop()
             if realtime_buffer is not None:
                 await realtime_buffer.stop()
             if redis_client is not None:
@@ -399,6 +426,21 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         if not quotes:
             raise HTTPException(404, "KOSPI200 선물 계약 해석 실패")
         return quotes
+
+    @app.get("/api/futures/night/status")
+    async def api_futures_night_status() -> dict[str, Any]:
+        """야간선물 OI 수집 상태 (2026-08-04).
+
+        구독 ACK 만 보고 "붙었다"고 판단하면 안 된다는 걸 이 프로젝트는 여러 번 겪었다.
+        그래서 프레임 수신량과 적재 행수를 같이 노출한다 — 야간장 중에 frames_received 가
+        0 이면 ACK 가 무엇이라 말하든 데이터는 안 흐르는 것이다.
+        """
+        gw = _gw(app.state)
+        if gw.futures_night is None:
+            return {"enabled": False}
+        status: dict[str, Any] = {"enabled": True}
+        status.update(gw.futures_night.get_status())
+        return status
 
     @app.get("/api/quotations/search-info/{stock_code}")
     async def api_search_info(stock_code: str) -> dict[str, Any]:

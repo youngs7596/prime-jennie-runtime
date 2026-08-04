@@ -41,18 +41,26 @@ def _frame(
 
 
 class FakeWebSocket:
-    def __init__(self, incoming: list[str]):
+    def __init__(self, incoming: list[str], *, block_when_empty: bool = False):
         self._incoming = list(incoming)
         self.sent: list[str] = []
+        self.closed = asyncio.Event()
+        # 프레임이 끊긴 새벽을 흉내낸다 — 소진 후 close 될 때까지 매달린다.
+        self._block_when_empty = block_when_empty
 
     async def send(self, msg: str) -> None:
         self.sent.append(msg)
+
+    async def close(self) -> None:
+        self.closed.set()
 
     def __aiter__(self):
         return self
 
     async def __anext__(self) -> str:
         if not self._incoming:
+            if self._block_when_empty and not self.closed.is_set():
+                await self.closed.wait()
             raise StopAsyncIteration
         return self._incoming.pop(0)
 
@@ -338,6 +346,39 @@ async def test_session_stops_when_night_window_closes() -> None:
 
     assert pool.conn.rows == []
     assert c.get_status()["frames_received"] == 0
+
+
+@pytest.mark.asyncio
+async def test_connection_closed_when_window_ends_without_frames() -> None:
+    """체결이 끊긴 새벽에도 창이 닫히면 연결을 놓는다.
+
+    메시지 루프의 창 확인은 프레임이 와야 돌아간다. 연결을 물고 아침까지 가면
+    08:50 에 붙는 주간 스트리머와 같은 계정으로 겹치므로 감시 태스크가 닫아야 한다.
+    """
+    pool = FakePool()
+    ws = FakeWebSocket([], block_when_empty=True)
+    connect = FakeWsConnect(ws)
+    moving = iter(
+        [
+            datetime(2026, 8, 4, 20, 3, tzinfo=_KST),  # 세션 안 — 감시 1회차
+            datetime(2026, 8, 5, 5, 1, tzinfo=_KST),  # 창이 닫힘 — 감시 2회차
+        ]
+    )
+    last = datetime(2026, 8, 5, 5, 1, tzinfo=_KST)
+
+    def clock() -> datetime:
+        nonlocal last
+        last = next(moving, last)
+        return last
+
+    c = _collector(pool, connect)
+    c.set_clock(clock)
+    c._window_check_interval = 0.01
+    c._running = True
+
+    await asyncio.wait_for(c._run_session(date(2026, 8, 4)), timeout=5.0)
+
+    assert ws.closed.is_set()
 
 
 @pytest.mark.asyncio

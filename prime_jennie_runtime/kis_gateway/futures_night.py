@@ -115,6 +115,7 @@ class FuturesNightCollector:
         ws_connect: Any = None,
         flush_interval: float = 30.0,
         idle_poll: float = 60.0,
+        window_check_interval: float = 30.0,
     ):
         self._pool = pool
         self._kis_api = kis_api
@@ -124,6 +125,7 @@ class FuturesNightCollector:
         self._ws_connect = ws_connect or websockets.connect
         self._flush_interval = flush_interval
         self._idle_poll = idle_poll
+        self._window_check_interval = window_check_interval
 
         self._task: asyncio.Task | None = None
         self._running = False
@@ -239,6 +241,7 @@ class FuturesNightCollector:
             logger.info("야간선물 구독 %s (trade_date=%s)", contracts, trade_date)
 
             flusher = asyncio.create_task(self._flush_loop())
+            watchdog = asyncio.create_task(self._close_when_window_ends(ws, trade_date))
             try:
                 async for message in ws:
                     if not self._running:
@@ -248,10 +251,25 @@ class FuturesNightCollector:
                         break
                     await self._handle_message(ws, message, trade_date)
             finally:
-                flusher.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await flusher
+                for task in (flusher, watchdog):
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
                 await self._flush(force=True)
+
+    async def _close_when_window_ends(self, ws: Any, trade_date: date_cls) -> None:
+        """야간장이 끝나면 연결을 직접 닫는다.
+
+        메시지 루프의 창 확인은 프레임이 와야 돌아간다. 새벽엔 체결이 몇 분씩 끊기므로
+        마지막 체결 이후 창이 닫혀도 못 알아채고 연결을 물고 있게 되는데, 그 상태가
+        아침까지 이어지면 08:50 에 붙는 주간 스트리머와 같은 계정으로 겹친다. 시간대를
+        나눠 쓰기로 한 전제가 바로 여기서 깨지므로 감시 태스크가 따로 닫아 준다.
+        """
+        while self._running and session_trade_date(self._now()) == trade_date:
+            await asyncio.sleep(self._window_check_interval)
+        logger.info("야간장 창 종료 감지 — 세션 %s 연결을 닫는다", trade_date)
+        with contextlib.suppress(Exception):
+            await ws.close()
 
     async def _resolve_contracts(self) -> list[str]:
         """근월·차월 두 계약. 롤오버 중화를 위해 주간 수집기와 같은 규율로 둘 다 본다."""

@@ -19,6 +19,7 @@ from prime_jennie_runtime.fast_loop.gateway_subscriber import (
 
 GATEWAY = "http://kis-gateway:8080"
 _SUB_RE = rf"{GATEWAY}/api/realtime/subscribe"
+_UNSUB_RE = rf"{GATEWAY}/api/realtime/unsubscribe"
 _STATUS_RE = rf"{GATEWAY}/api/realtime/status"
 
 
@@ -27,16 +28,24 @@ class _FakeConn:
         self,
         positions: list[str],
         pending_sheet_codes: list[str],
+        top_turnover: list[str],
     ) -> None:
         self._positions = positions
         # 측정 대기 시트 ticker — SQL 이 최신순 정렬로 주는 것을 그대로 흉내.
         self._pending_sheet_codes = pending_sheet_codes
+        # 거래대금 상위 — SQL 이 내림차순으로 주는 것을 그대로 흉내.
+        self._top_turnover = top_turnover
+        self.turnover_queried = False
 
     async def fetch(self, sql: str, *args: object) -> list[dict]:
         if "FROM positions" in sql:
             return [{"stock_code": c} for c in self._positions]
         if "FROM position_sheets" in sql:
             return [{"stock_code": c} for c in self._pending_sheet_codes]
+        if "FROM daily_prices" in sql:
+            self.turnover_queried = True
+            limit = int(args[0]) if args else len(self._top_turnover)
+            return [{"stock_code": c} for c in self._top_turnover[:limit]]
         raise AssertionError(f"unexpected SQL: {sql}")
 
     async def fetchval(self, sql: str, *args: object) -> Any:
@@ -49,8 +58,9 @@ class _FakePool:
         *,
         positions: list[str] | None = None,
         pending_sheets: list[str] | None = None,
+        top_turnover: list[str] | None = None,
     ) -> None:
-        self.conn = _FakeConn(positions or [], pending_sheets or [])
+        self.conn = _FakeConn(positions or [], pending_sheets or [], top_turnover or [])
 
     def acquire(self):
         conn = self.conn
@@ -87,6 +97,54 @@ async def test_load_subscription_codes_positions_only_when_no_sheets():
     pool = _FakePool(positions=["005930"], pending_sheets=[])
     codes = await load_subscription_codes(pool)
     assert codes == ["005930"]
+
+
+@pytest.mark.asyncio
+async def test_fills_empty_slots_with_top_turnover():
+    """보유·시트가 적으면 남는 자리를 거래대금 상위로 채운다 (2026-08-05).
+
+    실보유 0 · 시트 서너 종목이던 시기에 20자리 중 9개만 쓰고 있었다. 체결·호가는
+    지나가면 못 받는 데이터라 빈자리가 곧 영구 손실이다.
+    """
+    turnover = [f"T{i:05d}" for i in range(40)]
+    pool = _FakePool(positions=["005930"], pending_sheets=["035720"], top_turnover=turnover)
+
+    codes = await load_subscription_codes(pool)
+
+    assert len(codes) == MAX_SUBSCRIPTION_CODES
+    assert "005930" in codes
+    assert "035720" in codes
+    # 거래대금 상위부터 채운다 — 뒤쪽은 자리가 없어 안 들어온다.
+    assert "T00000" in codes
+    assert "T00039" not in codes
+
+
+@pytest.mark.asyncio
+async def test_top_turnover_never_displaces_positions_or_sheets():
+    """채움 종목은 우선순위 맨 뒤 — 보유·시트가 한도를 채우면 하나도 안 들어온다."""
+    positions = [f"P{i:05d}" for i in range(5)]
+    sheets = [f"S{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES)]
+    turnover = [f"T{i:05d}" for i in range(40)]
+    pool = _FakePool(positions=positions, pending_sheets=sheets, top_turnover=turnover)
+
+    codes = await load_subscription_codes(pool)
+
+    assert len(codes) == MAX_SUBSCRIPTION_CODES
+    assert not [c for c in codes if c.startswith("T")]
+    for p in positions:
+        assert p in codes
+    # 한도가 이미 찼으면 거래대금 조회 자체를 건너뛴다.
+    assert pool.conn.turnover_queried is False
+
+
+@pytest.mark.asyncio
+async def test_duplicate_between_sheet_and_turnover_counts_once():
+    turnover = ["005930"] + [f"T{i:05d}" for i in range(40)]
+    pool = _FakePool(positions=["005930"], pending_sheets=[], top_turnover=turnover)
+
+    codes = await load_subscription_codes(pool)
+
+    assert len(codes) == len(set(codes)) == MAX_SUBSCRIPTION_CODES
 
 
 @pytest.mark.asyncio
@@ -163,7 +221,53 @@ async def test_ensure_subscribed_noop_when_running_and_complete():
         result = await ensure_subscribed(pool, GATEWAY)
 
     assert status.call_count == 1
-    assert result == {"codes": ["005930", "035720"], "noop": True}
+    assert result == {"codes": ["005930", "035720"], "noop": True, "dropped": []}
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_drops_stale_codes_only_over_limit():
+    """구독 요청이 더하기만 하므로, 한도를 넘길 때만 대상 밖 종목을 덜어낸다.
+
+    2026-08-05 이전엔 시트가 바뀌어도 옛 종목이 해제되지 않아 게이트웨이가 살아있는
+    동안 등록이 계속 쌓였다. 빈자리 채움을 넣으면 대상이 날마다 바뀌므로 KIS 한도(41건)를
+    넘기게 된다.
+    """
+    # 원하는 종목 20개 중 1개만 이미 구독돼 있고, 대상 밖 옛 종목 20개가 남아 있다.
+    turnover = [f"T{i:05d}" for i in range(40)]
+    pool = _FakePool(positions=["005930"], pending_sheets=[], top_turnover=turnover)
+    stale = [f"OLD{i:03d}" for i in range(20)]
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).respond(
+            200, json={"is_running": True, "codes": stale + ["005930"]}
+        )
+        unsub = mock.post(url__regex=_UNSUB_RE).respond(
+            200, json={"removed": [], "total_subscriptions": 1, "is_running": True}
+        )
+        sub = mock.post(url__regex=_SUB_RE).respond(
+            200, json={"added": [], "total_subscriptions": 20, "is_running": True}
+        )
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert unsub.call_count == 1
+    assert sub.call_count == 1
+    # 구독 21개 + 새로 붙일 19개 = 40 → 한도 20 을 20개 초과하므로 옛 종목 20개 전부 해제.
+    assert len(result["dropped"]) == 20
+    assert all(c.startswith("OLD") for c in result["dropped"])
+
+
+@pytest.mark.asyncio
+async def test_ensure_subscribed_keeps_extra_codes_under_limit():
+    """한도 안이면 대상 밖 종목이 남아 있어도 해제하지 않는다 — 공짜로 더 받는 데이터다."""
+    pool = _FakePool(positions=["005930"], pending_sheets=[])
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).respond(
+            200, json={"is_running": True, "codes": ["005930", "999999"]}
+        )
+        result = await ensure_subscribed(pool, GATEWAY)
+
+    assert result["noop"] is True
+    assert result["dropped"] == []
 
 
 @pytest.mark.asyncio

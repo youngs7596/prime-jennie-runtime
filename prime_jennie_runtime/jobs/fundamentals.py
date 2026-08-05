@@ -62,6 +62,7 @@ async def collect_consensus(
     fnguide_ok = 0
     naver_ok = 0
     failed = 0
+    fnguide_fingerprints: set[tuple[Any, ...]] = set()
 
     async with pool.acquire() as conn:
         for idx, code in enumerate(codes, 1):
@@ -101,6 +102,9 @@ async def collect_consensus(
                 updated += 1
                 if data.source == "FNGUIDE":
                     fnguide_ok += 1
+                    fnguide_fingerprints.add(
+                        (data.target_price, data.forward_eps, data.forward_per)
+                    )
                 else:
                     naver_ok += 1
 
@@ -109,13 +113,34 @@ async def collect_consensus(
             await asyncio.sleep(throttle_sec)
 
     logger.info(
-        "collect_consensus: updated=%d fnguide=%d naver=%d failed=%d of %d",
+        "collect_consensus: updated=%d fnguide=%d naver=%d failed=%d of %d distinct=%d",
         updated,
         fnguide_ok,
         naver_ok,
         failed,
         len(codes),
+        len(fnguide_fingerprints),
     )
+    _assert_not_degenerate(fnguide_ok, len(fnguide_fingerprints))
+
+
+# 서로 다른 종목이 이만큼 모였는데 값이 한 가지뿐이면 정상일 수 없다.
+DEGENERATE_MIN_SAMPLE = 20
+
+
+def _assert_not_degenerate(fnguide_rows: int, distinct_values: int) -> None:
+    """전 종목이 같은 값이면 잡을 실패로 떨어뜨린다.
+
+    2026-07-02~07-27 에 213 종목이 전부 삼성전자 숫자를 받아 적고도 8거래일 동안
+    성공으로 기록됐다. 크롤러가 페이지 종목을 대조하게 됐으니 그 경로는 막혔지만,
+    같은 부류의 사고를 값의 모양만으로 한 번 더 거른다. 여기서 예외를 던지면
+    scheduled_job_runs 에 failed 로 남아 사람 눈에 걸린다.
+    """
+    if fnguide_rows >= DEGENERATE_MIN_SAMPLE and distinct_values <= 1:
+        raise RuntimeError(
+            f"consensus degenerate: {fnguide_rows}종목이 전부 같은 값 "
+            f"(distinct={distinct_values}) — 출처가 종목을 구분하지 못하고 있다"
+        )
 
 
 async def collect_naver_roe(

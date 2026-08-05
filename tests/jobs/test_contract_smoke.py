@@ -22,7 +22,8 @@ from prime_jennie_runtime.jobs.maintenance import (
 _MAIN_URL_RE = r"https://finance\.naver\.com/item/main\.naver.*"
 _SECTOR_LIST_URL = r"https://finance\.naver\.com/sise/sise_group\.naver.*"
 _SECTOR_DETAIL_URL = r"https://finance\.naver\.com/sise/sise_group_detail\.naver.*"
-_FNGUIDE_URL = r"https://comp\.fnguide\.com/.*"
+_FNGUIDE_URL = r"https://wcomp\.fnguide\.com/CompanyInfo/Snapshot.*"
+_FNGUIDE_ROE_URL = r"https://wcomp\.fnguide\.com/CompanyInfo/getSnpSectorChart.*"
 _NAVER_CONSENSUS_URL = r"https://navercomp\.wisereport\.co\.kr/.*"
 _INVESTOR_URL = r"https://finance\.naver\.com/sise/investorDealTrendDay\.naver.*"
 
@@ -43,18 +44,37 @@ _MAIN_HTML = """
 </body></html>
 """
 
+# 2026-08-05 이후의 FnGuide Snapshot 구조. 제목이 종목을 밝히고(크롤러가 이걸로 대조한다)
+# '투자의견' 표가 열 방향으로 값을 준다. sentinel 은 삼성전자(005930).
 _FNGUIDE_HTML = """
-<html><body>
+<html><head><title>삼성전자(005930) | Snapshot | 기업정보 | Company Guide</title></head>
+<body>
 <table>
-  <tr><th>EPS(원)</th><td>1200</td></tr>
-  <tr><th>PER(배)</th><td>11.5</td></tr>
-  <tr><th>ROE(%)</th><td>8.5</td></tr>
-</table>
-<table>
-  <tr><th>애널리스트</th><td>15</td></tr>
+  <caption>투자의견</caption>
+  <thead>
+    <tr><th>투자의견</th><th>목표주가</th><th>EPS</th><th>PER</th><th>추정기관수</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>4.0</td><td>416,800</td><td>1,200</td><td>11.5</td><td>15</td></tr>
+  </tbody>
 </table>
 </body></html>
 """
+
+# 업종비교 위젯 JSON — 첫 줄이 회사, 마지막 열('26E)이 추정치.
+_FNGUIDE_ROE_JSON = {
+    "dataset": {
+        "header": [
+            {"ID": "CMP_NM", "NM": "", "DIGIT": -1},
+            {"ID": "VAL1", "NM": "'25", "DIGIT": 2},
+            {"ID": "VAL2", "NM": "'26E", "DIGIT": 2},
+        ],
+        "data": [
+            {"CMP_NM": "삼성전자", "VAL1": 8.0, "VAL2": 8.5},
+            {"CMP_NM": "코스피", "VAL1": 7.0, "VAL2": 7.5},
+        ],
+    }
+}
 
 
 def _sector_list_html() -> str:
@@ -120,6 +140,7 @@ async def test_contract_smoke_passes_when_all_contracts_intact():
             200, content=_sector_detail_html(True, 550).encode("euc-kr")
         )
         mock.get(url__regex=_FNGUIDE_URL).respond(200, text=_FNGUIDE_HTML)
+        mock.get(url__regex=_FNGUIDE_ROE_URL).respond(200, json=_FNGUIDE_ROE_JSON)
         mock.get(url__regex=_INVESTOR_URL).respond(
             200, content=_investor_html(today_bizdate).encode("euc-kr")
         )
@@ -142,6 +163,7 @@ async def test_contract_smoke_raises_when_news_empty():
             200, content=_sector_detail_html(True, 550).encode("euc-kr")
         )
         mock.get(url__regex=_FNGUIDE_URL).respond(200, text=_FNGUIDE_HTML)
+        mock.get(url__regex=_FNGUIDE_ROE_URL).respond(200, json=_FNGUIDE_ROE_JSON)
         mock.get(url__regex=_INVESTOR_URL).respond(
             200, content=_investor_html(today_bizdate).encode("euc-kr")
         )

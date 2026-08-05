@@ -4,8 +4,22 @@ v2 `prime_jennie/infra/crawlers/fnguide.py` 의 파싱 규칙을 그대로 유�
 HTTP 만 `httpx.AsyncClient` 로 바꿨다.
 
 - `crawl_consensus(client, stock_code)` : FnGuide 우선, 실패 시 Naver 폴백.
-  목표주가·추정기관수·투자의견·forward EPS/PER 은 '투자의견 컨센서스' 표(열 방향)에서,
-  forward ROE 는 '업종 비교' 표 회사 컬럼에서 읽는다.
+  목표주가·추정기관수·투자의견·forward EPS/PER 은 '투자의견' 표(열 방향)에서,
+  forward ROE 는 업종비교 위젯이 부르는 JSON 에서 읽는다.
+
+**2026-08-05 이전 기록 — 종목이 뒤바뀐 채 5주를 흘렀다.**
+FnGuide 가 기업정보를 `comp.fnguide.com/SVO2/ASP/SVD_Main.asp?gicode=A종목코드` 에서
+`wcomp.fnguide.com/CompanyInfo/Snapshot?cmp_cd=A종목코드` 로 옮겼다. 옛 주소는 지금
+"페이지가 없습니다" 안내문을 **HTTP 200 으로** 준다. 이사 직후에는 더 나빴다 — 옛 주소가
+새 사이트로 넘어가면서 파라미터 이름 `gicode` 가 무시됐고, 새 사이트는 종목을 못 알아들으면
+**기본 페이지인 삼성전자를 보여준다.** 그래서 7-02~7-27 여덟 거래일 동안 213 종목이 전부
+삼성전자 숫자(목표주가 513,958 · 추정기관수 24 · EPS 46,664 · PER 5.3)를 받아 적혔다.
+빈 값이 아니라 그럴듯한 값이라 아무 데서도 안 걸렸다.
+
+그래서 **페이지가 스스로 밝힌 종목코드를 요청한 코드와 대조한다**(`_page_stock_code`).
+값이 몇 가지냐를 사후에 세는 것보다 이쪽이 정확하다 — 한 종목만 조회해도 즉시 걸리고,
+우선주처럼 조용히 보통주로 바꿔치기되는 경우(A001527 을 넣으면 동양(001520) 이 온다)도
+같은 검사로 잡힌다. 우선주는 컨센서스가 따로 없으니 걸러 내는 쪽이 맞다.
 """
 
 from __future__ import annotations
@@ -26,6 +40,14 @@ _HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
 }
+
+_SNAPSHOT_URL = "https://wcomp.fnguide.com/CompanyInfo/Snapshot?cmp_cd=A{code}"
+# 업종비교 위젯이 부르는 JSON. prc_typ 4=ROE (1=EPS, 2=PER, 3=EV/EBITDA, 5=배당수익률).
+# 이쪽은 종목코드를 **A 접두어 없이** 받는다 — 붙이면 전 필드 null 인 빈 응답이 온다.
+_SECTOR_ROE_URL = "https://wcomp.fnguide.com/CompanyInfo/getSnpSectorChart"
+
+# 페이지 제목이 "삼성전자(005930) | Snapshot | 기업정보 | Company Guide" 꼴이다.
+_TITLE_CODE_RE = re.compile(r"\((\d{6})\)")
 
 
 @dataclass
@@ -60,94 +82,87 @@ async def crawl_consensus(client: httpx.AsyncClient, stock_code: str) -> Consens
 async def crawl_fnguide_consensus(
     client: httpx.AsyncClient, stock_code: str
 ) -> ConsensusData | None:
-    url = f"https://comp.fnguide.com/SVO2/ASP/SVD_Main.asp?gicode=A{stock_code}"
+    url = _SNAPSHOT_URL.format(code=stock_code)
     try:
         resp = await client.get(url, headers=_HEADERS, timeout=15, follow_redirects=True)
         if resp.status_code != 200:
             return None
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        # 받아 온 페이지가 정말 그 종목인지부터 확인한다. 다른 종목이 왔는데 파싱만
+        # 성공하면 남의 숫자가 이 종목 행에 적힌다 (모듈 상단 2026-08-05 기록).
+        page_code = _page_stock_code(soup)
+        if page_code != stock_code:
+            logger.warning(
+                "[%s] FnGuide 가 다른 종목을 돌려줬다 (page=%s) — 버린다",
+                stock_code,
+                page_code or "미상",
+            )
+            return None
+
         result = ConsensusData()
-        # '투자의견 컨센서스' 추정 표를 먼저 읽어 목표주가·추정기관수·투자의견과 진짜
-        # forward EPS·PER 을 채운다. 그 다음 '업종 비교' 표가 forward ROE 를 채우고,
-        # 커버 없는 종목에 한해 trailing EPS·PER 로 폴백한다 (이미 채워졌으면 건너뜀).
+        # '투자의견' 표가 목표주가·추정기관수·투자의견과 증권사 평균 EPS·PER 을 한 줄에 준다.
         _parse_fnguide_consensus_estimate(soup, result)
-        _parse_fnguide_consensus_table(soup, result)
 
         if result.forward_per is None and result.forward_eps is None:
             return None
+
+        result.forward_roe = await _fetch_forward_roe(client, stock_code)
         return result
     except Exception as e:
         logger.debug("[%s] FnGuide consensus crawl failed: %s", stock_code, e)
         return None
 
 
-def _parse_fnguide_consensus_table(soup: BeautifulSoup, result: ConsensusData) -> None:
-    # 1) "업종 비교" 표 — EPS·ROE 는 회사 컬럼에서 읽는다.
-    #    이 표의 헤더는 ['구분', <회사명>, '코스피 …(업종평균)', 'KOSPI(시장평균)'] 라서
-    #    회사 값은 첫 데이터 셀(tds[0]) 이다. 이전 코드는 tds[-1] (KOSPI 시장평균) 를
-    #    읽어 전 종목이 동일한 값으로 오염됐다 — forward_roe 가 모든 종목 8.84,
-    #    forward_eps 가 9,060.56 로 찍히던 버그 (2026-06-07 수정).
-    for table in soup.select("table"):
-        caption = table.find("caption")
-        if caption is None or "업종 비교" not in caption.get_text():
-            continue
-        for row in table.select("tr"):
-            th = row.select_one("th")
-            if not th:
-                continue
-            label = th.get_text(strip=True)
-            tds = row.select("td")
-            if not tds:
-                continue
-            company = _parse_number(tds[0].get_text(strip=True))
-            if company is None:
-                continue
-            if label.startswith("EPS") and result.forward_eps is None:
-                result.forward_eps = company
-            elif label == "ROE" and result.forward_roe is None:
-                result.forward_roe = company
+def _page_stock_code(soup: BeautifulSoup) -> str | None:
+    """페이지가 스스로 밝힌 종목코드. 못 읽으면 None (= 대조 실패로 취급)."""
+    title = soup.select_one("title")
+    if title is None:
+        return None
+    match = _TITLE_CODE_RE.search(title.get_text(strip=True))
+    return match.group(1) if match else None
 
-    # 2) Financial Highlight 표 — PER 은 최우측 (E) 컬럼이 forward 추정치다.
-    #    "업종 비교" 표의 PER 라벨엔 "배" 가 없어 자연히 건너뛰고 FH 의 'PER(배)' 행을
-    #    잡는다 (기존에 유일하게 정상 동작하던 경로).
-    for table in soup.select("table"):
-        for row in table.select("tr"):
-            th = row.select_one("th, td.cmp-table-cell")
-            if not th:
-                continue
-            label = th.get_text(strip=True)
-            tds = row.select("td")
-            if not tds:
-                continue
-            if "PER" in label and "배" in label and result.forward_per is None:
-                val = _parse_number(tds[-1].get_text(strip=True))
-                if val is not None and val > 0:
-                    result.forward_per = val
 
-    for div in soup.select("div.corp_group2, div.corp_group1"):
-        for table in div.select("table"):
-            for row in table.select("tr"):
-                ths = row.select("th")
-                tds = row.select("td")
-                if not ths or not tds:
-                    continue
-                for th, td in zip(ths, tds, strict=False):
-                    label = th.get_text(strip=True)
-                    val_text = td.get_text(strip=True)
+async def _fetch_forward_roe(client: httpx.AsyncClient, stock_code: str) -> float | None:
+    """업종비교 위젯 JSON 에서 회사의 forward ROE 를 읽는다.
 
-                    if "PER" in label and result.forward_per is None:
-                        val = _parse_number(val_text)
-                        if val is not None and val > 0:
-                            result.forward_per = val
-                    if "EPS" in label and result.forward_eps is None:
-                        val = _parse_number(val_text)
-                        if val is not None:
-                            result.forward_eps = val
-                    if "ROE" in label and result.forward_roe is None:
-                        val = _parse_number(val_text)
-                        if val is not None:
-                            result.forward_roe = val
+    응답은 [회사, 업종, 코스피 업종, 코스피] 네 줄이고 **첫 줄이 회사**다. 마지막 줄인
+    시장평균을 읽어 전 종목이 같은 값으로 오염됐던 사고가 2026-06-07 에 있었으니, 첫 줄을
+    집는다는 점을 바꾸지 말 것.
+
+    열은 ['24, '25, '26E] 처럼 연도별인데 이름이 E 로 끝나는 열이 추정치다. 그 열이 없으면
+    (추정 없는 종목) 마지막 실적 열로 떨어진다. 실패해도 컨센서스 레코드 자체는 살린다.
+    """
+    try:
+        resp = await client.get(
+            _SECTOR_ROE_URL,
+            params={"cmp_cd": stock_code, "consol_typ": "C", "prc_typ": "4"},
+            headers=_HEADERS,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        dataset = resp.json().get("dataset") or {}
+        rows = dataset.get("data") or []
+        headers = dataset.get("header") or []
+        if not rows or not rows[0].get("CMP_NM"):
+            return None
+
+        value_ids = [h.get("ID") for h in headers if str(h.get("ID", "")).startswith("VAL")]
+        if not value_ids:
+            return None
+        estimate_ids = [
+            h.get("ID")
+            for h in headers
+            if str(h.get("ID", "")).startswith("VAL") and str(h.get("NM", "")).endswith("E")
+        ]
+        column = estimate_ids[-1] if estimate_ids else value_ids[-1]
+
+        value = rows[0].get(column)
+        return float(value) if value is not None else None
+    except Exception as e:
+        logger.debug("[%s] FnGuide forward ROE fetch failed: %s", stock_code, e)
+        return None
 
 
 def _parse_fnguide_consensus_estimate(soup: BeautifulSoup, result: ConsensusData) -> None:

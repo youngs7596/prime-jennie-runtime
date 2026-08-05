@@ -30,7 +30,7 @@ class DartFiling:
     report_nm: str  # 공시명
     rcept_no: str  # 접수번호 (UNIQUE)
     rcept_dt: str  # 접수일 (yyyymmdd)
-    pblntf_ty: str  # 공시 유형 (A=정기, B=주요사항, ...)
+    pblntf_ty: str  # 공시 유형 (A=정기, B=주요사항, ...) — 요청값을 그대로 찍는다, 아래 참조
 
 
 async def fetch_dart_filings(
@@ -47,6 +47,12 @@ async def fetch_dart_filings(
     bgn_de/end_de 는 yyyymmdd (v2 OpenDartReader.list 는 ISO 를 받지만 OpenAPI 는
     yyyymmdd). pblntf_ty="A" 는 v2 와 동일 (정기공시).
     실패/비정상 상태 코드는 빈 리스트 + 경고 로그.
+
+    **응답 row 에는 공시 유형이 안 들어 있다** (2026-08-05 실측: 필드가 corp_code ·
+    corp_name · stock_code · corp_cls · report_nm · rcept_no · flr_nm · rcept_dt · rm
+    뿐이다). 그래서 `row.get("pblntf_ty")` 는 늘 빈 문자열이었고 `stock_disclosures.report_type`
+    이 47,752행 전부 NULL 이었다. 유형은 우리가 물어본 값이므로 **요청 파라미터를 그대로
+    찍는다** — 조회 조건이 곧 유형이라 이게 정확하다.
     """
     filings: list[DartFiling] = []
     for page in range(1, max_pages + 1):
@@ -89,7 +95,7 @@ async def fetch_dart_filings(
                     report_nm=str(row.get("report_nm", "")),
                     rcept_no=str(row.get("rcept_no", "")),
                     rcept_dt=str(row.get("rcept_dt", "")),
-                    pblntf_ty=str(row.get("pblntf_ty", "")),
+                    pblntf_ty=pblntf_ty,
                 )
             )
 

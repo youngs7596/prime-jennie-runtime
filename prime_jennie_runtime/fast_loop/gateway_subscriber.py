@@ -14,10 +14,20 @@ subscribe 호출 경로가 포팅되지 않아 gateway streamer 가 dead path �
   - paper 측정 윈도우가 열려있는 시트의 ticker — v2 잔재 watchlist_histories
     (4-17 동결, v3 writer 없음) 를 대체
   - **남는 자리는 직전 거래일 거래대금 상위 KOSPI 종목으로 채운다** (2026-08-05).
-    실보유가 0 이고 시트가 서너 종목이라 20자리 중 9개만 쓰고 있었는데, 체결·호가는
-    지나가면 되받을 수 없는 데이터라 빈자리로 두는 게 곧 영구 손실이다. 채움 종목은
-    우선순위 맨 뒤라 보유·시트가 늘면 먼저 밀려난다.
-  - KIS WebSocket 등록 한도 (41) 안에서 자른다. positions 먼저, 시트는 최신순, 채움은 끝.
+    실보유가 0 이고 시트가 서너 종목이라 20종목 중 9개만 쓰고 있었는데, 체결·호가는
+    지나가면 되받을 수 없는 데이터라 안 채우면 곧 영구 손실이다.
+  - KIS WebSocket 등록 한도 (41) 안에서 자른다.
+
+장중에는 붙어 있는 종목을 바꾸지 않는다 (2026-08-07):
+  8-07 오전에 09:30 시트 13건이 발행되면서 구독이 갈렸다. 시트가 채움보다 앞이라
+  NAVER·삼성전자우·SK스퀘어·LIG넥스원이 그 시각에 빠졌고, 거래대금 최상위 네 종목의
+  그날 나머지가 통째로 사라졌다 — 되받을 수 없는 데이터다. 그래서 우선순위를 뒤집었다.
+  주간 스트리머가 붙어 있는 08:50~15:35 에는 **이미 구독된 종목을 그대로 유지**하고,
+  새 시트는 남는 여유에만 넣는다. 대상을 다시 세우는 건 그 시간대 밖(사실상 이튿날
+  개장 직전)이고, 그때 거래대금 순위도 새 거래일 것으로 갱신된다.
+
+  보유(positions)만은 이 유지 규칙보다 앞이다 — 실제 돈이 들어간 종목의 체결·호가는
+  진입·청산 품질 측정의 유일한 재료라 자리를 비켜 주지 않는다.
 
 구독 보증 (2026-07-08 추가):
   기동 시 1회 호출은 게이트웨이가 아직 안 떠 있으면 실패하고 재시도가 없었다.
@@ -33,10 +43,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Any
 
 import asyncpg
 import httpx
+
+from prime_jennie_runtime.kis_gateway.market_hours import STREAM_END, STREAM_START
+from prime_jennie_runtime.position_sheet.schema import KST
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +100,31 @@ _TOP_TURNOVER_SQL = """
 """
 
 
-async def load_subscription_codes(pool: asyncpg.Pool) -> list[str]:
-    """positions + 측정 대기 시트 + 거래대금 상위로 구독 대상 종목 코드를 채운다.
+def is_stream_window(now: datetime) -> bool:
+    """주간 스트리머가 붙어 있는 시간대(08:50~15:35)인지. 이 시간엔 구독을 안 바꾼다.
 
-    체결+호가 두 채널이라 실효 종목 한도 (20) 를 넘으면 positions 전체 + 최신 시트
-    순으로 자른다. 자르고도 자리가 남으면 거래대금 상위 종목으로 끝까지 채운다 —
-    빈자리는 그대로 휘발 데이터의 영구 손실이기 때문이다.
+    휴장일인지는 보지 않는다 — 휴장일엔 어차피 틱이 안 흐르고, 대상을 다시 세우는
+    일은 그 시간대 밖에서 매 주기 일어나므로 다음 개장 전에 갱신된다.
+    """
+    kst = now.astimezone(KST)
+    hhmm = kst.hour * 100 + kst.minute
+    return STREAM_START <= hhmm < STREAM_END
+
+
+async def load_subscription_codes(
+    pool: asyncpg.Pool,
+    *,
+    keep: Sequence[str] = (),
+) -> list[str]:
+    """positions + 유지 종목 + 측정 대기 시트 + 거래대금 상위로 구독 대상을 채운다.
+
+    체결+호가 두 채널이라 실효 종목 한도 (20) 를 넘으면 앞에서부터 자른다. 순서는
+    보유 → keep → 측정 대기 시트 최신순 → 거래대금 상위 채움이다.
+
+    keep 은 장중에 이미 구독돼 있는 종목이다 (`ensure_subscribed` 가 넘긴다). 보유
+    다음에 두는 이유는 하루 중간에 종목이 갈리면 그 종목의 남은 하루가 통째로
+    사라지기 때문이고, 보유보다 뒤에 두는 이유는 실제 돈이 들어간 종목이 먼저여야
+    하기 때문이다. 장 시간대 밖에서는 keep 이 비어서 대상이 처음부터 다시 세워진다.
     """
     async with pool.acquire() as conn:
         pos_rows = await conn.fetch("SELECT stock_code FROM positions")
@@ -99,33 +133,37 @@ async def load_subscription_codes(pool: asyncpg.Pool) -> list[str]:
         sheet_rows = await conn.fetch(_PENDING_SHEET_TICKERS_SQL)
         sheet_codes = [r["stock_code"] for r in sheet_rows]
 
-        # 보유·시트만으로 한도가 차면 조회 자체를 건너뛴다.
-        if len(set(position_codes + sheet_codes)) < MAX_SUBSCRIPTION_CODES:
+        wanted = position_codes + list(keep) + sheet_codes
+        # 보유·유지·시트만으로 한도가 차면 조회 자체를 건너뛴다.
+        if len(set(wanted)) < MAX_SUBSCRIPTION_CODES:
             filler_rows = await conn.fetch(_TOP_TURNOVER_SQL, MAX_SUBSCRIPTION_CODES * 2)
             filler_codes = [r["stock_code"] for r in filler_rows]
         else:
             filler_codes = []
 
-    # positions 우선 → 시트 최신순 → 거래대금 상위 순으로 한도까지 채움.
     codes: list[str] = []
     seen: set[str] = set()
-    wanted = position_codes + sheet_codes
     for code in wanted + filler_codes:
         if code in seen:
             continue
         if len(codes) >= MAX_SUBSCRIPTION_CODES:
-            dropped = len(set(wanted)) - len(codes)
-            if dropped > 0:
-                logger.warning(
-                    "sub codes truncated at %d (등록 %d건/종목, KIS 한도 %d) dropped=%d",
-                    MAX_SUBSCRIPTION_CODES,
-                    _REGISTRATIONS_PER_CODE,
-                    KIS_WS_SUBSCRIPTION_LIMIT,
-                    dropped,
-                )
             break
         codes.append(code)
         seen.add(code)
+
+    # 보유가 밀려나면 진짜 문제다 — 실 매매 종목의 체결·호가를 못 받는다는 뜻이라
+    # 한도를 늘리거나 채움을 줄여야 한다.
+    if left_out := [c for c in position_codes if c not in seen]:
+        logger.warning(
+            "보유 종목이 구독 한도 %d 에 밀림 (등록 %d건/종목, KIS 한도 %d): %s",
+            MAX_SUBSCRIPTION_CODES,
+            _REGISTRATIONS_PER_CODE,
+            KIS_WS_SUBSCRIPTION_LIMIT,
+            left_out,
+        )
+    # 시트가 밀리는 건 장중 유지 정책의 정상 결과라 debug 로만 남긴다.
+    if sheets_left_out := [c for c in sheet_codes if c not in seen]:
+        logger.debug("시트 %d개가 한도에 밀려 미구독: %s", len(sheets_left_out), sheets_left_out)
     return sorted(codes)
 
 
@@ -204,6 +242,7 @@ async def ensure_subscribed(
     gateway_url: str,
     *,
     timeout: float = 10.0,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """구독이 살아있고 원하는 종목을 다 담고 있는지 확인, 아니면 재구독.
 
@@ -211,21 +250,31 @@ async def ensure_subscribed(
     않는다(no-op). 그렇지 않으면(기동 순서로 초기 구독 유실, 게이트웨이 재시작 등)
     재구독한다. status 조회 자체가 실패하면(게이트웨이 미준비) 일단 구독을 시도한다.
 
-    **구독 요청은 더하기만 한다**(게이트웨이 `/subscribe` 가 add-only). 그래서 대상이
-    날마다 바뀌는 지금은 놔두면 등록이 계속 쌓여 KIS 한도(41건)를 넘는다. 한도를 넘길
-    때만, 그것도 지금 대상이 아닌 종목만 골라 해제한다 — 한도 안이면 남아 있는 옛 종목도
-    그냥 둔다(공짜로 더 받는 데이터라 버릴 이유가 없다).
-    """
-    codes = await load_subscription_codes(pool)
-    if not codes:
-        logger.debug("realtime 구독 보증 skip — 구독 대상 비어있음")
-        return {"codes": [], "skipped": True}
+    **장중(08:50~15:35)에는 이미 붙어 있는 종목을 대상에 그대로 얹는다** — 그래야
+    시트가 새로 나와도 붙어 있던 종목이 안 빠진다. 그 시간대 밖에서는 얹지 않으므로
+    대상이 처음부터 다시 세워지고, 대상에서 빠진 옛 종목은 아래 해제 경로로 정리된다.
 
+    **구독 요청은 더하기만 한다**(게이트웨이 `/subscribe` 가 add-only). 그래서 놔두면
+    등록이 계속 쌓여 KIS 한도(41건)를 넘는다. 한도를 넘길 때만, 그것도 지금 대상이
+    아닌 종목만 골라 해제한다 — 한도 안이면 남아 있는 옛 종목도 그냥 둔다(공짜로 더
+    받는 데이터라 버릴 이유가 없다).
+    """
     try:
         status = await get_subscription_status(gateway_url, timeout=timeout)
     except Exception as e:
         logger.debug("realtime status 조회 실패, 구독 시도로 진행: %s", e)
         status = None
+
+    # 장중이면 붙어 있는 것을 유지 대상으로 넘긴다. 게이트웨이가 안 잡히면 유지할
+    # 목록 자체를 모르므로 처음부터 세운다.
+    keep: list[str] = []
+    if status is not None and is_stream_window(now or datetime.now(KST)):
+        keep = list(status.get("codes", []))
+
+    codes = await load_subscription_codes(pool, keep=keep)
+    if not codes:
+        logger.debug("realtime 구독 보증 skip — 구독 대상 비어있음")
+        return {"codes": [], "skipped": True}
 
     dropped: list[str] = []
     if status is not None:
@@ -307,6 +356,7 @@ async def run_subscription_maintainer(
 
 
 __all__ = [
+    "is_stream_window",
     "load_subscription_codes",
     "subscribe_on_startup",
     "ensure_subscribed",

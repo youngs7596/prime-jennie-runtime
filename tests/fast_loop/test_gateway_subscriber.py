@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -12,15 +13,21 @@ import respx
 from prime_jennie_runtime.fast_loop.gateway_subscriber import (
     MAX_SUBSCRIPTION_CODES,
     ensure_subscribed,
+    is_stream_window,
     load_subscription_codes,
     run_subscription_maintainer,
     subscribe_on_startup,
 )
+from prime_jennie_runtime.position_sheet.schema import KST
 
 GATEWAY = "http://kis-gateway:8080"
 _SUB_RE = rf"{GATEWAY}/api/realtime/subscribe"
 _UNSUB_RE = rf"{GATEWAY}/api/realtime/unsubscribe"
 _STATUS_RE = rf"{GATEWAY}/api/realtime/status"
+
+# 주간 스트리머가 붙어 있는 시간(08:50~15:35) 안팎 — 구독 유지 여부가 갈린다.
+_INTRADAY = datetime(2026, 8, 7, 9, 31, tzinfo=KST)
+_OFF_HOURS = datetime(2026, 8, 7, 8, 40, tzinfo=KST)
 
 
 class _FakeConn:
@@ -247,7 +254,7 @@ async def test_ensure_subscribed_drops_stale_codes_only_over_limit():
         sub = mock.post(url__regex=_SUB_RE).respond(
             200, json={"added": [], "total_subscriptions": 20, "is_running": True}
         )
-        result = await ensure_subscribed(pool, GATEWAY)
+        result = await ensure_subscribed(pool, GATEWAY, now=_OFF_HOURS)
 
     assert unsub.call_count == 1
     assert sub.call_count == 1
@@ -264,7 +271,7 @@ async def test_ensure_subscribed_keeps_extra_codes_under_limit():
         mock.get(url__regex=_STATUS_RE).respond(
             200, json={"is_running": True, "codes": ["005930", "999999"]}
         )
-        result = await ensure_subscribed(pool, GATEWAY)
+        result = await ensure_subscribed(pool, GATEWAY, now=_OFF_HOURS)
 
     assert result["noop"] is True
     assert result["dropped"] == []
@@ -320,16 +327,109 @@ async def test_ensure_subscribed_resubscribes_when_status_unreachable():
 
 @pytest.mark.asyncio
 async def test_ensure_subscribed_skips_when_no_codes():
-    """구독 대상이 없으면 status 조회도 subscribe 도 하지 않는다."""
+    """구독 대상이 없으면 subscribe 하지 않는다.
+
+    status 는 먼저 조회한다 — 장중에 유지할 종목을 알아야 대상을 세울 수 있어서다.
+    """
     pool = _FakePool(positions=[], pending_sheets=[])
     with respx.mock(assert_all_called=False) as mock:
-        status = mock.get(url__regex=_STATUS_RE)
+        mock.get(url__regex=_STATUS_RE).respond(200, json={"is_running": False, "codes": []})
         sub = mock.post(url__regex=_SUB_RE)
-        result = await ensure_subscribed(pool, GATEWAY)
+        result = await ensure_subscribed(pool, GATEWAY, now=_OFF_HOURS)
 
-    assert status.call_count == 0
     assert sub.call_count == 0
     assert result == {"codes": [], "skipped": True}
+
+
+def test_is_stream_window_boundaries():
+    """주간 스트리머 시간대는 08:50 부터 15:35 직전까지."""
+    assert not is_stream_window(datetime(2026, 8, 7, 8, 49, tzinfo=KST))
+    assert is_stream_window(datetime(2026, 8, 7, 8, 50, tzinfo=KST))
+    assert is_stream_window(datetime(2026, 8, 7, 15, 34, tzinfo=KST))
+    assert not is_stream_window(datetime(2026, 8, 7, 15, 35, tzinfo=KST))
+
+
+@pytest.mark.asyncio
+async def test_load_subscription_codes_keep_ranks_between_positions_and_sheets():
+    """유지 종목은 보유 다음, 시트 앞 — 장중에 붙어 있던 것이 시트에 안 밀린다."""
+    keep = [f"K{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES - 1)]
+    pool = _FakePool(positions=["005930"], pending_sheets=["SHEET1"])
+
+    codes = await load_subscription_codes(pool, keep=keep)
+
+    assert len(codes) == MAX_SUBSCRIPTION_CODES
+    assert "005930" in codes
+    for k in keep:
+        assert k in codes
+    assert "SHEET1" not in codes
+
+
+@pytest.mark.asyncio
+async def test_intraday_new_sheet_does_not_displace_attached_codes():
+    """장중에 새 시트가 나와도 붙어 있는 종목을 밀어내지 않는다 (2026-08-07).
+
+    8-07 오전 09:30 에 시트 13건이 발행되면서 NAVER·삼성전자우·SK스퀘어·LIG넥스원이
+    구독에서 빠졌고, 거래대금 최상위 네 종목의 그날 나머지가 통째로 사라졌다.
+    """
+    attached = [f"T{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES)]
+    pool = _FakePool(positions=[], pending_sheets=["NEW001", "NEW002"], top_turnover=attached)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).respond(200, json={"is_running": True, "codes": attached})
+        result = await ensure_subscribed(pool, GATEWAY, now=_INTRADAY)
+
+    # 해제도 재구독도 없다 — 아침에 붙은 그대로 간다.
+    assert result["noop"] is True
+    assert result["dropped"] == []
+    assert result["codes"] == sorted(attached)
+    assert "NEW001" not in result["codes"]
+
+
+@pytest.mark.asyncio
+async def test_position_outranks_attached_codes_intraday():
+    """장중이라도 보유 종목은 구독에 들어간다 — 채움 하나가 대신 빠진다."""
+    attached = [f"T{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES)]
+    pool = _FakePool(positions=["005930"], pending_sheets=[], top_turnover=attached)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).respond(200, json={"is_running": True, "codes": attached})
+        unsub = mock.post(url__regex=_UNSUB_RE).respond(
+            200, json={"removed": ["T00019"], "total_subscriptions": 19, "is_running": True}
+        )
+        sub = mock.post(url__regex=_SUB_RE).respond(
+            200, json={"added": ["005930"], "total_subscriptions": 20, "is_running": True}
+        )
+        result = await ensure_subscribed(pool, GATEWAY, now=_INTRADAY)
+
+    assert unsub.call_count == 1
+    assert sub.call_count == 1
+    assert "005930" in result["codes"]
+    assert len(result["codes"]) == MAX_SUBSCRIPTION_CODES
+    assert result["dropped"] == ["T00019"]
+
+
+@pytest.mark.asyncio
+async def test_offhours_rebuilds_with_new_day_turnover():
+    """장 시간대 밖에서는 대상을 처음부터 다시 세운다 — 새 거래일 순위로 갈린다."""
+    yesterday = [f"OLD{i:03d}" for i in range(MAX_SUBSCRIPTION_CODES)]
+    today = [f"NEW{i:03d}" for i in range(40)]
+    pool = _FakePool(positions=[], pending_sheets=[], top_turnover=today)
+
+    with respx.mock(assert_all_called=True) as mock:
+        mock.get(url__regex=_STATUS_RE).respond(200, json={"is_running": True, "codes": yesterday})
+        unsub = mock.post(url__regex=_UNSUB_RE).respond(
+            200, json={"removed": yesterday, "total_subscriptions": 0, "is_running": True}
+        )
+        sub = mock.post(url__regex=_SUB_RE).respond(
+            200, json={"added": [], "total_subscriptions": 20, "is_running": True}
+        )
+        result = await ensure_subscribed(pool, GATEWAY, now=_OFF_HOURS)
+
+    assert unsub.call_count == 1
+    assert sub.call_count == 1
+    assert len(result["dropped"]) == MAX_SUBSCRIPTION_CODES
+    assert all(c.startswith("OLD") for c in result["dropped"])
+    assert all(c.startswith("NEW") for c in result["codes"])
 
 
 @pytest.mark.asyncio

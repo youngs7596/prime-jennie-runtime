@@ -29,6 +29,13 @@ subscribe 호출 경로가 포팅되지 않아 gateway streamer 가 dead path �
   보유(positions)만은 이 유지 규칙보다 앞이다 — 실제 돈이 들어간 종목의 체결·호가는
   진입·청산 품질 측정의 유일한 재료라 자리를 비켜 주지 않는다.
 
+채움 몫 다섯 고정 (2026-08-07):
+  같은 날 저녁에 드러난 두 번째 문제. 측정 대기 시트는 보유일수 창이 닫힐 때까지
+  최대 10거래일을 목록에 남는데, 하루 발행량이 4건에서 15건으로 늘자 20종목 중
+  19개가 시트가 되고 채움이 SK하이닉스 하나만 남았다 — 거래대금 2위 삼성전자도
+  못 들어왔다. 장중에 안 끊기게 고쳐 봐야 애초에 안 붙으면 소용없다. 그래서
+  `TURNOVER_RESERVED_CODES` 만큼은 시트가 못 쓰게 떼어 둔다.
+
 구독 보증 (2026-07-08 추가):
   기동 시 1회 호출은 게이트웨이가 아직 안 떠 있으면 실패하고 재시도가 없었다.
   정전 복구 때 fast_loop 이 gateway 보다 22ms 먼저 떠 초기 구독이 유실됐고,
@@ -67,6 +74,13 @@ MAX_SUBSCRIPTION_CODES = KIS_WS_SUBSCRIPTION_LIMIT // _REGISTRATIONS_PER_CODE
 # 복구된다 — 실시간 유실 최대치를 좌우하므로 짧게 둔다.
 SUBSCRIPTION_MAINTAIN_INTERVAL_SEC = 60.0
 
+# 거래대금 상위 채움에 늘 떼어 두는 몫 (2026-08-07 운영자 결정).
+# 측정 대기 시트는 보유일수 창이 닫힐 때까지 최대 10거래일을 목록에 남는다. 발행량이
+# 하루 4건에서 15건으로 늘자 8-07 저녁엔 20종목 중 19개가 시트가 되고 채움이 한 종목
+# (SK하이닉스)까지 줄었다 — 거래대금 2위 삼성전자조차 못 들어왔다. 이 몫이 없으면
+# 거래대금 최상위 종목의 연속 시계열이 조용히 0 이 된다.
+TURNOVER_RESERVED_CODES = 5
+
 # 측정 윈도우가 열려있는 시트의 ticker — jobs/minute_chart.py 와 같은 기준.
 # 최신 시트 우선으로 정렬해 한도 초과 시 오래된 시트부터 떨어져 나가게 한다.
 _PENDING_SHEET_TICKERS_SQL = """
@@ -100,6 +114,17 @@ _TOP_TURNOVER_SQL = """
 """
 
 
+def _dedup(codes: Sequence[str]) -> list[str]:
+    """순서를 지키며 중복 제거."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for code in codes:
+        if code not in seen:
+            out.append(code)
+            seen.add(code)
+    return out
+
+
 def is_stream_window(now: datetime) -> bool:
     """주간 스트리머가 붙어 있는 시간대(08:50~15:35)인지. 이 시간엔 구독을 안 바꾼다.
 
@@ -125,6 +150,10 @@ async def load_subscription_codes(
     다음에 두는 이유는 하루 중간에 종목이 갈리면 그 종목의 남은 하루가 통째로
     사라지기 때문이고, 보유보다 뒤에 두는 이유는 실제 돈이 들어간 종목이 먼저여야
     하기 때문이다. 장 시간대 밖에서는 keep 이 비어서 대상이 처음부터 다시 세워진다.
+
+    시트는 `TURNOVER_RESERVED_CODES` 만큼을 남기고 그 앞까지만 쓴다 — 채움 몫이다.
+    채움 후보가 모자라면 밀렸던 시트가 그 몫을 도로 가져간다. 구독을 비워 두는 게
+    제일 나쁘기 때문이다.
     """
     async with pool.acquire() as conn:
         pos_rows = await conn.fetch("SELECT stock_code FROM positions")
@@ -133,9 +162,14 @@ async def load_subscription_codes(
         sheet_rows = await conn.fetch(_PENDING_SHEET_TICKERS_SQL)
         sheet_codes = [r["stock_code"] for r in sheet_rows]
 
-        wanted = position_codes + list(keep) + sheet_codes
-        # 보유·유지·시트만으로 한도가 차면 조회 자체를 건너뛴다.
-        if len(set(wanted)) < MAX_SUBSCRIPTION_CODES:
+        held = _dedup(position_codes + list(keep))
+        fresh_sheets = [c for c in sheet_codes if c not in set(held)]
+        # 채움 몫을 떼고 남는 만큼만 시트가 쓴다. 보유가 많으면 이 예산이 0 이 되고,
+        # 그때는 보유가 채움 몫까지 가져간다 — 실 매매 종목이 언제나 먼저다.
+        sheet_budget = max(0, MAX_SUBSCRIPTION_CODES - len(held) - TURNOVER_RESERVED_CODES)
+        primary = held + fresh_sheets[:sheet_budget]
+
+        if len(primary) < MAX_SUBSCRIPTION_CODES:
             filler_rows = await conn.fetch(_TOP_TURNOVER_SQL, MAX_SUBSCRIPTION_CODES * 2)
             filler_codes = [r["stock_code"] for r in filler_rows]
         else:
@@ -143,7 +177,7 @@ async def load_subscription_codes(
 
     codes: list[str] = []
     seen: set[str] = set()
-    for code in wanted + filler_codes:
+    for code in primary + filler_codes + fresh_sheets[sheet_budget:]:
         if code in seen:
             continue
         if len(codes) >= MAX_SUBSCRIPTION_CODES:
@@ -365,4 +399,5 @@ __all__ = [
     "KIS_WS_SUBSCRIPTION_LIMIT",
     "MAX_SUBSCRIPTION_CODES",
     "SUBSCRIPTION_MAINTAIN_INTERVAL_SEC",
+    "TURNOVER_RESERVED_CODES",
 ]

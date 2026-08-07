@@ -12,6 +12,7 @@ import respx
 
 from prime_jennie_runtime.fast_loop.gateway_subscriber import (
     MAX_SUBSCRIPTION_CODES,
+    TURNOVER_RESERVED_CODES,
     ensure_subscribed,
     is_stream_window,
     load_subscription_codes,
@@ -127,8 +128,13 @@ async def test_fills_empty_slots_with_top_turnover():
 
 
 @pytest.mark.asyncio
-async def test_top_turnover_never_displaces_positions_or_sheets():
-    """채움 종목은 우선순위 맨 뒤 — 보유·시트가 한도를 채우면 하나도 안 들어온다."""
+async def test_turnover_share_survives_a_flood_of_sheets():
+    """시트가 한도를 넘겨도 채움 몫 다섯은 지킨다 (2026-08-07 운영자 결정).
+
+    측정 대기 시트가 10거래일까지 쌓이는데 하루 발행량이 늘면서 20종목 중 19개가
+    시트가 되고 채움이 한 종목까지 줄었다. 그러면 거래대금 최상위 종목의 연속
+    시계열이 조용히 끊긴다.
+    """
     positions = [f"P{i:05d}" for i in range(5)]
     sheets = [f"S{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES)]
     turnover = [f"T{i:05d}" for i in range(40)]
@@ -137,9 +143,38 @@ async def test_top_turnover_never_displaces_positions_or_sheets():
     codes = await load_subscription_codes(pool)
 
     assert len(codes) == MAX_SUBSCRIPTION_CODES
-    assert not [c for c in codes if c.startswith("T")]
     for p in positions:
         assert p in codes
+    assert len([c for c in codes if c.startswith("T")]) == TURNOVER_RESERVED_CODES
+    # 보유 5 + 채움 5 를 뺀 나머지가 시트 몫.
+    assert len([c for c in codes if c.startswith("S")]) == (
+        MAX_SUBSCRIPTION_CODES - len(positions) - TURNOVER_RESERVED_CODES
+    )
+
+
+@pytest.mark.asyncio
+async def test_sheets_reclaim_the_share_when_turnover_is_short():
+    """채움 후보가 모자라면 밀렸던 시트가 그 몫을 도로 가져간다 — 비워 두지 않는다."""
+    sheets = [f"S{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES)]
+    pool = _FakePool(positions=[], pending_sheets=sheets, top_turnover=["T00000", "T00001"])
+
+    codes = await load_subscription_codes(pool)
+
+    assert len(codes) == MAX_SUBSCRIPTION_CODES
+    assert len([c for c in codes if c.startswith("T")]) == 2
+    assert len([c for c in codes if c.startswith("S")]) == MAX_SUBSCRIPTION_CODES - 2
+
+
+@pytest.mark.asyncio
+async def test_positions_take_the_reserved_share_when_they_fill_the_limit():
+    """보유가 한도를 채우면 채움 몫까지 가져간다 — 실 매매 종목이 언제나 먼저다."""
+    positions = [f"P{i:05d}" for i in range(MAX_SUBSCRIPTION_CODES)]
+    turnover = [f"T{i:05d}" for i in range(40)]
+    pool = _FakePool(positions=positions, pending_sheets=["S00000"], top_turnover=turnover)
+
+    codes = await load_subscription_codes(pool)
+
+    assert sorted(codes) == sorted(positions)
     # 한도가 이미 찼으면 거래대금 조회 자체를 건너뛴다.
     assert pool.conn.turnover_queried is False
 

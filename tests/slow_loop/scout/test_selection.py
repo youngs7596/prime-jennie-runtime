@@ -6,6 +6,8 @@ v2 `_compute_ma_scores` + `select_watchlist` 히스테리시스 블록 포팅분
 from __future__ import annotations
 
 from prime_jennie_runtime.slow_loop.scout.selection import (
+    ENTRY_THRESHOLD,
+    EXIT_THRESHOLD,
     compute_ma_scores,
     select_with_hysteresis,
 )
@@ -34,9 +36,7 @@ class TestComputeMaScores:
         assert ma["A"] == round((10.0 + 30.0 + 90.0) / 3, 1)
 
     def test_multiple_tickers(self):
-        ma = compute_ma_scores(
-            {"A": 70.0, "B": 50.0}, {"A": [80.0]}, window=2
-        )
+        ma = compute_ma_scores({"A": 70.0, "B": 50.0}, {"A": [80.0]}, window=2)
         assert ma["A"] == 75.0  # (80 + 70)/2
         assert ma["B"] == 50.0  # B 과거 없음
 
@@ -99,6 +99,11 @@ class TestSelectWithHysteresis:
 
     def test_result_sorted_by_ma_desc(self):
         result = select_with_hysteresis(
-            {"LOW": 63.0, "HIGH": 90.0, "MID": 75.0}, previous_codes=None
+            {"LOW": 67.0, "HIGH": 90.0, "MID": 75.0}, previous_codes=None
         )
         assert [c for c, _ in result] == ["HIGH", "MID", "LOW"]
+
+    def test_default_thresholds_are_the_centered_scale(self):
+        """섹터 모멘텀 중심화(2026-08-15)에 맞춘 눈금 — 바꾸려면 의도해서 바꿀 것."""
+        assert (ENTRY_THRESHOLD, EXIT_THRESHOLD) == (66.0, 59.0)
+        assert ENTRY_THRESHOLD - EXIT_THRESHOLD == 7.0  # v2 히스테리시스 폭 유지

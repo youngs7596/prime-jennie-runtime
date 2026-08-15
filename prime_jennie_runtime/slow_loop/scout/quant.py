@@ -24,6 +24,7 @@ sub-score 의 외인·기관·외인비율 버킷 모두 절반으로 축소. SQ
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Self
 
 from pydantic import BaseModel, model_validator
@@ -101,12 +102,17 @@ V2_NEUTRAL = {
     "sector_momentum": 5.0,
 }
 
+# 섹터 모멘텀 일별 중심화의 최소 표본 — 이보다 적으면 기준선을 안 만든다
+# (섹터 데이터가 몇 종목뿐인 날 평균이 튀는 것을 막는다).
+SECTOR_CENTERING_MIN_SAMPLES = 20
+
 
 def score_candidate(
     candidate: EnrichedCandidate,
     benchmark_prices: list[DailyPrice] | None = None,
     *,
     is_bull: bool = False,
+    sector_baseline: float | None = None,
 ) -> QuantScore:
     """Phase 3: v2 잠재력 기반 스코어링.
 
@@ -114,6 +120,9 @@ def score_candidate(
         candidate: 보강된 후보 종목.
         benchmark_prices: KOSPI 벤치마크 일봉 (상대 모멘텀 — v2 미사용 인자, 호환 유지).
         is_bull: 강세장 여부 (RSI 70-80 페널티 면제). v3 macro size_multiplier 환산.
+        sector_baseline: 그날 유니버스의 섹터 모멘텀 원점수 평균. 주면 섹터
+            모멘텀을 이 값 기준으로 중심화한다 (`sector_momentum_baseline` 참조).
+            None 이면 v2 원본과 같은 절대 점수.
 
     Returns:
         QuantScore with 7 subscores.
@@ -132,7 +141,7 @@ def score_candidate(
     technical = _technical_score(prices)
     news = _news_score(candidate)
     supply_demand = _supply_demand_score(candidate)
-    sector_momentum = _sector_momentum_score(candidate)
+    sector_momentum = _sector_momentum_score(candidate, sector_baseline)
 
     total = momentum + quality + value + technical + news + supply_demand + sector_momentum
     total = max(0.0, min(100.0, total))
@@ -435,12 +444,44 @@ def _news_score(candidate: EnrichedCandidate) -> float:
     return max(0.0, min(10.0, score))
 
 
-def _sector_momentum_score(candidate: EnrichedCandidate) -> float:
-    """섹터 모멘텀 점수 (0-10): 섹터 20일 평균 수익률."""
+def _sector_momentum_raw(candidate: EnrichedCandidate) -> float | None:
+    """중심화 전 섹터 모멘텀 원점수 (0-10) — 데이터 없으면 None."""
     sector_avg = candidate.sector_avg_return_20d
     if sector_avg is None:
-        return V2_NEUTRAL["sector_momentum"]
+        return None
     return _linear_map(sector_avg, -5.0, 15.0, 0.0, 10.0)
+
+
+def sector_momentum_baseline(candidates: Iterable[EnrichedCandidate]) -> float | None:
+    """그날 채점 대상 전체의 섹터 모멘텀 원점수 평균 — 중심화 기준선.
+
+    표본이 ``SECTOR_CENTERING_MIN_SAMPLES`` 미만이면 None (중심화 안 함).
+    섹터 수가 아니라 종목 수로 평균낸다 — 점수 분포를 밀어 올리는 것이 종목
+    단위이므로, 큰 섹터가 더 무겁게 반영되는 것이 맞다.
+    """
+    raw = [r for c in candidates if (r := _sector_momentum_raw(c)) is not None]
+    if len(raw) < SECTOR_CENTERING_MIN_SAMPLES:
+        return None
+    return sum(raw) / len(raw)
+
+
+def _sector_momentum_score(candidate: EnrichedCandidate, baseline: float | None = None) -> float:
+    """섹터 모멘텀 점수 (0-10): 섹터 20일 평균 수익률.
+
+    ``baseline`` 이 오면 그날 유니버스 평균을 빼고 중립값(5)에 다시 얹는다 —
+    시장이 통째로 오르내릴 때 모든 종목이 같이 밀려 올라가던 것을 없애고 섹터
+    간 우열만 남긴다. 2026-08-15 변경 근거: 8-05→8-14 에 이 요인 평균이
+    0.68 → 6.31 로 올라 유니버스 평균 총점 +10 중 절반 이상을 혼자 만들었고,
+    진입 임계 62 를 넘는 종목이 4 → 33 개가 됐다. 시장 국면 판단은 매크로
+    게이트가 하고, 점수는 종목을 가르는 데만 쓴다.
+    """
+    raw = _sector_momentum_raw(candidate)
+    if raw is None:
+        return V2_NEUTRAL["sector_momentum"]
+    if baseline is None:
+        return raw
+    centered = raw - baseline + V2_NEUTRAL["sector_momentum"]
+    return max(0.0, min(10.0, centered))
 
 
 def _supply_demand_score(candidate: EnrichedCandidate) -> float:

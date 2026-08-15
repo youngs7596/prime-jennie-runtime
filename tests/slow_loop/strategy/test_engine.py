@@ -107,9 +107,7 @@ def _inputs(
 class _StubSectorResolver:
     """ticker → sector 문자열 stub. mapping 우선, 없으면 default."""
 
-    def __init__(
-        self, mapping: dict[str, str] | None = None, default: str | None = None
-    ) -> None:
+    def __init__(self, mapping: dict[str, str] | None = None, default: str | None = None) -> None:
         self._mapping = mapping or {}
         self._default = default
         self.calls: list[str] = []
@@ -782,9 +780,7 @@ async def test_sector_cap_blocks_fourth_in_same_sector():
     engine = StrategyEngine(load_policy(), NoOpRiskThrottle(), sector_resolver=resolver)
     inp = _inputs()
     tickers = ["005930", "000660", "035720", "005380"]
-    results = [
-        await engine.build_sheet_with_reason(_candidate(ticker=tk), inp) for tk in tickers
-    ]
+    results = [await engine.build_sheet_with_reason(_candidate(ticker=tk), inp) for tk in tickers]
     assert results[0][0] is not None
     assert results[1][0] is not None
     assert results[2][0] is not None  # 3개까지 발행

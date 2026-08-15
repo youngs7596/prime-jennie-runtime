@@ -6,11 +6,14 @@ strategy_tag 배정·candidate 매핑·섹터 백분위 등 순수 로직 + db_e
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 
 import pytest
 
 from prime_jennie_runtime.slow_loop.scout.deterministic_scout import (
+    MAX_CANDIDATES,
+    _apply_candidate_cap,
     _assign_strategy_tag,
     _compute_sector_pctiles,
     _effective_per,
@@ -169,6 +172,25 @@ class TestToScreeningCandidate:
         assert "momentum" in sc.factors
 
 
+# ─── 후보 하드캡 ─────────────────────────────────────────────────
+
+
+class TestApplyCandidateCap:
+    def test_under_cap_passes_through_without_log(self, caplog):
+        survivors = [(f"00{i}", 70.0 - i) for i in range(MAX_CANDIDATES)]
+        with caplog.at_level(logging.WARNING):
+            assert _apply_candidate_cap(survivors) == survivors
+        assert "하드캡" not in caplog.text
+
+    def test_over_cap_truncates_and_logs_dropped_count(self, caplog):
+        survivors = [(f"{i:06d}", 90.0 - i) for i in range(MAX_CANDIDATES + 9)]
+        with caplog.at_level(logging.WARNING):
+            kept = _apply_candidate_cap(survivors)
+        assert len(kept) == MAX_CANDIDATES
+        assert kept == survivors[:MAX_CANDIDATES]
+        assert "9개 버림" in caplog.text
+
+
 # ─── 섹터 백분위 ─────────────────────────────────────────────────
 
 
@@ -316,6 +338,52 @@ async def test_load_score_history_excludes_macro_closed_runs():
     assert previous_codes is None
     # 직전 run 선택 쿼리가 게이트 필터를 들고 있어야 한다.
     assert any("macro_gate" in s and "'open'" in s for s in conn.sql)
+
+
+@pytest.mark.asyncio
+async def test_load_score_history_excludes_other_scorer_versions():
+    """점수 눈금이 바뀐 옛 run 은 MA 입력에서 빠져야 한다.
+
+    2026-08-15 섹터 모멘텀 중심화처럼 수준이 통째로 옮겨가는 변경 뒤에 옛 점수를
+    평균에 섞으면 며칠간 엉뚱한 MA 가 나온다. run 선택 쿼리가 스코어러 버전으로
+    거르는지, 그 값이 지금 버전인지 확인한다.
+    """
+    from prime_jennie_runtime.slow_loop.scout.deterministic_scout import (
+        SCORER_VERSION,
+        _load_score_history,
+    )
+
+    class _Result:
+        def fetchall(self) -> list:
+            return []
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.sql: list[str] = []
+            self.params: list[dict] = []
+
+        async def execute(self, stmt, params=None) -> _Result:
+            self.sql.append(str(stmt))
+            self.params.append(params or {})
+            return _Result()
+
+        async def __aenter__(self) -> _Conn:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    class _Engine:
+        def __init__(self, conn: _Conn) -> None:
+            self._conn = conn
+
+        def connect(self) -> _Conn:
+            return self._conn
+
+    conn = _Conn()
+    await _load_score_history(_Engine(conn), as_of_dt=datetime(2026, 8, 17, 8, 30), window=3)
+    assert any("prompt_version" in s for s in conn.sql)
+    assert conn.params[0]["scorer_version"] == SCORER_VERSION
 
 
 # ─── _persist_quant_scores 반환 계약 (2026-06-29 PK 시퀀스 desync 사고 후) ────

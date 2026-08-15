@@ -28,7 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from prime_jennie_runtime.screening_executor.schemas import ScreeningResult
 
 from .enrichment import EnrichedCandidate, enrich_universe
-from .quant import V2_WEIGHTS, QuantScore, _compute_rsi, score_candidate
+from .quant import (
+    V2_WEIGHTS,
+    QuantScore,
+    _compute_rsi,
+    score_candidate,
+    sector_momentum_baseline,
+)
 from .schemas import EntryHint, ScoutContext, ScoutOutput, ScreeningCandidate
 from .selection import MA_WINDOW, compute_ma_scores, select_with_hysteresis
 
@@ -36,7 +42,30 @@ logger = logging.getLogger(__name__)
 
 # 스코어러 버전 — scout_runs.code_hash 안정화용 (synthetic screening_code 마커).
 # 팩터 수식/가중치/임계 의미 변경 시 bump.
-SCORER_VERSION = "deterministic-quant-v2-port@1"
+# @2 (2026-08-15): 섹터 모멘텀 일별 중심화. 이 버전 앞뒤로 점수 수준이 달라지므로
+# 코호트 비교 시 섞지 말 것.
+SCORER_VERSION = "deterministic-quant-v2-port@2"
+
+
+def _apply_candidate_cap(survivors: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """후보 하드캡 적용 (validators/executor 와 동일한 상한).
+
+    상한에 걸리면 몇 개를 버렸는지 반드시 남긴다 — 조용히 자르면 실행 기록의
+    "선정 20" 이 후보 전부인 것처럼 읽힌다. 2026-08-14 아침 실측으로 통과 29 →
+    선정 20 이었는데 사라진 9개가 어디에도 안 남아 있었다.
+    """
+    if len(survivors) <= MAX_CANDIDATES:
+        return survivors
+    kept = survivors[:MAX_CANDIDATES]
+    logger.warning(
+        "후보 하드캡: 통과 %d → 상한 %d, %d개 버림 (채택 최저 MA=%.1f, 탈락 최고 MA=%.1f)",
+        len(survivors),
+        MAX_CANDIDATES,
+        len(survivors) - MAX_CANDIDATES,
+        kept[-1][1],
+        survivors[MAX_CANDIDATES][1],
+    )
+    return kept
 
 
 def compute_code_hash(code: str) -> str:
@@ -231,14 +260,23 @@ async def _load_score_history(
             # 여기서 거르는 건 닫힌 날의 *지속성 전파*일 뿐 매크로 반영이 아니다.
             # context_snapshot_json 의 macro_gate 로 판별(없는 옛 행은 open 간주 =
             # 종전 동작 유지).
+            # 스코어러 버전이 다른 run 도 뺀다 — 점수 눈금이 달라진 뒤에도 옛 점수를
+            # 평균에 섞으면 며칠간 엉뚱한 MA 가 나온다. 2026-08-15 섹터 모멘텀
+            # 중심화처럼 수준이 통째로 옮겨가는 변경이 있으면 특히 그렇다. 같은
+            # 버전 이력이 없으면 cold start 로 떨어져 그 run 만 임계로 거른다.
             run_rows = await conn.execute(
                 text(
                     "SELECT scout_run_id FROM scout_runs "
                     "WHERE generated_at < :now "
                     "AND COALESCE(context_snapshot_json->>'macro_gate', 'open') = 'open' "
+                    "AND prompt_version = :scorer_version "
                     "ORDER BY generated_at DESC LIMIT :n"
                 ),
-                {"now": as_of_dt, "n": max(0, window - 1)},
+                {
+                    "now": as_of_dt,
+                    "n": max(0, window - 1),
+                    "scorer_version": SCORER_VERSION,
+                },
             )
             run_ids = [r[0] for r in run_rows.fetchall()]  # 최신→오래된
             if not run_ids:
@@ -418,9 +456,19 @@ async def run_deterministic_scout(
     # is_bull: v3 macro 는 5단계 regime 이 없음 — size_multiplier 1.0(full risk-on)
     # 을 강세장 대용으로 환산 (RSI 70-80 페널티 면제 조건).
     is_bull = scout_ctx.macro_state.size_multiplier >= 1.0
+    # 섹터 모멘텀은 절대 수익률이라 시장이 통째로 오르면 전 종목 점수를 같이 밀어
+    # 올린다 (8-05→8-14 평균 0.68→6.31, 임계 통과 4→33 종목). 그날 채점 대상의
+    # 평균을 기준선으로 빼서 섹터 간 우열만 남긴다.
+    sector_baseline = sector_momentum_baseline(enriched.values())
+    if sector_baseline is not None:
+        logger.info("섹터 모멘텀 중심화: 기준선 %.2f (%d종목)", sector_baseline, len(enriched))
+    else:
+        logger.info("섹터 모멘텀 중심화 생략 — 섹터 데이터 표본 부족")
     quant_scores: dict[str, QuantScore] = {}
     for code, candidate in enriched.items():
-        quant_scores[code] = score_candidate(candidate, is_bull=is_bull)
+        quant_scores[code] = score_candidate(
+            candidate, is_bull=is_bull, sector_baseline=sector_baseline
+        )
 
     # --- Phase 4.5: MA 평활 ---
     historical, previous_codes = await _load_score_history(
@@ -431,7 +479,8 @@ async def run_deterministic_scout(
 
     # --- Phase 6: 히스테리시스 선정 ---
     survivors = select_with_hysteresis(ma_scores, previous_codes=previous_codes)
-    survivors = survivors[:MAX_CANDIDATES]  # v3 후보 하드캡 (validators/executor 와 동일)
+    passed = len(survivors)
+    survivors = _apply_candidate_cap(survivors)
     selected_codes = {code for code, _ in survivors}
 
     candidates = [
@@ -451,10 +500,11 @@ async def run_deterministic_scout(
 
     elapsed = time.monotonic() - t0
     logger.info(
-        "run_deterministic_scout: universe=%d enriched=%d scored=%d selected=%d (%.1fs)",
+        "run_deterministic_scout: universe=%d enriched=%d scored=%d passed=%d selected=%d (%.1fs)",
         len(universe),
         before,
         len(quant_scores),
+        passed,
         len(candidates),
         elapsed,
     )
@@ -463,7 +513,9 @@ async def run_deterministic_scout(
         screening_code=f"# {SCORER_VERSION}\n",
         hypothesis=(
             f"결정론 quant v2 포팅: universe {len(universe)} → 채점 {len(quant_scores)} "
-            f"→ 선정 {len(candidates)} (MA{MA_WINDOW}+히스테리시스, is_bull={is_bull})"
+            f"→ 통과 {passed} → 선정 {len(candidates)} "
+            f"(MA{MA_WINDOW}+히스테리시스, is_bull={is_bull}, "
+            f"섹터중심화={sector_baseline is not None})"
         )[:200],
         expected_candidates=min(len(candidates), 20),
         factor_weights={k: float(v) for k, v in V2_WEIGHTS.items()},

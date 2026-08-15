@@ -395,6 +395,7 @@ async def run() -> None:
             interval = int(
                 os.environ.get("MACRO_TRIGGER_WATCHER_INTERVAL_SEC", str(DEFAULT_POLL_INTERVAL_SEC))
             )
+
             # 거래시간 가드 (2026-07-26): 장외 재발화 차단. 휴장일 판정은 gateway 경유로,
             # scout_daily 가 쓰는 것과 같은 검증된 주소를 그대로 쓴다.
             async def _is_trading_day() -> bool:

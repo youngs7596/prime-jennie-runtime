@@ -33,6 +33,7 @@ from prime_jennie_runtime.slow_loop.scout.quant import (
     _technical_score,
     _value_score,
     score_candidate,
+    sector_momentum_baseline,
 )
 from prime_jennie_runtime.slow_loop.scout.schemas import NewsEventEntry
 
@@ -311,6 +312,63 @@ class TestSectorMomentumScore:
         candidate = _make_candidate()
         candidate.sector_avg_return_20d = None
         assert _sector_momentum_score(candidate) == V2_NEUTRAL["sector_momentum"]
+
+
+def _sector_universe(returns: list[float]) -> list[EnrichedCandidate]:
+    """섹터 20일 수익률만 다른 후보 묶음 — 중심화 기준선 계산용."""
+    out = []
+    for r in returns:
+        c = _make_candidate()
+        c.sector_avg_return_20d = r
+        out.append(c)
+    return out
+
+
+class TestSectorMomentumCentering:
+    def test_baseline_none_when_sample_too_small(self):
+        assert sector_momentum_baseline(_sector_universe([5.0] * 19)) is None
+
+    def test_baseline_skips_missing_data(self):
+        universe = _sector_universe([10.0] * 25)
+        for c in universe[:5]:
+            c.sector_avg_return_20d = None
+        # 남은 20종목만 평균 — 결측이 0 으로 끌어내리지 않는다.
+        assert sector_momentum_baseline(universe) == _sector_momentum_score(universe[-1])
+
+    def test_market_wide_rally_does_not_lift_scores(self):
+        """시장이 통째로 오르면 중심화 후 점수는 그대로여야 한다."""
+        calm = _sector_universe([0.0] * 25)
+        rally = _sector_universe([12.0] * 25)
+        calm_score = _sector_momentum_score(calm[0], sector_momentum_baseline(calm))
+        rally_score = _sector_momentum_score(rally[0], sector_momentum_baseline(rally))
+        assert calm_score == rally_score == V2_NEUTRAL["sector_momentum"]
+
+    def test_relative_sector_gap_survives(self):
+        """섹터 간 우열은 남는다 — 강한 섹터가 약한 섹터보다 높다."""
+        universe = _sector_universe([0.0] * 20 + [12.0] * 5)
+        baseline = sector_momentum_baseline(universe)
+        weak = _sector_momentum_score(universe[0], baseline)
+        strong = _sector_momentum_score(universe[-1], baseline)
+        assert strong > V2_NEUTRAL["sector_momentum"] > weak
+
+    def test_centered_score_stays_in_range(self):
+        universe = _sector_universe([-5.0] * 24 + [15.0])
+        baseline = sector_momentum_baseline(universe)
+        scores = [_sector_momentum_score(c, baseline) for c in universe]
+        assert all(0.0 <= s <= 10.0 for s in scores)
+
+    def test_baseline_none_keeps_absolute_score(self):
+        candidate = _make_candidate()
+        candidate.sector_avg_return_20d = 15.0
+        assert _sector_momentum_score(candidate, None) == _sector_momentum_score(candidate)
+
+    def test_score_candidate_passes_baseline_through(self):
+        candidate = _make_candidate(prices=_make_prices(150))
+        candidate.sector_avg_return_20d = 15.0
+        absolute = score_candidate(candidate)
+        centered = score_candidate(candidate, sector_baseline=9.0)
+        assert absolute.sector_momentum_score > centered.sector_momentum_score
+        assert absolute.total_score > centered.total_score
 
 
 class TestSupplyDemandScore:

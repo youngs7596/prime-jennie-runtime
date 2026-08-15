@@ -9,7 +9,14 @@ v2 `prime_jennie/services/scout/app.py::_compute_ma_scores` + `selection.py` 의
 
 v2 는 MA 를 `hybrid_score`(LLM 보정 후)에 적용했다. v3 는 선정 경로 LLM 이 없으므로
 MA 대상이 `QuantScore.total_score` 다 — 알고리즘은 동일, 입력 점수만 다름.
-v2 측정상 hybrid ≈ quant (LLM 이동 평균 +1.12) 라 entry/exit 임계(62/55)는 그대로 유효.
+v2 측정상 hybrid ≈ quant (LLM 이동 평균 +1.12) 라 entry/exit 임계는 62/55 로 출발했다.
+
+**2026-08-15: 66/59 로 이동.** 같은 날 섹터 모멘텀을 일별 중심화하면서 점수 눈금이
+통째로 위로 옮겨갔다 — 그 요인 평균이 5보다 낮던 조용한 국면에서 전 종목 점수가
+같이 올라간다. 임계를 그대로 두면 7-29 통과가 0 → 5 개, 8-05 가 4 → 10 개로 늘어
+중심화의 취지와 반대가 된다. 저장된 점수로 되짚어 보니 66/59 가 조용한 국면의
+예전 개수를 그대로 재현하고(8-05 4개, 이탈권 16 → 17), 랠리 때만 눌린다
+(8-14 통과 33 → 17, 이탈권 81 → 47). 히스테리시스 폭 7점은 그대로다.
 """
 
 from __future__ import annotations
@@ -21,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 # v2 ScoutConfig 기본값 — env override 가능 (v2 도 env 주입식이었음).
 MA_WINDOW: int = int(os.environ.get("SELECTION_MA_WINDOW", "3"))
-ENTRY_THRESHOLD: float = float(os.environ.get("SELECTION_ENTRY_THRESHOLD", "62.0"))
-EXIT_THRESHOLD: float = float(os.environ.get("SELECTION_EXIT_THRESHOLD", "55.0"))
+ENTRY_THRESHOLD: float = float(os.environ.get("SELECTION_ENTRY_THRESHOLD", "66.0"))
+EXIT_THRESHOLD: float = float(os.environ.get("SELECTION_EXIT_THRESHOLD", "59.0"))
 
 
 def compute_ma_scores(

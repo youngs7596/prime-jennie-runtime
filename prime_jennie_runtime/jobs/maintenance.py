@@ -24,7 +24,7 @@ from .crawlers.naver import (
     crawl_naver_fundamentals,
     crawl_naver_roe,
 )
-from .crawlers.naver_market import fetch_investor_flows
+from .crawlers.naver_market import fetch_market_investor_breakdown
 from .sector_taxonomy import get_sector_group
 
 logger = logging.getLogger(__name__)
@@ -38,8 +38,13 @@ _PER_RANGE = (1.0, 200.0)
 _PBR_RANGE = (0.1, 50.0)
 _ROE_RANGE = (-50.0, 100.0)
 _SECTOR_MIN = 500
-_INVESTOR_FLOW_TOLERANCE_EOK = 10000.0
 _ROE_CROSS_CHECK_DIFF_PP = 10.0
+
+# 수급 항등식 허용 오차 (억원). 네이버가 항목마다 억원 단위로 반올림해 주므로 잔차는
+# 몇 억 안쪽이어야 한다. 2026-08-22 이전에는 "외국인+기관계+개인 합이 1조 안쪽"이라는
+# 느슨한 검사를 썼는데, 그 식이 기타법인을 아예 안 세는 바람에 기타법인이 1조를 넘긴
+# 8-20·8-21 이틀 동안 멀쩡한 데이터를 깨진 것으로 신고했다.
+_INVESTOR_IDENTITY_TOLERANCE_EOK = 10.0
 
 
 class ContractSmokeError(RuntimeError):
@@ -221,29 +226,51 @@ async def contract_smoke_test(
         failed.append(f"fnguide_consensus: exception — {e}")
 
     try:
-        test_flows = None
+        # 시장전체 수급은 두 항등식으로 검증한다. 매수와 매도는 짝이 맞아야 하므로
+        # 개인+외국인+기관계+기타법인 = 0 이고, 기관 하위 여섯 항목의 합은 기관계와
+        # 같아야 한다. 둘 다 참이면 컬럼 매핑이 밀리지 않았다는 뜻이다.
+        latest = None
         for d in range(7):
-            test_date = date.today() - timedelta(days=d)
-            bizdate = test_date.strftime("%Y%m%d")
-            test_flows = await fetch_investor_flows(http, "kospi", bizdate)
-            if test_flows is not None:
+            bizdate = (date.today() - timedelta(days=d)).strftime("%Y%m%d")
+            rows = await fetch_market_investor_breakdown(http, bizdate)
+            if rows:
+                latest = rows[0]
                 break
-        if test_flows is None:
+        if latest is None:
             failed.append("investor_flows: no data in last 7 days")
         else:
-            total = test_flows.foreign_net + test_flows.institutional_net + test_flows.retail_net
-            if abs(total) > _INVESTOR_FLOW_TOLERANCE_EOK:
+            residual = (
+                latest.individual_net
+                + latest.foreign_net
+                + latest.institution_net
+                + latest.etc_corp_net
+            )
+            inst_parts = (
+                latest.financial_inv_net
+                + latest.insurance_net
+                + latest.trust_net
+                + latest.bank_net
+                + latest.etc_finance_net
+                + latest.pension_net
+            )
+            inst_gap = inst_parts - latest.institution_net
+            if abs(residual) > _INVESTOR_IDENTITY_TOLERANCE_EOK:
                 failed.append(
-                    f"investor_flows: cross-check failed "
-                    f"(foreign={test_flows.foreign_net}, "
-                    f"inst={test_flows.institutional_net}, "
-                    f"retail={test_flows.retail_net}, total={total})"
+                    f"investor_flows: 매수·매도 합이 안 맞음 ({latest.trade_date}, "
+                    f"individual={latest.individual_net}, foreign={latest.foreign_net}, "
+                    f"institution={latest.institution_net}, "
+                    f"etc_corp={latest.etc_corp_net}, residual={residual})"
+                )
+            elif abs(inst_gap) > _INVESTOR_IDENTITY_TOLERANCE_EOK:
+                failed.append(
+                    f"investor_flows: 기관 하위 합이 기관계와 다름 ({latest.trade_date}, "
+                    f"parts={inst_parts}, institution={latest.institution_net}, gap={inst_gap})"
                 )
             else:
                 passed.append(
-                    f"investor_flows: foreign={test_flows.foreign_net}, "
-                    f"inst={test_flows.institutional_net}, "
-                    f"retail={test_flows.retail_net}"
+                    f"investor_flows: {latest.trade_date} individual={latest.individual_net}, "
+                    f"foreign={latest.foreign_net}, institution={latest.institution_net}, "
+                    f"pension={latest.pension_net}, etc_corp={latest.etc_corp_net}"
                 )
     except Exception as e:
         failed.append(f"investor_flows: exception — {e}")

@@ -173,9 +173,21 @@ def build_handlers(
         await collect_us_market(pool, http, days=days)
 
     async def h_collect_investor_trading() -> None:
+        # 휴장일 가드 필수 — 네이버 frgn 페이지는 휴장일에도 직전 거래일 값을 그대로
+        # 돌려주는데 수집기는 그걸 '오늘' 날짜로 찍는다. 2026-08-22 점검에서 4월 이후
+        # 여섯 번(5-01·5-05·5-25·6-03·7-17·8-17) 존재하지 않는 거래일 행이 생긴 걸
+        # 확인했다 — 8-17 값은 8-14 와 종목별로 완전히 같았다.
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("collect_investor_trading skipped: non-trading day")
+            return
         await collect_investor_trading(pool, http)
 
     async def h_collect_foreign_holding() -> None:
+        # 이쪽은 크롤러가 준 날짜를 쓰므로 유령 행은 안 만들지만, 휴장일에 300종목을
+        # 다시 긁어 같은 값을 덮어쓸 이유가 없다.
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("collect_foreign_holding skipped: non-trading day")
+            return
         await collect_foreign_holding(pool, http)
 
     async def h_collect_vkospi(range_token: str = "1M") -> None:
@@ -205,6 +217,12 @@ def build_handlers(
         await collect_naver_roe(pool, http)
 
     async def h_collect_quarterly_financials() -> None:
+        # 2026-08-22 부터 매 거래일 장마감 뒤로 주기가 바뀌었다(PER/PBR 이 분기마다만
+        # 갱신돼 가치 점수가 5주 넘게 옛 주가 기준으로 매겨지던 문제). 날짜를 '오늘'로
+        # 찍는 잡이라 휴장일 가드가 같이 필요하다.
+        if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
+            logger.info("collect_quarterly_financials skipped: non-trading day")
+            return
         await collect_quarterly_financials(pool, http)
 
     async def h_seed_stock_masters(market: str = "KOSPI") -> None:

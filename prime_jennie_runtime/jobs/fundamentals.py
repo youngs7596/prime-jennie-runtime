@@ -202,6 +202,12 @@ async def collect_quarterly_financials(
     v2 는 `if result.per is not None: existing.per = result.per` 식으로 None 컬럼은
     보존했다. asyncpg 의 단일 INSERT ... ON CONFLICT 로 동등 의미를 유지하기 위해
     EXCLUDED 가 NULL 이면 기존값 보존하는 COALESCE 패턴 사용.
+
+    **주기는 2026-08-22 에 분기(1·4·7·10월 15일)에서 매 거래일 장마감 뒤로 바뀌었다.**
+    이름은 v2 잡 이름을 그대로 물려받은 것이고 하는 일은 네이버 종목 페이지에서
+    PER·PBR·ROE 를 긁는 것뿐이다. PER·PBR 은 현재 주가로 계산되는 값이라 분기마다
+    받으면 그 사이 주가가 오른 만큼 통째로 어긋난다 — 실제로 8-22 점검에서 가치
+    점수(20점, 최대 비중)가 7-15 주가 기준 배수로 매겨지고 있었다.
     """
     codes = await _top_active_stocks(pool, top_n)
     logger.info("collect_quarterly_financials: candidates=%d", len(codes))

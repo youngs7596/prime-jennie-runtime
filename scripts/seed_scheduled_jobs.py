@@ -245,12 +245,15 @@ SEEDS: list[SeedJob] = [
         cron="0 3 1 * *",
         kwargs={},
     ),
-    # Track B — collect_quarterly_financials (v2 utility_jobs_dag: 0 4 15 1,4,7,10 *, 분기).
+    # Track B — collect_quarterly_financials. v2 는 분기(0 4 15 1,4,7,10 *)였는데
+    # 2026-08-22 부터 매 거래일 16:30 으로 바꿨다 — PER·PBR 은 현재 주가로 계산되는
+    # 값이라 분기마다 받으면 가치 점수가 몇 주씩 옛 주가 기준으로 매겨진다.
+    # 16:00 일봉·16:05 지수·16:10 VKOSPI 와 겹치지 않게 16:30 에 둔다.
     SeedJob(
         id="job_worker.collect_quarterly_financials",
         owner="job_worker",
         handler_key="collect_quarterly_financials",
-        cron="0 4 15 1,4,7,10 *",
+        cron="30 16 * * 1-5",
         kwargs={},
     ),
     # Track B — daily_asset_snapshot (v2 utility_jobs_dag: 45 15 * * 1-5, 장마감 직후).

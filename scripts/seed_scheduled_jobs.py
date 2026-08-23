@@ -72,14 +72,6 @@ SEEDS: list[SeedJob] = [
         cron="30 8-14 * * 1-5",
         kwargs={"trigger": "scout_daily"},
     ),
-    # Track B — job-worker (v2 utility_jobs_dag cleanup: 0 3 * * *)
-    SeedJob(
-        id="job_worker.cleanup_old_data",
-        owner="job_worker",
-        handler_key="cleanup_old_data",
-        cron="0 3 * * *",
-        kwargs={"days": 365},
-    ),
     # Track B — macro_validate_store (v2 macro_dag validate: 30 8 * * 1-5)
     SeedJob(
         id="job_worker.macro_validate_store",

@@ -66,7 +66,7 @@ from .fundamentals import (
     collect_quarterly_financials,
 )
 from .investor_data import collect_foreign_holding, collect_investor_trading
-from .maintenance import cleanup_old_data, contract_smoke_test, update_naver_sectors
+from .maintenance import contract_smoke_test, update_naver_sectors
 from .market_data import (
     collect_index_daily_prices,
     collect_us_market,
@@ -123,9 +123,6 @@ def build_handlers(
 
     새 job 포팅 시 여기에 등록. kwargs 는 scheduled_jobs.kwargs 에서 옴.
     """
-
-    async def h_cleanup_old_data(days: int = 365) -> None:
-        await cleanup_old_data(pool, days=days)
 
     async def h_macro_validate_store() -> None:
         if not await is_trading_day_via_gateway(kis_gateway_url, http=http):
@@ -342,7 +339,6 @@ def build_handlers(
         await run_dca_tick(repo=DcaRepository(pool), kis=kis_client, redis_client=redis_client)
 
     return {
-        "cleanup_old_data": h_cleanup_old_data,
         "macro_validate_store": h_macro_validate_store,
         "macro_collect_global": h_macro_collect_global,
         "macro_collect_korea": h_macro_collect_korea,

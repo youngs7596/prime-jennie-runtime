@@ -1,7 +1,6 @@
-"""유지보수 job — 데이터 정리 / 섹터 갱신 / 마스터 시드 / contract smoke.
+"""유지보수 job — 섹터 갱신 / 마스터 시드 / contract smoke.
 
 v2 원본:
-- `/jobs/cleanup-old-data` (app.py:2337-2350)
 - `/jobs/update-naver-sectors` (app.py:2353-2373)
 - `/jobs/seed-stock-masters` (app.py:2719-2742)
 - `/jobs/contract-smoke-test` (app.py:2745-2886)
@@ -30,8 +29,6 @@ from .sector_taxonomy import get_sector_group
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_CLEANUP_DAYS = 365
-
 # v2 `/jobs/contract-smoke-test` 임계값/범위 — 값을 다시 튜닝하지 말 것.
 CONTRACT_SMOKE_SENTINEL = "005930"  # 삼성전자
 _PER_RANGE = (1.0, 200.0)
@@ -49,44 +46,6 @@ _INVESTOR_IDENTITY_TOLERANCE_EOK = 10.0
 
 class ContractSmokeError(RuntimeError):
     """크롤러 contract 가 깨졌을 때 raise — scheduler runner 가 실패로 기록."""
-
-
-def _deleted_count(result: Any) -> int:
-    if isinstance(result, str) and result.startswith("DELETE "):
-        try:
-            return int(result.split(" ", 1)[1])
-        except (IndexError, ValueError):
-            return 0
-    return 0
-
-
-async def cleanup_old_data(
-    pool: Any,
-    *,
-    days: int = DEFAULT_CLEANUP_DAYS,
-) -> None:
-    """v2 `/jobs/cleanup-old-data` 포팅 — `daily_prices` 만 365 일 기준으로 청소.
-
-    v2 는 `stock_daily_prices` 를 365 일 기준으로 청소. v3 에서는 동일 로직을
-    `daily_prices` (003) 에 적용한다. v2 가 날짜만 기준으로 삼았듯 v3 도
-    `price_date < cutoff` 단일 조건만 사용한다. 일봉은 KIS 에서 언제든 다시 받을 수
-    있어 정리해도 무방하다.
-
-    실시간 체결·호가(024) 는 KIS 가 과거를 안 주는 휘발성 데이터라 자동 삭제하지
-    않는다. prime-jennie 은퇴까지 영구 보관한다 (2026-06-17 결정). 따라서 정리 대상에서
-    제외 — 보존 한도가 필요해지면 별도 정책으로 다시 도입한다.
-    """
-    cutoff = date.today() - timedelta(days=days)
-    async with pool.acquire() as conn:
-        daily_res = await conn.execute(
-            "DELETE FROM daily_prices WHERE price_date < $1",
-            cutoff,
-        )
-    logger.info(
-        "cleanup_old_data: daily<%s del=%d",
-        cutoff.isoformat(),
-        _deleted_count(daily_res),
-    )
 
 
 async def update_naver_sectors(
@@ -297,9 +256,7 @@ async def contract_smoke_test(
 
 __all__ = [
     "CONTRACT_SMOKE_SENTINEL",
-    "DEFAULT_CLEANUP_DAYS",
     "ContractSmokeError",
-    "cleanup_old_data",
     "contract_smoke_test",
     "update_naver_sectors",
 ]

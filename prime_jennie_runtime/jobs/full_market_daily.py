@@ -47,6 +47,11 @@ async def collect_full_market_data(
     2) 각 종목 gateway `/api/market/daily-prices` POST → daily_prices upsert
     3) ~18 req/s 페이싱 (v2 와 동일)
 
+    `days` 는 매일 다시 받는 창의 크기일 뿐 이력의 깊이가 아니다. 이력은 이 잡이
+    하루에 하루씩 앞으로 쌓아 만든다 (첫 실행 2026-05-22). **KIS 는 어떤 API 로도
+    3개월 이전을 주지 않으므로 여기 쌓인 행은 지우면 복구할 수 없다** — 보존 한도를
+    붙이지 말 것 (2026-08-23 결정, `jobs/AGENTS.md` 참조).
+
     Returns: {"target": N, "upserted": N, "failed": N, "empty": N}
     """
     async with pool.acquire() as conn:

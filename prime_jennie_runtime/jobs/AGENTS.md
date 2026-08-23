@@ -19,7 +19,7 @@ KIS 분봉은 v3 에서 `job_worker.collect_minute_chart` 단일 수집으로 �
 
 | 파일 | 담당 job |
 |------|---------|
-| `maintenance.py` | cleanup_old_data, update_naver_sectors, seed_stock_masters, contract_smoke_test |
+| `maintenance.py` | update_naver_sectors, seed_stock_masters, contract_smoke_test |
 | `market_data.py` | collect_index_daily_prices, collect_us_market, collect_investor_trading, collect_foreign_holding, refresh_market_caps, collect_minute_chart (백테스트 상위30) |
 | `fundamentals.py` | collect_dart_filings, collect_consensus, collect_naver_roe, collect_quarterly_financials |
 | `analytics.py` | (제거됨, migration 016 — analyze_ai_performance / analyst_feedback 는 legacy_trade_logs 와 함께 정리) |
@@ -75,3 +75,22 @@ v3 에서의 대체 진입점:
 
 결과적으로 Track B 의 22/22 포팅 목표에는 영향 없음 — 이 두 엔드포인트는
 "v3 에선 해당 없음 (owner 변경)" 으로 처리.
+
+## 수집한 시장 데이터는 지우지 않는다 (2026-08-23 결정)
+
+**KIS 는 어떤 API 로도 3개월 이전 데이터를 주지 않는다.** 우리가 수집 잡을 따로
+돌려 매일 쌓는 이유가 그것이다. 한 번 지우면 어디서도 다시 받을 수 없다.
+
+그래서 시장 데이터 테이블(`daily_prices`, `minute_prices`, `realtime_ticks`,
+`realtime_orderbook`, `stock_investor_tradings`, `futures_night_oi` 등)에는
+보존 한도를 두지 않는다. 오래된 행을 지우는 잡을 새로 만들지 말 것.
+
+없앤 것: `cleanup_old_data` (일봉 365일 삭제, 매일 03:00). 코드에 적혀 있던
+"일봉은 KIS 에서 언제든 다시 받을 수 있어 정리해도 무방하다" 는 사실이 아니었다.
+v2 에서 물려받은 문장인데 v2 시절에도 맞지 않았다. 실제로 다시 받아 본 적도 없다.
+
+용량은 판단 근거가 아니다. 일봉은 상위 300종목 기준 연 7만 5천 행이고, 제일 무거운
+실시간 호가까지 다 합쳐도 하루 0.46GB 다. 저장공간이 부족해지면 증설로 푼다.
+
+Redis 스트림의 `maxlen` 은 여기 해당하지 않는다 — 그건 전달 중인 메시지 버퍼지
+쌓아 둔 데이터가 아니다.

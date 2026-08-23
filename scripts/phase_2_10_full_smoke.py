@@ -151,8 +151,8 @@ async def step_job_worker_seed(
     """job_worker 는 HTTP daemon 이 아니므로 DB seed 존재로 #1 도달 여부 판단.
 
     `scheduled_jobs WHERE owner='job_worker'` 가 min_count 이상이면 PASS.
-    v2 utility_jobs_dag / macro_dag 대체 핸들러 (cleanup_old_data / macro_validate_store
-    / macro_collect_global / macro_collect_korea / macro_quick / contract_smoke_test /
+    v2 utility_jobs_dag / macro_dag 대체 핸들러 (macro_validate_store /
+    macro_collect_global / macro_collect_korea / macro_quick / contract_smoke_test /
     update_naver_sectors) 가 seed 에 들어가 있을 때 #1 이 실질 도달.
     """
     try:

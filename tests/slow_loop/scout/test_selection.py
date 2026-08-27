@@ -104,6 +104,34 @@ class TestSelectWithHysteresis:
         assert [c for c, _ in result] == ["HIGH", "MID", "LOW"]
 
     def test_default_thresholds_are_the_centered_scale(self):
-        """섹터 모멘텀 중심화(2026-08-15)에 맞춘 눈금 — 바꾸려면 의도해서 바꿀 것."""
-        assert (ENTRY_THRESHOLD, EXIT_THRESHOLD) == (66.0, 59.0)
-        assert ENTRY_THRESHOLD - EXIT_THRESHOLD == 7.0  # v2 히스테리시스 폭 유지
+        """섹터 모멘텀 중심화(2026-08-15)에 맞춘 눈금 — 바꾸려면 의도해서 바꿀 것.
+
+        이탈만 2026-08-27 에 59 → 62 로 올렸다. 신규 진입이 조여진 뒤에도 이월분이
+        빈자리를 메워 하루 시트가 안 줄어서, 이월분만 깎는 손잡이를 조인 것이다.
+        """
+        assert (ENTRY_THRESHOLD, EXIT_THRESHOLD) == (66.0, 62.0)
+        assert ENTRY_THRESHOLD - EXIT_THRESHOLD == 4.0
+
+    def test_carryover_between_59_and_62_now_removed(self):
+        """2026-08-27 회귀 방지 — 옛 유지 구간(59~62)은 이제 이탈이다.
+
+        이 구간 종목이 다시 유지되기 시작하면 문턱이 되돌려진 것이다.
+        """
+        result = select_with_hysteresis({"OLD_KEEP": 60.5}, previous_codes={"OLD_KEEP"})
+        assert result == []
+
+    def test_carryover_just_above_new_exit_still_kept(self):
+        """새 문턱 바로 위(62.0)는 직전 선정에 있으면 유지 — 경계 포함."""
+        result = select_with_hysteresis({"KEEP": 62.0}, previous_codes={"KEEP"})
+        assert result == [("KEEP", 62.0)]
+
+    def test_carryover_never_outranks_a_new_entry(self):
+        """이월분은 항상 진입권 아래 — 상한 20 자리를 새 후보와 다투지 않는다.
+
+        2026-08-27 계산의 전제다. 이월분(MA < 진입)이 진입권(MA >= 진입)보다 위로
+        정렬되면 문턱을 올릴 때 새 후보가 밀려나 건수가 안 줄어든다.
+        """
+        ma = {"HELD": 65.9, "ENTER_LOW": 66.0, "ENTER_HIGH": 80.0}
+        result = select_with_hysteresis(ma, previous_codes={"HELD"})
+        codes = [c for c, _ in result]
+        assert codes == ["ENTER_HIGH", "ENTER_LOW", "HELD"]

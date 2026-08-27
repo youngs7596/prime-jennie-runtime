@@ -17,6 +17,20 @@ v2 측정상 hybrid ≈ quant (LLM 이동 평균 +1.12) 라 entry/exit 임계는
 중심화의 취지와 반대가 된다. 저장된 점수로 되짚어 보니 66/59 가 조용한 국면의
 예전 개수를 그대로 재현하고(8-05 4개, 이탈권 16 → 17), 랠리 때만 눌린다
 (8-14 통과 33 → 17, 이탈권 81 → 47). 히스테리시스 폭 7점은 그대로다.
+
+**2026-08-27: 이탈만 62 로 올렸다(진입 66 은 그대로).** 새 눈금으로 여드레를 돌려
+보니 신규 진입은 아침 평균 14.4 개까지 조여졌는데 하루 시트는 19~20 건에서 안
+내려왔다. 빠진 자리를 이월분이 그대로 메우고 있었다. 저장된 점수로 선정을 그대로
+재현해(열린 회차 50 개 전부 실제 선정과 일치) 이탈 문턱만 바꿔 보니, 진입권 종목
+수는 문턱을 어디에 두든 14.4 로 똑같았다. 이월분은 언제나 점수 순서의 맨 아래라
+상한 20 자리를 새 후보와 다투지 않는다. 그래서 이 문턱은 이월분만 깎는 손잡이다.
+아침 회차 평균이 59 에서 19.4, 62 에서 16.4, 히스테리시스를 끈 것과 같은 66 에서
+13.0 이었다. 61~63 은 결과가 16.6·16.4·16.0 으로 거의 같아 가운데인 62 를 골랐다.
+같이 딸려 오는 것이 둘 있다. 상한 20 에 걸리는 회차가 없어진다(59 에서는 아침 7 회
+중 3 회가 걸려 이월분이 조용히 잘리고 있었다). 그리고 한 종목이 계속 뽑히는 회차가
+중앙값 42/50 에서 28/50 으로 줄어든다 — 이 문턱은 사실상 보유 기간 손잡이다.
+히스테리시스 폭은 7 점에서 4 점이 됐다. 표본이 여드레·29 종목뿐이고 성과로 검증한
+것은 아직 없다. 한 주 관찰 후 재검토한다.
 """
 
 from __future__ import annotations
@@ -29,7 +43,7 @@ logger = logging.getLogger(__name__)
 # v2 ScoutConfig 기본값 — env override 가능 (v2 도 env 주입식이었음).
 MA_WINDOW: int = int(os.environ.get("SELECTION_MA_WINDOW", "3"))
 ENTRY_THRESHOLD: float = float(os.environ.get("SELECTION_ENTRY_THRESHOLD", "66.0"))
-EXIT_THRESHOLD: float = float(os.environ.get("SELECTION_EXIT_THRESHOLD", "59.0"))
+EXIT_THRESHOLD: float = float(os.environ.get("SELECTION_EXIT_THRESHOLD", "62.0"))
 
 
 def compute_ma_scores(

@@ -59,7 +59,7 @@ LLM 코드 생성을 폐기하고, v2 에서 안정적이었던 결정론 quant 
 - 결정: 비결정성을 코드 생성 단계에서마저 빼고 v2 의 검증된 결정론 스코어러로 복원.
 
 **결정론 코어 (`run_deterministic_scout`)**
-7개 팩터(모멘텀·품질·가치·기술·뉴스·수급·섹터모멘텀)를 코드 상수로 정의된 공식으로 가중 합산해 100점 만점. 직전 2회 런까지 3회 평균 점수로 평활하고, 신규 진입 ≥ 62점 · 이탈 < 55점 히스테리시스로 잦은 전환을 막습니다. 선정 경로 LLM 호출 0회. v2 `quant.py` 포팅.
+7개 팩터(모멘텀·품질·가치·기술·뉴스·수급·섹터모멘텀)를 코드 상수로 정의된 공식으로 가중 합산해 100점 만점. 직전 2회 런까지 3회 평균 점수로 평활하고, 신규 진입 ≥ 66점 · 이탈 < 62점 히스테리시스로 잦은 전환을 막습니다. 선정 경로 LLM 호출 0회. v2 `quant.py` 포팅.
 
 **Macro Gate** 는 여전히 LLM(DeepSeek reasoning + Claude Opus shadow) 기반이지만, 그 위에 결정론 안전망(5가지 closed 조건 · 2단계 이산화 · auto_override) 이 이중으로 씌워져 있습니다. "LLM-at-core 폐기" 는 종목 선정(Scout) 에만 해당하며, Macro 의 비결정성은 결정론 게이트로 가둬 둔 채 유지합니다.
 
@@ -85,7 +85,7 @@ LLM 코드 생성을 폐기하고, v2 에서 안정적이었던 결정론 quant 
 | **Slow Loop (30분 주기, 평일 08:30~14:30)** | Macro Council(LLM) → Macro Gate(이진) → 결정론 Scout(7팩터 quant) → Strategy Engine → 포지션 시트 발행 |
 | **Fast Loop (초 단위, 결정론)** | 포지션 시트 consumer → PendingEntryQueue → BalanceAwareSizer → KIS Gateway → executions / positions / outcomes 기록 |
 | **Macro Gate (LLM + 결정론 안전망)** | DeepSeek reasoning + Claude Opus shadow → 결정론 closed 조건 5종 + 2단계 이산화(0.75/1.0) → `gate=open/closed` + `size_multiplier` |
-| **결정론 Scout (2026-05-22 복원)** | universe → 7팩터 채점(0~100) → MA(3) 평활 → 히스테리시스(entry≥62 / exit<55) → 최대 20후보. LLM 호출 0회. v2 `quant.py` 포팅 |
+| **결정론 Scout (2026-05-22 복원)** | universe → 7팩터 채점(0~100) → MA(3) 평활 → 히스테리시스(entry≥66 / exit<62) → 최대 20후보. LLM 호출 0회. v2 `quant.py` 포팅 |
 | **9-rule Exit System** | `fixed_sl` 필수 + `time_stop` 필수 + 7종 선택. first_match 평가. time_stop·death_cross 배선 2026-05-22 복구 |
 | **포지션 시트 (JSON v1.1)** | 발행자/소비자/관찰자가 단일 명세로 합의. provenance 와 context_snapshot 으로 사후 재구성 가능 |
 | **outcomes 적재 (2026-05-22 복원)** | 완전 청산 시 record_sell 이 executions 기반 가중평균으로 entry/exit·net pnl·exit_reason 을 outcomes 테이블에 UPSERT. `/pnl`, 대시보드 성과, meta 평가 입력 |
@@ -292,7 +292,7 @@ gate=open  → ↓
 [Deterministic Scout] (LLM 호출 0회, v2 quant.py 포팅)
    - enrich_universe — daily_prices / consensus / fundamentals / news_sentiments / investor_trading 일괄 조회
    - score_candidate — 7팩터 가중합산 0~100
-   - MA(3) 평활 + 히스테리시스 (entry ≥ 62 / exit < 55)
+   - MA(3) 평활 + 히스테리시스 (entry ≥ 66 / exit < 62)
    - strategy_tag 분류 (RSI≤35 → MEAN_REVERT_RSI, EPS↑5% → EARNINGS_DRIFT, else → SECTOR_MOMENTUM)
        ↓
 [Strategy Engine] (결정론 9단계 안전 게이트)
@@ -340,8 +340,9 @@ outcomes 테이블 (pnl, exit_reason, holding_minutes)
 **MA 평활 + 히스테리시스** (`selection.py`):
 - `daily_quant_scores` 테이블에 매 run 의 후보별 서브점수 upsert
 - 현재 + 직전 2회 run = 3회 평균 점수로 평활 (MA_WINDOW=3, env `SELECTION_MA_WINDOW`)
-- 신규 진입: MA ≥ 62 (env `SELECTION_ENTRY_THRESHOLD`)
-- 기존 유지: MA ≥ 55 (env `SELECTION_EXIT_THRESHOLD`) — 55~62 구간에서 직전 선정 종목은 유지
+- 신규 진입: MA ≥ 66 (env `SELECTION_ENTRY_THRESHOLD`)
+- 기존 유지: MA ≥ 62 (env `SELECTION_EXIT_THRESHOLD`) — 62~66 구간에서 직전 선정 종목은 유지
+- 눈금은 2026-08-15 섹터 모멘텀 중심화 때 62/55 에서 66/59 로, 이탈만 2026-08-27 에 62 로 올렸다
 
 **strategy_tag 분류**:
 - RSI(14, 15일 이상 일봉) ≤ 35 → `MEAN_REVERT_RSI`
@@ -350,7 +351,7 @@ outcomes 테이블 (pnl, exit_reason, holding_minutes)
 - `GAP_UP_REBOUND` 는 일봉 결정론 코어가 장중 갭 정보를 못 보므로 현재 미부여
 
 선정 경로 전체에서 **LLM 호출 0회**. `scout_runs.model_used` / `cost_usd` 는 항상 NULL.
-`scout_runs.prompt_version` 자리에 스코어러 버전 마커 (`deterministic-quant-v2-port@1`).
+`scout_runs.prompt_version` 자리에 스코어러 버전 마커 (`deterministic-quant-v2-port@2`).
 
 Observer 이벤트:
 - `pj.scout.code_generated` — 결정론 scout 완료 (이벤트명은 LLM codegen 시절 잔존, deprecated 명명)

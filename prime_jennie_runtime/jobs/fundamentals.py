@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from .collection_guard import raise_if_nothing_collected
 from .crawlers.fnguide import crawl_consensus
 from .crawlers.naver import crawl_naver_fundamentals, crawl_naver_roe
 
@@ -188,6 +189,7 @@ async def collect_naver_roe(
             await asyncio.sleep(throttle_sec)
 
     logger.info("collect_naver_roe: updated=%d errors=%d of %d", updated, errors, len(codes))
+    raise_if_nothing_collected("collect_naver_roe", collected=updated, candidates=len(codes))
 
 
 async def collect_quarterly_financials(
@@ -254,6 +256,9 @@ async def collect_quarterly_financials(
         updated,
         errors,
         len(codes),
+    )
+    raise_if_nothing_collected(
+        "collect_quarterly_financials", collected=updated, candidates=len(codes)
     )
 
 

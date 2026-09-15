@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from .collection_guard import raise_if_nothing_collected
 from .crawlers.naver_stock import fetch_stock_frgn_data
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,9 @@ async def collect_investor_trading(
         failed,
         len(codes),
     )
+    raise_if_nothing_collected(
+        "collect_investor_trading", collected=collected, candidates=len(codes)
+    )
 
 
 async def collect_foreign_holding(
@@ -171,6 +175,7 @@ async def collect_foreign_holding(
         failed,
         len(codes),
     )
+    raise_if_nothing_collected("collect_foreign_holding", collected=updated, candidates=len(codes))
 
 
 __all__ = [

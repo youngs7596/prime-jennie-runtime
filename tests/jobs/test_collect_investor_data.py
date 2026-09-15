@@ -13,6 +13,7 @@ import httpx
 import pytest
 import respx
 
+from prime_jennie_runtime.jobs.collection_guard import CollectionSourceDeadError
 from prime_jennie_runtime.jobs.investor_data import (
     collect_foreign_holding,
     collect_investor_trading,
@@ -120,11 +121,17 @@ async def test_collect_foreign_holding_uses_latest_row_date():
 
 
 @pytest.mark.asyncio
-async def test_collect_investor_trading_skips_when_fetch_empty():
+async def test_collect_investor_trading_raises_when_every_stock_empty():
+    """한 종목도 못 건지면 아무것도 안 쓰고 실패로 끝난다 — 2026-09-10 침묵 회귀.
+
+    예전에는 조용히 성공으로 끝나서, 네이버가 주소를 옮긴 뒤 닷새가 지나도록
+    수급이 안 들어오는 것을 잡 실행 기록만 봐서는 알 수 없었다.
+    """
     pool = _FakePool(["005930"])
     with respx.mock(assert_all_called=False) as mock:
         mock.get(url__regex=_FRGN_URL_RE).respond(200, json=[])
         async with httpx.AsyncClient() as client:
-            await collect_investor_trading(pool, client, throttle_sec=0.0)
+            with pytest.raises(CollectionSourceDeadError):
+                await collect_investor_trading(pool, client, throttle_sec=0.0)
 
     assert pool.conn.execute_calls == []

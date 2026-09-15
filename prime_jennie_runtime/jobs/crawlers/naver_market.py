@@ -5,7 +5,7 @@ v2 `prime_jennie/infra/crawlers/naver_market.py` 의 HTTP 만 `httpx.AsyncClient
 
 - `fetch_index_data(client, index_code)` : 모바일 API 로 KOSPI/KOSDAQ 실시간 지수
 - `fetch_investor_flows(client, market, bizdate)` : 외인/기관/개인 순매수 (억원)
-- `fetch_market_stocks(client, market)` : 시가총액 순위 페이지 전종목
+- `fetch_market_stocks(client, market)` : 시가총액 순위 전종목 (모바일 JSON API)
 - `fetch_index_daily_prices(client, index_code, count)` : fchart 일봉 OHLCV
 """
 
@@ -19,6 +19,8 @@ from datetime import date
 
 import httpx
 from bs4 import BeautifulSoup
+
+from .naver_api import get_json, parse_number
 
 logger = logging.getLogger(__name__)
 
@@ -276,71 +278,64 @@ async def fetch_market_investor_breakdown(
         return []
 
 
+_MARKET_VALUE_PAGE_SIZE = 100
+
+
 async def fetch_market_stocks(
     client: httpx.AsyncClient, market: str = "KOSPI", *, request_delay: float = 0.15
 ) -> list[MarketStock]:
-    """시가총액 순위 페이지 전종목 (시총 억원 → 백만원 변환)."""
-    sosok = "0" if market.upper() == "KOSPI" else "1"
-    url = "https://finance.naver.com/sise/sise_market_sum.naver"
+    """시가총액 순위 전종목 (시총 단위는 백만원).
+
+    2026-09-15 에 옛 시가총액 HTML 페이지에서 모바일 JSON API 로 옮겼다. 순서
+    (시총 내림차순)와 담기는 종목 범위는 그대로다.
+    """
+    category = "KOSPI" if market.upper() == "KOSPI" else "KOSDAQ"
     stocks: list[MarketStock] = []
     seen: set[str] = set()
+    page = 1
 
-    for page in range(1, 100):
-        try:
-            resp = await client.get(
-                url,
-                headers=NAVER_HEADERS,
-                params={"sosok": sosok, "page": str(page)},
-                timeout=10,
-            )
-            resp.encoding = "euc-kr"
-            soup = BeautifulSoup(resp.text, "html.parser")
-            table = soup.select_one("table.type_2")
-            if not table:
-                break
-
-            page_count = 0
-            for tr in table.select("tr"):
-                tds = tr.select("td")
-                if len(tds) < 7:
-                    continue
-                link = tr.select_one("a[href*='code=']")
-                if not link:
-                    continue
-                href = link.get("href", "")
-                code = href.split("code=")[-1].split("&")[0]
-                if len(code) != 6 or not code.isdigit() or code in seen:
-                    continue
-                name = link.get_text(strip=True)
-                if not name:
-                    continue
-                cap_text = tds[6].get_text(strip=True).replace(",", "")
-                if not cap_text or cap_text == "-":
-                    continue
-                try:
-                    cap_eok = int(cap_text)
-                except ValueError:
-                    continue
-                seen.add(code)
-                stocks.append(
-                    MarketStock(
-                        stock_code=code,
-                        stock_name=name,
-                        market_cap=cap_eok * 100,
-                    )
-                )
-                page_count += 1
-
-            if page_count == 0:
-                break
-            if page < 99:
-                await asyncio.sleep(request_delay)
-        except Exception as e:
-            logger.warning("Naver market stocks page %d failed: %s", page, e)
+    while True:
+        data = await get_json(
+            client,
+            f"/stocks/marketValue/{category}",
+            params={"page": page, "pageSize": _MARKET_VALUE_PAGE_SIZE},
+        )
+        if not isinstance(data, dict):
             break
+
+        rows = data.get("stocks") or []
+        for row in rows:
+            code = str(row.get("itemCode") or "")
+            name = str(row.get("stockName") or "").strip()
+            if len(code) != 6 or not code.isdigit() or code in seen or not name:
+                continue
+            cap_mil = _market_cap_million(row)
+            if cap_mil is None:
+                continue
+            seen.add(code)
+            stocks.append(MarketStock(stock_code=code, stock_name=name, market_cap=cap_mil))
+
+        total = data.get("totalCount")
+        if len(rows) < _MARKET_VALUE_PAGE_SIZE:
+            break
+        if isinstance(total, int) and page * _MARKET_VALUE_PAGE_SIZE >= total:
+            break
+        page += 1
+        await asyncio.sleep(request_delay)
 
     logger.info("Naver market stocks (%s): %d", market, len(stocks))
     return stocks
+
+
+def _market_cap_million(row: dict) -> int | None:
+    """시총을 백만원으로. 원 단위 raw 값을 먼저 쓰고 없으면 억원 표시값을 환산."""
+    raw = parse_number(row.get("marketValueRaw"))
+    if raw is not None and raw > 0:
+        return int(raw // 1_000_000)
+    eok = parse_number(row.get("marketValue"))
+    if eok is not None and eok > 0:
+        return int(eok * 100)
+    return None
 
 
 _FCHART_INDEX_CODE = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}

@@ -1,7 +1,8 @@
 """`collect_investor_trading` + `collect_foreign_holding` 스모크.
 
-네이버 frgn 페이지 (euc-kr) 응답을 respx 로 모킹하고 stock_investor_tradings 의
-upsert 가 v2 와 동일한 의미 (volume × close_price = KRW) 를 가지는지 검증.
+네이버 일별 수급 API 응답을 respx 로 모킹하고 stock_investor_tradings 의 upsert 가
+v2 와 동일한 의미 (volume × close_price = KRW) 를 가지는지 검증. 읽는 곳은
+2026-09-15 에 옛 frgn HTML 표에서 모바일 JSON API 로 바뀌었다.
 """
 
 from __future__ import annotations
@@ -17,27 +18,25 @@ from prime_jennie_runtime.jobs.investor_data import (
     collect_investor_trading,
 )
 
-_FRGN_URL_RE = r"https://finance\.naver\.com/item/frgn\.naver.*"
+_FRGN_URL_RE = r"https://m\.stock\.naver\.com/api/stock/\w+/trend.*"
 
 
-def _frgn_html(rows: list[tuple[str, int, int, int, float]]) -> bytes:
+def _trend_json(rows: list[tuple[str, int, int, int, float]]) -> list[dict]:
     """rows: (yyyy.mm.dd, close, inst_net_vol, frgn_net_vol, frgn_ratio).
 
-    table.type2 두 번째 (summary 에 '외국인' 포함) 만 파싱되므로 첫 dummy 도 둠.
+    API 는 숫자를 콤마·부호·% 붙은 문자열로 준다 — 그 모양 그대로 흉내 낸다.
     """
-    body_rows = "".join(
-        f"<tr><td>{d}</td><td>{c:,}</td><td>0</td><td>0</td><td>0</td>"
-        f"<td>{ins:+,}</td><td>{frg:+,}</td><td>0</td><td>{ratio:.2f}%</td></tr>"
+    return [
+        {
+            "itemCode": "005930",
+            "bizdate": d.replace(".", ""),
+            "closePrice": f"{c:,}",
+            "organPureBuyQuant": f"{ins:+,}",
+            "foreignerPureBuyQuant": f"{frg:+,}",
+            "foreignerHoldRatio": f"{ratio:.2f}%",
+        }
         for d, c, ins, frg, ratio in rows
-    )
-    html = (
-        "<html><body>"
-        '<table class="type2" summary="시세">dummy</table>'
-        '<table class="type2" summary="외국인 기관 순매매 거래량">'
-        f"{body_rows}"
-        "</table></body></html>"
-    )
-    return html.encode("euc-kr")
+    ]
 
 
 class _FakeConn:
@@ -84,9 +83,7 @@ async def test_collect_investor_trading_sums_recent_seven_bars():
         ((today - timedelta(days=3)).strftime("%Y.%m.%d"), 72000, 300, -700, 50.2),
     ]
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_FRGN_URL_RE).respond(
-            200, content=_frgn_html(rows), headers={"content-type": "text/html"}
-        )
+        mock.get(url__regex=_FRGN_URL_RE).respond(200, json=_trend_json(rows))
         async with httpx.AsyncClient() as client:
             await collect_investor_trading(pool, client, throttle_sec=0.0)
 
@@ -110,9 +107,7 @@ async def test_collect_foreign_holding_uses_latest_row_date():
         ("2026.04.15", 70500, 0, 0, 51.10),
     ]
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_FRGN_URL_RE).respond(
-            200, content=_frgn_html(rows), headers={"content-type": "text/html"}
-        )
+        mock.get(url__regex=_FRGN_URL_RE).respond(200, json=_trend_json(rows))
         async with httpx.AsyncClient() as client:
             await collect_foreign_holding(pool, client, throttle_sec=0.0)
 
@@ -128,9 +123,7 @@ async def test_collect_foreign_holding_uses_latest_row_date():
 async def test_collect_investor_trading_skips_when_fetch_empty():
     pool = _FakePool(["005930"])
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_FRGN_URL_RE).respond(
-            200, content=b"<html></html>", headers={"content-type": "text/html"}
-        )
+        mock.get(url__regex=_FRGN_URL_RE).respond(200, json=[])
         async with httpx.AsyncClient() as client:
             await collect_investor_trading(pool, client, throttle_sec=0.0)
 

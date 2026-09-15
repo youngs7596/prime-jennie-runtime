@@ -12,23 +12,26 @@ import respx
 
 from prime_jennie_runtime.jobs.maintenance import update_naver_sectors
 
-_SECTOR_LIST_URL = r"https://finance\.naver\.com/sise/sise_group\.naver.*"
-_SECTOR_DETAIL_URL = r"https://finance\.naver\.com/sise/sise_group_detail\.naver.*"
+_SECTOR_LIST_URL = r"https://m\.stock\.naver\.com/api/stocks/industry\?.*"
+_SECTOR_DETAIL_URL = r"https://m\.stock\.naver\.com/api/stocks/industry/\d+.*"
 
 
-_SECTOR_LIST_HTML = (
-    '<html><body><table class="type_1">'
-    '<tr><td><a href="/sise/sise_group_detail.naver?type=upjong&no=001">'
-    "반도체와반도체장비</a></td></tr>"
-    '<tr><td><a href="/sise/sise_group_detail.naver?type=upjong&no=002">'
-    "은행</a></td></tr>"
-    "</table></body></html>"
-)
+_SECTOR_LIST_JSON = {
+    "stockListSortType": "INDUSTRY",
+    "groups": [
+        {"no": 1, "name": "반도체와반도체장비", "totalCount": 1},
+        {"no": 2, "name": "은행", "totalCount": 1},
+    ],
+    "totalCount": 2,
+}
 
 
-def _detail_html(codes: list[str]) -> str:
-    rows = "".join(f'<tr><td><a href="/item/main.naver?code={c}">x</a></td></tr>' for c in codes)
-    return f'<html><body><table class="type_5">{rows}</table></body></html>'
+def _detail_json(codes: list[str]) -> dict:
+    return {
+        "stockListSortType": "INDUSTRY",
+        "stocks": [{"itemCode": c, "stockName": c} for c in codes],
+        "totalCount": len(codes),
+    }
 
 
 class _FakeTx:
@@ -73,16 +76,14 @@ class _FakePool:
 async def test_update_naver_sectors_maps_and_updates():
     pool = _FakePool()
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_SECTOR_LIST_URL).respond(
-            200, content=_SECTOR_LIST_HTML.encode("euc-kr")
-        )
-        # 두 섹터 detail 요청 — 각각 1종목씩.
+        # 두 업종 상세 요청 — 각각 1종목씩. 목록보다 먼저 걸어야 경로가 안 겹친다.
         mock.get(url__regex=_SECTOR_DETAIL_URL).mock(
             side_effect=[
-                httpx.Response(200, content=_detail_html(["005930"]).encode("euc-kr")),
-                httpx.Response(200, content=_detail_html(["055550"]).encode("euc-kr")),
+                httpx.Response(200, json=_detail_json(["005930"])),
+                httpx.Response(200, json=_detail_json(["055550"])),
             ]
         )
+        mock.get(url__regex=_SECTOR_LIST_URL).respond(200, json=_SECTOR_LIST_JSON)
         async with httpx.AsyncClient() as client:
             await update_naver_sectors(pool, client)
 
@@ -101,7 +102,7 @@ async def test_update_naver_sectors_maps_and_updates():
 async def test_update_naver_sectors_skips_on_empty_mapping(caplog):
     pool = _FakePool()
     with respx.mock(assert_all_called=False) as mock:
-        mock.get(url__regex=_SECTOR_LIST_URL).respond(200, content=b"<html><body></body></html>")
+        mock.get(url__regex=_SECTOR_LIST_URL).respond(200, json={"groups": []})
         async with httpx.AsyncClient() as client:
             await update_naver_sectors(pool, client)
 

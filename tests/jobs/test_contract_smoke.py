@@ -19,30 +19,57 @@ from prime_jennie_runtime.jobs.maintenance import (
     contract_smoke_test,
 )
 
-_MAIN_URL_RE = r"https://finance\.naver\.com/item/main\.naver.*"
-_SECTOR_LIST_URL = r"https://finance\.naver\.com/sise/sise_group\.naver.*"
-_SECTOR_DETAIL_URL = r"https://finance\.naver\.com/sise/sise_group_detail\.naver.*"
+_MAIN_URL_RE = r"https://m\.stock\.naver\.com/api/stock/\w+/finance/quarter"
+_SECTOR_LIST_URL = r"https://m\.stock\.naver\.com/api/stocks/industry\?.*"
+_SECTOR_DETAIL_URL = r"https://m\.stock\.naver\.com/api/stocks/industry/\d+.*"
 _FNGUIDE_URL = r"https://wcomp\.fnguide\.com/CompanyInfo/Snapshot.*"
 _FNGUIDE_ROE_URL = r"https://wcomp\.fnguide\.com/CompanyInfo/getSnpSectorChart.*"
 _NAVER_CONSENSUS_URL = r"https://navercomp\.wisereport\.co\.kr/.*"
 _INVESTOR_URL = r"https://finance\.naver\.com/sise/investorDealTrendDay\.naver.*"
 
-# 주요재무정보 테이블 — 최신 실적 2024.09: PER=12.5, PBR=1.2, ROE=8.0
-_MAIN_HTML = """
-<html><body>
-<table>
-  <tr><th>ROE(%)</th><td>7.0</td><td>8.0</td><td>-</td></tr>
-</table>
-<table>
-  <tr><th>2024.03</th><th>2024.06</th><th>2024.09</th><th>2024.12(E)</th></tr>
-  <tr><th>EPS</th><td>100</td><td>200</td><td>300</td><td>400</td></tr>
-  <tr><th>PER(배)</th><td>10</td><td>11</td><td>12.5</td><td>14.0</td></tr>
-  <tr><th>BPS</th><td>1000</td><td>1100</td><td>1200</td><td>1300</td></tr>
-  <tr><th>PBR(배)</th><td>1.0</td><td>1.1</td><td>1.2</td><td>1.3</td></tr>
-  <tr><th>ROE(%)</th><td>6.0</td><td>7.0</td><td>8.0</td><td>9.0</td></tr>
-</table>
-</body></html>
-"""
+# 분기 재무표 — 최신 실적 2024.09: PER=12.5, PBR=1.2, ROE=8.0. 마지막 2024.12 는 추정치라
+# fundamentals 는 건너뛰고, ROE 단독 크롤은 그 추정값(9.0)까지 본다 — 둘이 다른 값을 봐야
+# roe 교차검증이 의미가 있다.
+_MAIN_JSON = {
+    "itemCode": "005930",
+    "financeInfo": {
+        "trTitleList": [
+            {"isConsensus": "N", "title": "2024.03.", "key": "202403"},
+            {"isConsensus": "N", "title": "2024.06.", "key": "202406"},
+            {"isConsensus": "N", "title": "2024.09.", "key": "202409"},
+            {"isConsensus": "Y", "title": "2024.12.", "key": "202412"},
+        ],
+        "rowList": [
+            {
+                "title": "PER",
+                "columns": {
+                    "202403": {"value": "10"},
+                    "202406": {"value": "11"},
+                    "202409": {"value": "12.5"},
+                    "202412": {"value": "14.0"},
+                },
+            },
+            {
+                "title": "PBR",
+                "columns": {
+                    "202403": {"value": "1.0"},
+                    "202406": {"value": "1.1"},
+                    "202409": {"value": "1.2"},
+                    "202412": {"value": "1.3"},
+                },
+            },
+            {
+                "title": "ROE",
+                "columns": {
+                    "202403": {"value": "6.0"},
+                    "202406": {"value": "7.0"},
+                    "202409": {"value": "8.0"},
+                    "202412": {"value": "9.0"},
+                },
+            },
+        ],
+    },
+}
 
 # 2026-08-05 이후의 FnGuide Snapshot 구조. 제목이 종목을 밝히고(크롤러가 이걸로 대조한다)
 # '투자의견' 표가 열 방향으로 값을 준다. sentinel 은 삼성전자(005930).
@@ -77,28 +104,24 @@ _FNGUIDE_ROE_JSON = {
 }
 
 
-def _sector_list_html() -> str:
+def _sector_list_json() -> dict:
     # 업종 2개
-    return """
-    <html><body>
-    <table class="type_1">
-      <tr><td><a href="/sise/sise_group_detail.naver?type=upjong&no=001">반도체</a></td></tr>
-      <tr><td><a href="/sise/sise_group_detail.naver?type=upjong&no=002">자동차</a></td></tr>
-    </table>
-    </body></html>
-    """
+    return {
+        "groups": [
+            {"no": 1, "name": "반도체", "totalCount": 551},
+            {"no": 2, "name": "자동차", "totalCount": 551},
+        ],
+        "totalCount": 2,
+    }
 
 
-def _sector_detail_html(include_sentinel: bool, extra_count: int) -> str:
-    rows = []
-    if include_sentinel:
-        rows.append(
-            f'<tr><td><a href="/item/main.naver?code={CONTRACT_SMOKE_SENTINEL}">s</a></td></tr>'
-        )
-    for i in range(extra_count):
-        code = f"{100000 + i:06d}"
-        rows.append(f'<tr><td><a href="/item/main.naver?code={code}">x</a></td></tr>')
-    return '<html><body><table class="type_5">' + "".join(rows) + "</table></body></html>"
+def _sector_detail_json(include_sentinel: bool, extra_count: int) -> dict:
+    codes = [CONTRACT_SMOKE_SENTINEL] if include_sentinel else []
+    codes += [f"{100000 + i:06d}" for i in range(extra_count)]
+    return {
+        "stocks": [{"itemCode": c} for c in codes],
+        "totalCount": len(codes),
+    }
 
 
 # 실제 investorDealTrendDay 구조: 2단 헤더(기관 colspan=6 그룹) + 기타법인 컬럼.
@@ -156,12 +179,11 @@ class _FakeNewsCrawler:
 
 def _mock_all(mock, investor_html: str) -> None:
     """수급 페이지만 갈아 끼우고 나머지 다섯 크롤러는 정상 응답으로 고정."""
-    mock.get(url__regex=_MAIN_URL_RE).respond(200, content=_MAIN_HTML.encode("euc-kr"))
-    mock.get(url__regex=_SECTOR_LIST_URL).respond(200, content=_sector_list_html().encode("euc-kr"))
-    # sector detail — 두 섹터 모두 sentinel + 550개. 합산 dict 크기 551 → 500 넘김.
-    mock.get(url__regex=_SECTOR_DETAIL_URL).respond(
-        200, content=_sector_detail_html(True, 550).encode("euc-kr")
-    )
+    mock.get(url__regex=_MAIN_URL_RE).respond(200, json=_MAIN_JSON)
+    # 업종 상세를 목록보다 먼저 걸어야 경로가 안 겹친다. 두 업종 모두 sentinel + 550개라
+    # 합산 dict 크기 551 → 최소 500종목 조건을 넘긴다.
+    mock.get(url__regex=_SECTOR_DETAIL_URL).respond(200, json=_sector_detail_json(True, 550))
+    mock.get(url__regex=_SECTOR_LIST_URL).respond(200, json=_sector_list_json())
     mock.get(url__regex=_FNGUIDE_URL).respond(200, text=_FNGUIDE_HTML)
     mock.get(url__regex=_FNGUIDE_ROE_URL).respond(200, json=_FNGUIDE_ROE_JSON)
     mock.get(url__regex=_INVESTOR_URL).respond(200, content=investor_html.encode("euc-kr"))

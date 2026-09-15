@@ -1,44 +1,47 @@
 """네이버 금융 크롤러 — 종목 fundamentals/ROE/섹터 매핑.
 
-v2 `prime_jennie/infra/crawlers/naver.py` 의 아래 함수를 async httpx 기반으로
-옮긴다. 파싱 규칙(셀렉터, (E) 제외, 라벨 매칭)은 그대로 유지 — v2 에서 안정적
-으로 통과하던 파라미터를 재해석하지 않는다.
+v2 `prime_jennie/infra/crawlers/naver.py` 에서 옮겨온 함수들이다. 값의 의미
+(최근 실적 분기 PER/PBR/ROE, ROE 행의 마지막 유효값, 업종 79개 순회)는 v2 부터
+그대로 유지하고, **2026-09-15 에 읽는 곳만 HTML 페이지에서 모바일 JSON API 로
+바꿨다**. 네이버가 `finance.naver.com` 을 `stock.naver.com` 으로 옮겨 옛 주소가
+302 만 돌려주게 됐기 때문이다 (`naver_api` 모듈 설명 참고).
 
-- `crawl_naver_fundamentals(client, stock_code)` : 주요재무정보 테이블에서
-  최근 실적 분기 PER/PBR/ROE
-- `crawl_naver_roe(client, stock_code)` : 종목 메인 페이지 ROE row 마지막 유효값
+- `crawl_naver_fundamentals(client, stock_code)` : 분기 재무표에서 추정치가 아닌
+  가장 최근 분기의 PER/PBR/ROE
+- `crawl_naver_roe(client, stock_code)` : 분기 재무표 ROE 행의 마지막 유효값
+  (추정 분기 포함 — fundamentals 쪽과 일부러 다른 값을 봐서 서로 교차검증이 된다)
 - `build_naver_sector_mapping(client)` : 네이버 업종 분류 → {code: sector_name}
 
-뉴스 크롤은 이미 `news_pipeline_kor/adapters/naver_crawler.py` 에 async 로
-이식되어 있어 포팅 대상 아님.
+뉴스 크롤은 `news_pipeline_kor/adapters/naver_crawler.py` 에 따로 있다.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
+
+from .naver_api import NAVER_HEADERS, get_json, parse_number
 
 logger = logging.getLogger(__name__)
 
-NAVER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
+__all__ = [
+    "NAVER_HEADERS",
+    "NaverFundamentals",
+    "build_naver_sector_mapping",
+    "crawl_naver_fundamentals",
+    "crawl_naver_roe",
+]
 
-_DATE_RE = re.compile(r"\d{4}\.\d{2}")
+_INDUSTRY_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
 class NaverFundamentals:
-    """주요재무정보 테이블에서 추출한 최신 실적 분기 지표."""
+    """분기 재무표에서 뽑은 최신 실적 분기 지표."""
 
     per: float | None = None
     pbr: float | None = None
@@ -46,186 +49,150 @@ class NaverFundamentals:
     quarter_name: str | None = None
 
 
-async def _get_euckr_soup(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    params: dict | None = None,
-    headers: dict | None = None,
-    timeout: float = 10.0,
-) -> BeautifulSoup | None:
-    try:
-        resp = await client.get(
-            url,
-            params=params,
-            headers={**NAVER_HEADERS, **(headers or {})},
-            timeout=timeout,
-        )
-        resp.encoding = "euc-kr"
-        return BeautifulSoup(resp.text, "html.parser")
-    except Exception as e:
-        logger.warning("GET %s failed: %s", url, e)
+@dataclass(frozen=True)
+class _QuarterFinance:
+    """분기 재무표 — 기간 목록과 지표 행."""
+
+    periods: list[tuple[str, str, bool]]  # (기간키, 표시이름, 추정치 여부) 과거→최근
+    rows: dict[str, dict[str, Any]]  # 지표명 → {기간키: {"value": ...}}
+
+    def value(self, metric: str, period_key: str) -> float | None:
+        cell = self.rows.get(metric, {}).get(period_key)
+        if not isinstance(cell, dict):
+            return None
+        return parse_number(cell.get("value"))
+
+
+async def _fetch_quarter_finance(
+    client: httpx.AsyncClient, stock_code: str
+) -> _QuarterFinance | None:
+    """종목의 분기 재무표를 읽는다.
+
+    응답 모양: `financeInfo.trTitleList` 가 기간 목록(`isConsensus` 가 "Y" 면
+    추정치), `financeInfo.rowList` 가 지표 행(`title` = PER/PBR/ROE/EPS/BPS,
+    `columns` = {기간키: {"value": "14.98"}}).
+    """
+    data = await get_json(client, f"/stock/{stock_code}/finance/quarter")
+    if not isinstance(data, dict):
         return None
+    info = data.get("financeInfo")
+    if not isinstance(info, dict):
+        return None
+
+    periods: list[tuple[str, str, bool]] = []
+    for entry in info.get("trTitleList") or []:
+        key = entry.get("key")
+        if not key:
+            continue
+        title = str(entry.get("title") or key).rstrip(".")
+        periods.append((str(key), title, entry.get("isConsensus") == "Y"))
+    if not periods:
+        return None
+    periods.sort(key=lambda p: p[0])
+
+    rows: dict[str, dict[str, Any]] = {}
+    for row in info.get("rowList") or []:
+        title = row.get("title")
+        columns = row.get("columns")
+        if isinstance(title, str) and isinstance(columns, dict):
+            rows[title.strip()] = columns
+    if not rows:
+        return None
+
+    return _QuarterFinance(periods=periods, rows=rows)
 
 
 async def crawl_naver_roe(client: httpx.AsyncClient, stock_code: str) -> float | None:
-    """네이버 금융 종목 메인 페이지에서 ROE(%) 파싱.
+    """ROE(%) — 분기 재무표 ROE 행의 마지막 유효값.
 
-    테이블 구조: th 에 "ROE" 포함된 row 의 마지막 유효 td 값.
+    v2 규칙 유지: 추정 분기도 후보에 넣고, 값이 비어 있으면("-") 건너뛰며 가장
+    오른쪽(최근) 유효값을 쓴다.
     """
-    soup = await _get_euckr_soup(
-        client, f"https://finance.naver.com/item/main.naver?code={stock_code}"
-    )
-    if soup is None:
+    finance = await _fetch_quarter_finance(client, stock_code)
+    if finance is None:
         return None
 
-    for table in soup.select("table"):
-        for row in table.select("tr"):
-            th = row.select_one("th")
-            if not th or "ROE" not in th.get_text():
-                continue
-            best: float | None = None
-            for td in row.select("td"):
-                text = td.get_text(strip=True).replace(",", "")
-                if not text or text in ("-", "N/A"):
-                    continue
-                try:
-                    best = float(text)
-                except ValueError:
-                    continue
-            if best is not None:
-                return best
-    return None
+    best: float | None = None
+    for key, _title, _is_estimate in finance.periods:
+        value = finance.value("ROE", key)
+        if value is not None:
+            best = value
+    return best
 
 
 async def crawl_naver_fundamentals(
     client: httpx.AsyncClient, stock_code: str
 ) -> NaverFundamentals | None:
-    """최신 실적(non-E) 분기의 PER/PBR/ROE.
+    """추정치가 아닌 가장 최근 분기의 PER/PBR/ROE.
 
-    v2 규칙 유지:
-    - EPS/BPS/PER 모두 포함된 table 을 주요재무정보 테이블로 간주
-    - 날짜 행(`\\d{4}\\.\\d{2}`) 우측부터 탐색, "(E)" 없는 가장 최근 열 선택
-    - PBR/BPS, PER/EPS 라벨 혼동 방지 (라벨에 둘 다 있으면 스킵)
+    v2 규칙 유지: 기간을 오른쪽(최근)부터 훑어 추정 분기를 건너뛴 첫 기간을 고르고,
+    그 한 기간의 값만 읽는다. 세 값이 전부 비면 None 을 돌려줘 호출측이 실패로 센다.
     """
-    soup = await _get_euckr_soup(
-        client, f"https://finance.naver.com/item/main.naver?code={stock_code}"
-    )
-    if soup is None:
+    finance = await _fetch_quarter_finance(client, stock_code)
+    if finance is None:
         return None
 
-    target_table = None
-    for table in soup.select("table"):
-        text = table.get_text()
-        if "EPS" in text and "BPS" in text and "PER" in text:
-            target_table = table
-            break
-    if target_table is None:
+    actual = [(key, title) for key, title, is_estimate in finance.periods if not is_estimate]
+    if not actual:
+        return None
+    period_key, quarter_name = actual[-1]
+
+    per = finance.value("PER", period_key)
+    pbr = finance.value("PBR", period_key)
+    roe = finance.value("ROE", period_key)
+    if per is None and pbr is None and roe is None:
         return None
 
-    rows = target_table.select("tr")
-    if not rows:
-        return None
-
-    actual_col_idx: int | None = None
-    quarter_name: str | None = None
-    for row in rows:
-        ths = row.select("th")
-        if not ths:
-            continue
-        header_texts = [th.get_text(strip=True) for th in ths]
-        date_ths = [t for t in header_texts if _DATE_RE.match(t)]
-        if len(date_ths) < 2:
-            continue
-        for i in range(len(ths) - 1, -1, -1):
-            th_text = ths[i].get_text(strip=True)
-            if _DATE_RE.match(th_text) and "(E)" not in th_text:
-                actual_col_idx = i
-                quarter_name = th_text
-                break
-        break
-
-    if actual_col_idx is None:
-        return None
-
-    per_val: float | None = None
-    pbr_val: float | None = None
-    roe_val: float | None = None
-
-    for row in rows:
-        first = row.select_one("th")
-        if not first:
-            continue
-        label = first.get_text(strip=True)
-        tds = row.select("td")
-        if not tds or actual_col_idx >= len(tds):
-            continue
-        raw = tds[actual_col_idx].get_text(strip=True).replace(",", "")
-        if not raw or raw in ("-", "N/A"):
-            continue
-        try:
-            value = float(raw)
-        except ValueError:
-            continue
-
-        if "PER" in label and "EPS" not in label:
-            per_val = value
-        elif "PBR" in label and "BPS" not in label:
-            pbr_val = value
-        elif "ROE" in label:
-            roe_val = value
-
-    if per_val is None and pbr_val is None and roe_val is None:
-        return None
-
-    return NaverFundamentals(per=per_val, pbr=pbr_val, roe=roe_val, quarter_name=quarter_name)
+    return NaverFundamentals(per=per, pbr=pbr, roe=roe, quarter_name=quarter_name)
 
 
 async def _get_sector_stocks(client: httpx.AsyncClient, sector_no: str) -> list[str]:
-    soup = await _get_euckr_soup(
-        client,
-        "https://finance.naver.com/sise/sise_group_detail.naver",
-        params={"type": "upjong", "no": sector_no},
-    )
-    if soup is None:
-        return []
+    """업종 하나에 속한 종목 코드 전부 (코스피·코스닥 섞여 나온다 — v2 와 동일)."""
     codes: list[str] = []
-    for link in soup.select("table.type_5 td a[href*='code=']"):
-        href = link.get("href", "")
-        if "code=" in href:
-            code = href.split("code=")[-1].split("&")[0]
+    page = 1
+    while True:
+        data = await get_json(
+            client,
+            f"/stocks/industry/{sector_no}",
+            params={"page": page, "pageSize": _INDUSTRY_PAGE_SIZE},
+        )
+        if not isinstance(data, dict):
+            break
+        stocks = data.get("stocks") or []
+        for stock in stocks:
+            code = str(stock.get("itemCode") or "")
             if len(code) == 6 and code.isdigit():
                 codes.append(code)
+        total = data.get("totalCount")
+        if len(stocks) < _INDUSTRY_PAGE_SIZE:
+            break
+        if isinstance(total, int) and page * _INDUSTRY_PAGE_SIZE >= total:
+            break
+        page += 1
     return codes
 
 
 async def build_naver_sector_mapping(
     client: httpx.AsyncClient, *, request_delay: float = 0.2
 ) -> dict[str, str]:
-    """네이버 업종 분류 → {stock_code: sector_name}.
-
-    v2 는 79개 세분류를 순회. sector 목록과 종목 상세는 별도 URL.
-    """
+    """네이버 업종 분류 → {stock_code: sector_name}. v2 와 같이 79개 세분류 순회."""
     mapping: dict[str, str] = {}
-    soup = await _get_euckr_soup(
+    data = await get_json(
         client,
-        "https://finance.naver.com/sise/sise_group.naver",
-        params={"type": "upjong"},
+        "/stocks/industry",
+        params={"page": 1, "pageSize": _INDUSTRY_PAGE_SIZE},
         timeout=15.0,
     )
-    if soup is None:
+    if not isinstance(data, dict):
         return mapping
 
-    sector_links = soup.select("table.type_1 td a[href*='no=']")
-    for link in sector_links:
-        sector_name = link.get_text(strip=True)
-        href = link.get("href", "")
-        if "no=" not in href:
+    for group in data.get("groups") or []:
+        sector_no = group.get("no")
+        sector_name = group.get("name")
+        if sector_no is None or not sector_name:
             continue
-        sector_no = href.split("no=")[-1].split("&")[0]
-        stocks = await _get_sector_stocks(client, sector_no)
-        for code in stocks:
-            mapping[code] = sector_name
+        for code in await _get_sector_stocks(client, str(sector_no)):
+            mapping[code] = str(sector_name)
         await asyncio.sleep(request_delay)
 
     logger.info("Naver sector mapping: %d stocks mapped", len(mapping))

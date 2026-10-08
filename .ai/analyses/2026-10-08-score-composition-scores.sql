@@ -1,0 +1,1 @@
+\copy (with first as (select score_date, min(run_id) run_id from daily_quant_scores group by 1) select d.score_date, d.stock_code, d.total_quant_score, d.momentum_score, d.quality_score, d.value_score, d.technical_score, d.news_score, d.supply_demand_score, d.sector_momentum_score from daily_quant_scores d join first f using(score_date, run_id)) to stdout with csv header

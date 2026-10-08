@@ -1,0 +1,1 @@
+\copy (select stock_code, price_date, open_price, close_price, volume from daily_prices where price_date >= '2026-01-01' and stock_code in (select distinct stock_code from daily_quant_scores) ) to stdout with csv header

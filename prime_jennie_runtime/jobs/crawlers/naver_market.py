@@ -4,7 +4,8 @@ v2 `prime_jennie/infra/crawlers/naver_market.py` 의 HTTP 만 `httpx.AsyncClient
 로 변경. 파싱 규칙, fchart 엔드포인트 포맷, 컬럼 인덱스 판정은 유지한다.
 
 - `fetch_index_data(client, index_code)` : 모바일 API 로 KOSPI/KOSDAQ 실시간 지수
-- `fetch_investor_flows(client, market, bizdate)` : 외인/기관/개인 순매수 (억원)
+- `fetch_investor_flows(client, market, bizdate)` : 외인/기관/개인 순매수 (억원, 웹 JSON API)
+- `fetch_market_investor_breakdown(client, bizdate)` : 시장전체 투자자 분해 (연기금 분리)
 - `fetch_market_stocks(client, market)` : 시가총액 순위 전종목 (모바일 JSON API)
 - `fetch_index_daily_prices(client, index_code, count)` : fchart 일봉 OHLCV
 """
@@ -18,9 +19,8 @@ from dataclasses import dataclass
 from datetime import date
 
 import httpx
-from bs4 import BeautifulSoup
 
-from .naver_api import get_json, parse_number
+from .naver_api import NAVER_WEB_API_BASE, get_json, parse_number
 
 logger = logging.getLogger(__name__)
 
@@ -106,176 +106,118 @@ async def fetch_index_data(client: httpx.AsyncClient, index_code: str) -> IndexD
 async def fetch_investor_flows(
     client: httpx.AsyncClient, market: str, bizdate: str
 ) -> InvestorFlows | None:
-    """외인/기관/개인 순매수 (억원). sosession: kospi=01, kosdaq=02."""
-    sosession = "01" if market.lower() == "kospi" else "02"
-    url = "https://finance.naver.com/sise/investorDealTrendDay.naver"
-    try:
-        resp = await client.get(
-            url,
-            headers=NAVER_HEADERS,
-            params={"bizdate": bizdate, "sosession": sosession},
-            timeout=10,
-        )
-        resp.encoding = "euc-kr"
-        soup = BeautifulSoup(resp.text, "html.parser")
+    """외인/기관/개인 순매수 (억원). 시장 전체 일별 수급에서 ``bizdate`` 한 줄을 고른다.
 
-        table = soup.select_one("table.type_1")
-        if not table:
-            logger.warning("Naver investor table not found for %s", market)
-            return None
-
-        header_row = table.select_one("tr")
-        if not header_row:
-            return None
-        headers = [th.get_text(strip=True) for th in header_row.select("th")]
-        col_map: dict[str, int] = {}
-        for i, h in enumerate(headers):
-            if "외국인" in h:
-                col_map["foreign"] = i
-            elif h == "기관계":
-                col_map["institutional"] = i
-            elif "개인" in h:
-                col_map["retail"] = i
-        if not col_map:
-            logger.warning("Naver investor header parse failed for %s", market)
-            return None
-
-        def _parse(tds: list, idx: int) -> float:
-            if idx >= len(tds):
-                return 0.0
-            raw = tds[idx].get_text(strip=True).replace(",", "")
-            raw = raw.replace("−", "-").replace("–", "-")
-            if not raw or raw == "-":
-                return 0.0
-            try:
-                return float(raw)
-            except ValueError:
-                return 0.0
-
-        target_short = bizdate[2:]
-        for row in table.select("tr")[1:]:
-            tds = row.select("td")
-            if not tds:
-                continue
-            row_date = tds[0].get_text(strip=True).replace(".", "")
-            if row_date != target_short:
-                continue
-            trade_date = (
-                date(int("20" + bizdate[2:4]), int(bizdate[4:6]), int(bizdate[6:8]))
-                if len(bizdate) == 8
-                else date.fromisoformat(bizdate)
-            )
+    출처가 KOSPI 시장 전체만 다뤄서 ``market`` 은 받기만 하고 쓰지 않는다
+    (council_macro 호출부 호환). 장중에 부르면 그날 줄은 장중 누적값이다."""
+    rows = await fetch_market_investor_breakdown(client, bizdate)
+    for r in rows:
+        if r.trade_date.strftime("%Y%m%d") == bizdate:
             return InvestorFlows(
-                foreign_net=_parse(tds, col_map.get("foreign", 0)),
-                institutional_net=_parse(tds, col_map.get("institutional", 0)),
-                retail_net=_parse(tds, col_map.get("retail", 0)),
-                trade_date=trade_date,
+                foreign_net=r.foreign_net,
+                institutional_net=r.institution_net,
+                retail_net=r.individual_net,
+                trade_date=r.trade_date,
             )
+    logger.warning("Naver investor: no row for date %s (%s)", bizdate, market)
+    return None
 
-        logger.warning("Naver investor: no row for date %s (%s)", bizdate, market)
+
+# 시장 전체 투자자 수급 — 2026-09-16 무렵 옛 `investorDealTrendDay` HTML 이 410 으로
+# 닫혀 새 웹 화면이 읽는 JSON 으로 옮겼다. 응답은 거래일마다 투자자 코드별 순매수
+# (원 단위 문자열)를 준다.
+_TREND_DAILY_PATH = "/domestic/market/trend/daily"
+_TREND_PAGE_SIZE = 20
+
+# 투자자 코드 → MarketInvestorBreakdown 필드. 2026-09-15 운영 DB 의 옛 화면 값과
+# 코드별로 대조해 정했다 (전부 억원 단위로 일치). 옛 화면이 합쳐 보이던 것은 여기서도
+# 합친다: 외국인 = 외국인 + 기타외국인, 투신(사모) = 투신 + 사모, 연기금등 = 연기금 +
+# 국가·지자체 (국가·지자체는 20 거래일 내내 0 이었다).
+_INVESTOR_CODE_FIELDS: dict[str, str] = {
+    "8000": "individual_net",  # 개인
+    "9000": "foreign_net",  # 외국인
+    "9001": "foreign_net",  # 기타외국인
+    "1000": "financial_inv_net",  # 금융투자
+    "2000": "insurance_net",  # 보험
+    "3000": "trust_net",  # 투신
+    "3100": "trust_net",  # 사모
+    "4000": "bank_net",  # 은행
+    "5000": "etc_finance_net",  # 기타금융
+    "6000": "pension_net",  # 연기금
+    "7000": "pension_net",  # 국가·지자체
+    "7100": "etc_corp_net",  # 기타법인
+}
+
+# 기관계 = 기관 하위 여섯 항목의 합. 새 응답에는 기관계 합계 줄이 따로 없다.
+_INSTITUTION_FIELDS = (
+    "financial_inv_net",
+    "insurance_net",
+    "trust_net",
+    "bank_net",
+    "etc_finance_net",
+    "pension_net",
+)
+
+_WON_PER_EOK = 100_000_000
+
+
+def _parse_trend_row(row: dict) -> MarketInvestorBreakdown | None:
+    """응답 한 거래일 줄을 억원 단위 분해로. 날짜가 이상하면 None."""
+    bizdate = str(row.get("bizdate") or "")
+    if len(bizdate) != 8 or not bizdate.isdigit():
         return None
-
-    except Exception as e:
-        logger.warning("Naver investor flows fetch failed (%s): %s", market, e)
-        return None
-
-
-# 네이버 investorDealTrendDay 컬럼명 → MarketInvestorBreakdown 필드. 헤더 텍스트에
-# 부분일치로 매핑한다(투신(사모)·기타금융기관·연기금등 표기 변형 흡수). 충돌 없음 검증됨.
-_INVESTOR_COL_KEYS: list[tuple[str, str]] = [
-    ("개인", "individual_net"),
-    ("외국인", "foreign_net"),
-    ("기관계", "institution_net"),
-    ("금융투자", "financial_inv_net"),
-    ("보험", "insurance_net"),
-    ("투신", "trust_net"),
-    ("은행", "bank_net"),
-    ("기타금융", "etc_finance_net"),
-    ("연기금", "pension_net"),
-    ("기타법인", "etc_corp_net"),
-]
-
-
-def _parse_net(raw: str) -> float:
-    raw = raw.strip().replace(",", "").replace("−", "-").replace("–", "-")
-    if not raw or raw == "-":
-        return 0.0
-    try:
-        return float(raw)
-    except ValueError:
-        return 0.0
+    won: dict[str, int] = {f: 0 for f in set(_INVESTOR_CODE_FIELDS.values())}
+    for amt in row.get("netAmounts") or []:
+        code = str(amt.get("investorGubun") or "")
+        value = parse_number(amt.get("diffValue"))
+        if value is None:
+            continue
+        field = _INVESTOR_CODE_FIELDS.get(code)
+        if field is None:
+            # 모르는 코드가 생기면 개인+외국인+기관+기타법인 = 0 항등식이 깨져 계약
+            # 검사가 잡는다. 여기서는 흔적만 남긴다.
+            if value != 0:
+                logger.warning("Naver investor: unknown code %s (%s)", code, bizdate)
+            continue
+        won[field] += int(value)
+    # 원 단위로 다 더한 뒤 억원으로 반올림 — 옛 화면도 억원 정수로 보여 줬다.
+    fields = {f: float(round(v / _WON_PER_EOK)) for f, v in won.items()}
+    fields["institution_net"] = float(
+        round(sum(won[f] for f in _INSTITUTION_FIELDS) / _WON_PER_EOK)
+    )
+    trade_date = date(int(bizdate[0:4]), int(bizdate[4:6]), int(bizdate[6:8]))
+    return MarketInvestorBreakdown(trade_date=trade_date, market="KOSPI", **fields)
 
 
 async def fetch_market_investor_breakdown(
     client: httpx.AsyncClient, bizdate: str
 ) -> list[MarketInvestorBreakdown]:
-    """KOSPI 시장전체 일별 투자자유형별 순매수(연기금 분리). 한 페이지가 최근 ~20거래일을
-    담으므로 행 전부를 반환한다(수집기가 일괄 upsert → 공백 self-heal). 단위는 네이버
-    원시값(억원 = 1e8 KRW), 부호=순매수. (구 docstring·migration 027 은 '백만원' 으로
-    잘못 적었었다 — 2026-06-26 종목별 frgn 과 100배 대조로 정정.)
+    """KOSPI 시장전체 일별 투자자유형별 순매수(연기금 분리). ``bizdate`` 부터 거슬러
+    최근 20 거래일을 최신순으로 돌려준다(수집기가 일괄 upsert → 공백 self-heal).
+    단위는 억원(1e8 KRW), 부호=순매수. 실패하면 빈 리스트.
 
-    이 페이지는 KOSPI 시장전체만 준다. sosession=02(코스닥)를 넣어도 같은 KOSPI 값을
-    돌려주므로(2026-06-24 실측) market 인자를 두지 않고 KOSPI 로 고정한다. 코스닥 수급이
-    필요해지면 sosession 이 아닌 별도 출처(키움 REST 등)로 받아야 한다."""
-    url = "https://finance.naver.com/sise/investorDealTrendDay.naver"
-    try:
-        resp = await client.get(
-            url,
-            headers=NAVER_HEADERS,
-            params={"bizdate": bizdate, "sosession": "01"},
-            timeout=10,
-        )
-        resp.encoding = "euc-kr"
-        soup = BeautifulSoup(resp.text, "html.parser")
-        table = soup.select_one("table.type_1")
-        if not table:
-            logger.warning("Naver investor breakdown: table not found")
-            return []
-
-        # 2단 헤더: row0 의 '기관'(colspan) 그룹을 row1 의 하위 컬럼으로 펼쳐 평탄화.
-        header_rows = [tr for tr in table.select("tr") if tr.select("th")][:2]
-        if len(header_rows) < 2:
-            logger.warning("Naver investor breakdown: header rows missing")
-            return []
-        row0 = [th.get_text(strip=True) for th in header_rows[0].select("th")]
-        row1 = [th.get_text(strip=True) for th in header_rows[1].select("th")]
-        flat: list[str] = []
-        for name in row0:
-            if name == "기관":  # colspan 그룹 헤더 → 하위 컬럼으로 치환
-                flat.extend(row1)
-            else:
-                flat.append(name)
-
-        # 평탄화한 컬럼명 → 데이터 td 인덱스 → 필드. 0번은 날짜.
-        idx_to_field: dict[int, str] = {}
-        for i, name in enumerate(flat):
-            for key, field in _INVESTOR_COL_KEYS:
-                if key in name:
-                    idx_to_field[i] = field
-                    break
-        if "pension_net" not in idx_to_field.values():
-            logger.warning("Naver investor breakdown: 연기금 컬럼 미발견")
-            return []
-
-        results: list[MarketInvestorBreakdown] = []
-        for row in table.select("tr"):
-            tds = row.select("td")
-            if len(tds) < len(flat):
-                continue
-            date_txt = tds[0].get_text(strip=True).replace(".", "")  # "260623"
-            if len(date_txt) != 6 or not date_txt.isdigit():
-                continue
-            trade_date = date(2000 + int(date_txt[0:2]), int(date_txt[2:4]), int(date_txt[4:6]))
-            fields = {field: 0.0 for _, field in _INVESTOR_COL_KEYS}
-            for i, field in idx_to_field.items():
-                fields[field] = _parse_net(tds[i].get_text(strip=True))
-            results.append(MarketInvestorBreakdown(trade_date=trade_date, market="KOSPI", **fields))
-        if not results:
-            logger.warning("Naver investor breakdown: no data rows (%s)", bizdate)
-        return results
-    except Exception as e:
-        logger.warning("Naver investor breakdown fetch failed: %s", e)
+    코스닥 수급이 필요해지면 ``marketType`` 만 바꿔 보면 되지만, 지금은 KOSPI 만
+    쓰므로 고정한다."""
+    data = await get_json(
+        client,
+        _TREND_DAILY_PATH,
+        params={
+            "tradeType": "KRX",
+            "marketType": "KOSPI",
+            "bizdate": bizdate,
+            "startIdx": "0",
+            "pageSize": str(_TREND_PAGE_SIZE),
+        },
+        base=NAVER_WEB_API_BASE,
+    )
+    content = data.get("content") if isinstance(data, dict) else None
+    if not content:
+        logger.warning("Naver investor breakdown: no data rows (%s)", bizdate)
         return []
+    results = [r for r in (_parse_trend_row(row) for row in content) if r is not None]
+    if not results:
+        logger.warning("Naver investor breakdown: no parsable rows (%s)", bizdate)
+    return results
 
 
 _MARKET_VALUE_PAGE_SIZE = 100

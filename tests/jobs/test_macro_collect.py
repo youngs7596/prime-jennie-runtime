@@ -22,7 +22,7 @@ from prime_jennie_runtime.jobs.council_macro import (
 )
 
 _INDEX_URL_RE = r"https://m\.stock\.naver\.com/api/index/.*"
-_INVESTOR_URL_RE = r"https://finance\.naver\.com/sise/investorDealTrendDay\.naver.*"
+_INVESTOR_URL_RE = r"https://stock\.naver\.com/api/domestic/market/trend/daily.*"
 _YAHOO_URL_RE = r"https://query1\.finance\.yahoo\.com/.*"
 
 
@@ -60,7 +60,7 @@ async def test_macro_collect_global_stores_snapshot(fake_redis):
                 ),
             ]
         )
-        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, text="<html/>")
+        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, json={"content": []})
         mock.get(url__regex=_YAHOO_URL_RE).respond(200, json=_yahoo_payload([18.0, 18.5, 19.2]))
         async with httpx.AsyncClient() as client:
             snapshot = await macro_collect_global(fake_redis, client)
@@ -104,7 +104,7 @@ async def test_macro_collect_global_stores_asia_fx_commodities(fake_redis):
                 ),
             ]
         )
-        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, text="<html/>")
+        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, json={"content": []})
         # Yahoo 는 5d 창 [prev, latest] 형태 → _fetch_us_latest 가 prev/latest 계산.
         # 같은 payload 를 모든 Yahoo ticker 에 적용 (VIX + SOX + NVDA + N225/HSI/JPY/CL/GC).
         mock.get(url__regex=_YAHOO_URL_RE).respond(200, json=_yahoo_payload([100.0, 102.0, 104.0]))
@@ -156,7 +156,7 @@ async def test_macro_collect_global_preserves_existing_fields(fake_redis):
                 ),
             ]
         )
-        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, text="<html/>")
+        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, json={"content": []})
         mock.get(url__regex=_YAHOO_URL_RE).respond(200, json=_yahoo_payload([]))
         async with httpx.AsyncClient() as client:
             snapshot = await macro_collect_global(fake_redis, client)

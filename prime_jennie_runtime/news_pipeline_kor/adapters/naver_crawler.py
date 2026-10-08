@@ -4,11 +4,8 @@ v2 ``prime_jennie.infra.crawlers.naver.crawl_stock_news`` (385줄) 의 핵심 �
 ``httpx.AsyncClient`` 로 포팅. v3 ``NewsCrawler`` Protocol 구현체.
 
 유지한 것 (v2 와 동일):
-- ``Referer`` 헤더 (네이버 금융이 요구) + 표준 UA
-- ``euc-kr`` 인코딩
-- ``table.type5 tr`` 구조, ``tbody`` 미사용
+- ``Referer`` 헤더 + 표준 UA
 - 노이즈 제목 필터링 (시황/특징주 등)
-- 날짜 파싱 `%Y.%m.%d %H:%M`
 
 바꾼 것 (v3):
 - sync httpx → ``httpx.AsyncClient`` (주입 가능)
@@ -16,16 +13,26 @@ v2 ``prime_jennie.infra.crawlers.naver.crawl_stock_news`` (385줄) 의 핵심 �
 - NewsArticle 모델은 v3 ``news_pipeline_kor.models.NewsArticle``
 - article_id 는 ``article_fingerprint(article_url)`` (dedup 호환)
 - in-memory ``_seen_hashes`` 제거 — dedup 책임은 파이프라인
+
+2026-10 출처 교체: 네이버 금융 이전으로 옛 ``finance.naver.com/item/news_news.naver``
+HTML 목록이 2026-09-17 저녁부터 410 을 돌려줘 3 주간 뉴스가 0 건이었다. 새 화면이
+읽는 JSON(``m.stock.naver.com/api/news/stock/{code}``)으로 옮겼다. 기사 주소는 이제
+n.news 원문 주소이고, 상세 본문은 그 주소에서 바로 받는다.
+
+주의: 새 목록의 제목은 40 자 남짓에서 "..." 로 잘려 온다 (전체 제목 필드도 같다).
+HTML 기호(``&quot;``)도 섞여 와서 풀어 둔다.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from urllib.parse import parse_qs, urlparse
+from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -66,12 +73,15 @@ NAVER_NOISE_KEYWORDS: tuple[str, ...] = (
     "이 시각 증권",
 )
 
-_DATE_FORMAT = "%Y.%m.%d %H:%M"
+# 종목 뉴스 목록 JSON. 쪽마다 기사 묶음(같은 사건 기사들)이 최신순으로 온다.
+NAVER_NEWS_API = "https://m.stock.naver.com/api/news/stock"
+NAVER_REFERER = "https://stock.naver.com/"
+# 목록의 시각 문자열("202610081252")은 KST 로컬 시각이다.
+_DATE_FORMAT = "%Y%m%d%H%M"
 
-# 기사 상세 본문 — 네이버 금융 ``news_read.naver`` 는 ``n.news.naver.com`` 으로 JS
-# 리다이렉트만 하므로, URL query 의 article_id/office_id 로 n.news 기사 URL 을 직접
-# 구성해 1 요청으로 본문을 가져온다.
-_NEWS_READ_PATH = "news_read.naver"
+# 기사 상세 본문은 n.news 원문 페이지에서 받는다. 목록이 원문 주소를 바로 주므로
+# 그 주소를 기사 주소로 저장하고 본문도 거기서 가져온다.
+N_NEWS_HOST = "n.news.naver.com"
 N_NEWS_ARTICLE_BASE = "https://n.news.naver.com/mnews/article"
 # n.news 기사 본문 컨테이너 (네이버 뉴스 표준 마크업).
 _BODY_SELECTOR = "#dic_area"
@@ -87,6 +97,7 @@ class NaverNewsCrawler:
     """
 
     max_pages: int = 2
+    page_size: int = 10
     request_delay_s: float = 0.3
     timeout_s: float = 10.0
     noise_keywords: tuple[str, ...] = field(default_factory=lambda: NAVER_NOISE_KEYWORDS)
@@ -113,14 +124,12 @@ class NaverNewsCrawler:
 
     async def _crawl_ticker(self, client: httpx.AsyncClient, ticker: str) -> list[NewsArticle]:
         articles: list[NewsArticle] = []
-        headers = {
-            "User-Agent": NAVER_UA,
-            "Referer": f"https://finance.naver.com/item/news.naver?code={ticker}",
-        }
+        headers = {"User-Agent": NAVER_UA, "Referer": NAVER_REFERER}
+        url = f"{NAVER_NEWS_API}/{ticker}"
         for page in range(1, self.max_pages + 1):
-            url = f"https://finance.naver.com/item/news_news.naver?code={ticker}&page={page}"
+            params = {"pageSize": str(self.page_size), "page": str(page)}
             try:
-                resp = await client.get(url, headers=headers)
+                resp = await client.get(url, params=params, headers=headers)
             except httpx.HTTPError as e:
                 logger.warning("naver crawl %s p%d failed: %s", ticker, page, e)
                 break
@@ -129,9 +138,17 @@ class NaverNewsCrawler:
                 logger.warning("naver crawl %s p%d status=%d", ticker, page, resp.status_code)
                 break
 
-            parsed = _parse_news_page(resp.content, ticker)
+            try:
+                data = resp.json()
+            except ValueError as e:
+                logger.warning("naver crawl %s p%d bad json: %s", ticker, page, e)
+                break
+
+            parsed = _parse_news_json(data, ticker)
             # 노이즈 제목 컷
             articles.extend(a for a in parsed if not self._is_noise(a.title))
+            if not parsed:
+                break
 
             if page < self.max_pages:
                 await asyncio.sleep(self.request_delay_s)
@@ -143,7 +160,7 @@ class NaverNewsCrawler:
     async def fetch_body(self, source_url: str) -> str:
         """기사 상세 본문을 best-effort 로 반환. 실패 시 빈 문자열.
 
-        ``news_read.naver`` 가 아니거나 (외부 URL 등) 필수 query 가 없으면 요청 없이
+        n.news 원문 주소가 아니면 (옛 ``news_read.naver`` 주소·외부 URL 등) 요청 없이
         빈 문자열. HTTP 오류·비200·파싱 실패도 모두 빈 본문 폴백 — 본문을 못 가져와도
         뉴스 파이프라인은 헤드라인-only 로 정상 동작한다.
         """
@@ -176,86 +193,66 @@ class NaverNewsCrawler:
 # ---------------------------------------------------------------------
 
 
-def _parse_news_page(body: bytes, ticker: str) -> list[NewsArticle]:
-    """네이버 금융 종목 뉴스 페이지 HTML 을 NewsArticle 리스트로.
+def _parse_news_json(data: Any, ticker: str) -> list[NewsArticle]:
+    """종목 뉴스 목록 JSON 을 NewsArticle 리스트로.
 
-    encoding 은 BeautifulSoup(UnicodeDammit) 에 위임 — 실 네이버 응답은 euc-kr,
-    테스트 fixture 는 utf-8 이어도 자동 감지.
+    응답은 기사 묶음의 리스트이고 묶음마다 ``items`` 에 기사가 들어 있다. 구조가
+    다르거나 기사 주소를 만들 수 없는 항목은 건너뛴다.
     """
-    soup = BeautifulSoup(body, "html.parser", from_encoding="euc-kr")
-    # euc-kr 로 시도했는데 깨진 흔적(대체 문자)이 너무 많으면 utf-8 로 재파싱.
-    if _looks_garbled(soup.get_text(" ", strip=True)):
-        soup = BeautifulSoup(body, "html.parser", from_encoding="utf-8")
-
-    table = soup.select_one("table.type5")
-    if table is None:
+    if not isinstance(data, list):
         return []
 
     out: list[NewsArticle] = []
-    for row in table.select("tr"):
-        title_td = row.select_one("td.title")
-        if title_td is None:
-            continue
-        link = title_td.select_one("a")
-        if link is None:
-            continue
-        headline = link.get_text(strip=True)
-        if not headline:
-            continue
-
-        href = link.get("href") or ""
-        article_url = _absolute_url(href)
-
-        press_td = row.select_one("td.info")
-        press = press_td.get_text(strip=True) if press_td is not None else ""
-
-        date_td = row.select_one("td.date")
-        date_str = date_td.get_text(strip=True) if date_td is not None else ""
-        published_at = _parse_published_at(date_str)
-
-        out.append(
-            NewsArticle(
-                article_id=article_fingerprint(article_url or headline),
-                ticker=ticker,
-                title=_collapse_whitespace(headline),
-                body="",  # 상세 본문은 별도 요청 필요 — Phase 2 scope 밖
-                published_at=published_at,
-                source_url=article_url
-                or f"https://finance.naver.com/item/news.naver?code={ticker}",
-                source_name=press or "NAVER",
+    for cluster in data:
+        items = cluster.get("items") if isinstance(cluster, dict) else None
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            headline = _collapse_whitespace(
+                html.unescape(str(item.get("titleFull") or item.get("title") or ""))
             )
-        )
+            if not headline:
+                continue
+            article_url = _article_url(item)
+            if not article_url:
+                continue
+            press = str(item.get("officeName") or "").strip()
+            out.append(
+                NewsArticle(
+                    article_id=article_fingerprint(article_url),
+                    ticker=ticker,
+                    title=headline,
+                    body="",  # 상세 본문은 파이프라인이 fetch_body 로 따로 채운다
+                    published_at=_parse_published_at(str(item.get("datetime") or "")),
+                    source_url=article_url,
+                    source_name=press or "NAVER",
+                )
+            )
     return out
 
 
-def _absolute_url(href: str) -> str:
-    if not href:
-        return ""
-    if href.startswith("http"):
-        return href
-    if href.startswith("/"):
-        return f"https://finance.naver.com{href}"
-    return f"https://finance.naver.com/{href}"
+def _article_url(item: dict) -> str:
+    """기사 원문 주소. ``mobileNewsUrl`` 이 없으면 언론사·기사 번호로 만든다."""
+    url = str(item.get("mobileNewsUrl") or "").strip()
+    if url.startswith("http"):
+        return url
+    office_id = str(item.get("officeId") or "").strip()
+    article_id = str(item.get("articleId") or "").strip()
+    if office_id and article_id:
+        return f"{N_NEWS_ARTICLE_BASE}/{office_id}/{article_id}"
+    return ""
 
 
 def _redirect_target(source_url: str) -> str | None:
-    """``news_read.naver?article_id=A&office_id=O`` → n.news.naver.com 기사 URL.
-
-    news_read.naver 가 아니거나 (외부 기사 URL·목록 fallback URL 등) article_id/
-    office_id 가 없으면 None — 호출부가 본문 fetch 를 스킵한다.
-    """
+    """본문을 받을 n.news 기사 주소. n.news 원문 주소가 아니면 None — 호출부가
+    본문 fetch 를 건너뛴다."""
     try:
         parsed = urlparse(source_url)
     except ValueError:
         return None
-    if _NEWS_READ_PATH not in parsed.path:
+    if parsed.netloc != N_NEWS_HOST or not parsed.path.startswith("/mnews/article/"):
         return None
-    qs = parse_qs(parsed.query)
-    article_id = (qs.get("article_id") or [""])[0].strip()
-    office_id = (qs.get("office_id") or [""])[0].strip()
-    if not article_id or not office_id:
-        return None
-    return f"{N_NEWS_ARTICLE_BASE}/{office_id}/{article_id}"
+    return source_url
 
 
 def _parse_article_body(body: bytes) -> str:
@@ -275,7 +272,7 @@ def _parse_article_body(body: bytes) -> str:
 
 
 def _parse_published_at(date_str: str) -> datetime:
-    """네이버 금융 뉴스의 날짜 문자열(`%Y.%m.%d %H:%M`)은 **KST 로컬 시각**이다.
+    """네이버 뉴스 목록의 시각 문자열(`%Y%m%d%H%M`)은 **KST 로컬 시각**이다.
 
     TIMESTAMPTZ 컬럼은 UTC 로 정규화 저장되므로 KST 로 tz 태깅 후 UTC 로 변환해
     반환. 2026-04-21 이전에는 ``dt.replace(tzinfo=UTC)`` 로 잘못 태깅해 9 시간
@@ -295,14 +292,6 @@ _WS_RE = re.compile(r"\s+")
 
 def _collapse_whitespace(s: str) -> str:
     return _WS_RE.sub(" ", s).strip()
-
-
-def _looks_garbled(text: str) -> bool:
-    """replacement char(U+FFFD) 비율이 5%+ 면 인코딩 miss 로 간주."""
-    if not text:
-        return False
-    bad = text.count("\ufffd")
-    return bad > 0 and bad / max(len(text), 1) > 0.05
 
 
 __all__ = ["NAVER_NOISE_KEYWORDS", "NaverNewsCrawler"]

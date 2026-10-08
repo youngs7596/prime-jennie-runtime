@@ -213,11 +213,9 @@ async def macro_collect_global(
         raise MacroCollectError("No trading data available from Naver")
 
     td_str = trading_date.strftime("%Y%m%d")
-    # 네이버 investorDealTrendDay 는 sosession 과 무관하게 KOSPI 시장전체만 돌려준다
-    # (2026-06-24 실측, naver_market.fetch_market_investor_breakdown docstring 참조).
-    # 코스닥을 따로 받으면 같은 KOSPI 값이 kosdaq_foreign_net 으로 중복 적재될 뿐이고
-    # (그 필드 소비처도 없음) 헛 호출이라, KOSPI 한 번만 받는다. 코스닥 수급이 필요하면
-    # sosession 이 아닌 별도 출처(키움 REST 등)로 받아야 한다.
+    # 시장 전체 수급은 KOSPI 한 번만 받는다. 옛 출처(investorDealTrendDay)는 코스닥을
+    # 따로 줄 수 없었고 kosdaq_foreign_net 은 소비처도 없다. 2026-10 에 옮긴 새 출처는
+    # 코스닥도 줄 수 있으니(marketType) 필요해지면 그때 늘린다.
     flows = await fetch_investor_flows(http, "kospi", td_str)
     if flows is not None:
         snapshot["kospi_foreign_net"] = flows.foreign_net

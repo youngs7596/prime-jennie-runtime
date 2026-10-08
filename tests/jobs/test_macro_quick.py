@@ -18,7 +18,7 @@ from prime_jennie_runtime.jobs.council_macro import (
 )
 
 _INDEX_URL_RE = r"https://m\.stock\.naver\.com/api/index/.*"
-_INVESTOR_URL_RE = r"https://finance\.naver\.com/sise/investorDealTrendDay\.naver.*"
+_INVESTOR_URL_RE = r"https://stock\.naver\.com/api/domestic/market/trend/daily.*"
 _YAHOO_URL_RE = r"https://query1\.finance\.yahoo\.com/.*"
 
 
@@ -56,7 +56,7 @@ async def test_macro_quick_delegates_to_collect_global(fake_redis):
                 ),
             ]
         )
-        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, text="<html/>")
+        mock.get(url__regex=_INVESTOR_URL_RE).respond(200, json={"content": []})
         mock.get(url__regex=_YAHOO_URL_RE).respond(200, json=_yahoo_payload([17.0, 17.5, 18.0]))
         async with httpx.AsyncClient() as client:
             snapshot = await macro_quick(fake_redis, client)

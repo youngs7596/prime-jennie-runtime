@@ -19,13 +19,14 @@ from prime_jennie_runtime.jobs.maintenance import (
     contract_smoke_test,
 )
 
+from .naver_trend_fixture import INVESTOR_TREND_URL_RE, trend_json, trend_row
+
 _MAIN_URL_RE = r"https://m\.stock\.naver\.com/api/stock/\w+/finance/quarter"
 _SECTOR_LIST_URL = r"https://m\.stock\.naver\.com/api/stocks/industry\?.*"
 _SECTOR_DETAIL_URL = r"https://m\.stock\.naver\.com/api/stocks/industry/\d+.*"
 _FNGUIDE_URL = r"https://wcomp\.fnguide\.com/CompanyInfo/Snapshot.*"
 _FNGUIDE_ROE_URL = r"https://wcomp\.fnguide\.com/CompanyInfo/getSnpSectorChart.*"
 _NAVER_CONSENSUS_URL = r"https://navercomp\.wisereport\.co\.kr/.*"
-_INVESTOR_URL = r"https://finance\.naver\.com/sise/investorDealTrendDay\.naver.*"
 
 # 분기 재무표 — 최신 실적 2024.09: PER=12.5, PBR=1.2, ROE=8.0. 마지막 2024.12 는 추정치라
 # fundamentals 는 건너뛰고, ROE 단독 크롤은 그 추정값(9.0)까지 본다 — 둘이 다른 값을 봐야
@@ -124,43 +125,9 @@ def _sector_detail_json(include_sentinel: bool, extra_count: int) -> dict:
     }
 
 
-# 실제 investorDealTrendDay 구조: 2단 헤더(기관 colspan=6 그룹) + 기타법인 컬럼.
-# 기본값은 2026-06-23 실측치 — 개인+외국인+기관계+기타법인 ≈ 0 이고 기관 하위 여섯
-# 항목 합이 기관계와 같다.
-def _investor_html(
-    bizdate: str,
-    *,
-    individual: str = "85,910",
-    foreign: str = "-42,047",
-    institution: str = "-44,760",
-    financial_inv: str = "-20,908",
-    insurance: str = "-1,018",
-    trust: str = "-19,662",
-    bank: str = "-165",
-    etc_finance: str = "-69",
-    pension: str = "-2,937",
-    etc_corp: str = "898",
-) -> str:
-    short = bizdate[2:4] + "." + bizdate[4:6] + "." + bizdate[6:8]
-    return f"""
-    <html><body>
-    <table class="type_1">
-      <tr>
-        <th rowspan="2">날짜</th><th rowspan="2">개인</th><th rowspan="2">외국인</th>
-        <th rowspan="2">기관계</th><th colspan="6">기관</th><th rowspan="2">기타법인</th>
-      </tr>
-      <tr>
-        <th>금융투자</th><th>보험</th><th>투신(사모)</th><th>은행</th>
-        <th>기타금융기관</th><th>연기금등</th>
-      </tr>
-      <tr>
-        <td>{short}</td><td>{individual}</td><td>{foreign}</td><td>{institution}</td>
-        <td>{financial_inv}</td><td>{insurance}</td><td>{trust}</td><td>{bank}</td>
-        <td>{etc_finance}</td><td>{pension}</td><td>{etc_corp}</td>
-      </tr>
-    </table>
-    </body></html>
-    """
+def _investor_json(bizdate: str, **eok: float) -> dict:
+    """시장 전체 수급 응답. 기본값은 2026-06-23 실측치 — 개인+외국인+기관+기타법인 ≈ 0."""
+    return trend_json(trend_row(bizdate, **eok))
 
 
 @dataclass
@@ -177,7 +144,7 @@ class _FakeNewsCrawler:
         return [a for a in self.articles if a.ticker in universe]
 
 
-def _mock_all(mock, investor_html: str) -> None:
+def _mock_all(mock, investor_json: dict) -> None:
     """수급 페이지만 갈아 끼우고 나머지 다섯 크롤러는 정상 응답으로 고정."""
     mock.get(url__regex=_MAIN_URL_RE).respond(200, json=_MAIN_JSON)
     # 업종 상세를 목록보다 먼저 걸어야 경로가 안 겹친다. 두 업종 모두 sentinel + 550개라
@@ -186,14 +153,14 @@ def _mock_all(mock, investor_html: str) -> None:
     mock.get(url__regex=_SECTOR_LIST_URL).respond(200, json=_sector_list_json())
     mock.get(url__regex=_FNGUIDE_URL).respond(200, text=_FNGUIDE_HTML)
     mock.get(url__regex=_FNGUIDE_ROE_URL).respond(200, json=_FNGUIDE_ROE_JSON)
-    mock.get(url__regex=_INVESTOR_URL).respond(200, content=investor_html.encode("euc-kr"))
+    mock.get(url__regex=INVESTOR_TREND_URL_RE).respond(200, json=investor_json)
 
 
 @pytest.mark.asyncio
 async def test_contract_smoke_passes_when_all_contracts_intact():
     today_bizdate = date.today().strftime("%Y%m%d")
     with respx.mock(assert_all_called=False) as mock:
-        _mock_all(mock, _investor_html(today_bizdate))
+        _mock_all(mock, _investor_json(today_bizdate))
         async with httpx.AsyncClient() as client:
             news = _FakeNewsCrawler(
                 articles=[_FakeArticle(title="반도체 특허", ticker=CONTRACT_SMOKE_SENTINEL)]
@@ -205,7 +172,7 @@ async def test_contract_smoke_passes_when_all_contracts_intact():
 async def test_contract_smoke_raises_when_news_empty():
     today_bizdate = date.today().strftime("%Y%m%d")
     with respx.mock(assert_all_called=False) as mock:
-        _mock_all(mock, _investor_html(today_bizdate))
+        _mock_all(mock, _investor_json(today_bizdate))
         async with httpx.AsyncClient() as client:
             news = _FakeNewsCrawler(articles=[])
             with pytest.raises(ContractSmokeError, match="news: no articles"):
@@ -220,21 +187,20 @@ async def test_contract_smoke_passes_when_etc_corp_is_huge():
     기타법인 1.09조가 빠지면 잔차가 −1.09조가 되어 멀쩡한 데이터가 실패로 신고된다.
     """
     today_bizdate = date.today().strftime("%Y%m%d")
-    html = _investor_html(
+    investor = _investor_json(
         today_bizdate,
-        individual="-11,652",
-        foreign="-1,760",
-        institution="2,481",
-        financial_inv="1,119",
-        insurance="-109",
-        trust="840",
-        bank="-54",
-        etc_finance="221",
-        pension="464",
-        etc_corp="10,931",
+        individual=-11652,
+        foreign=-1760,
+        financial_inv=1119,
+        insurance=-109,
+        trust=840,
+        bank=-54,
+        etc_finance=221,
+        pension=464,
+        etc_corp=10931,
     )
     with respx.mock(assert_all_called=False) as mock:
-        _mock_all(mock, html)
+        _mock_all(mock, investor)
         async with httpx.AsyncClient() as client:
             news = _FakeNewsCrawler(
                 articles=[_FakeArticle(title="반도체 특허", ticker=CONTRACT_SMOKE_SENTINEL)]
@@ -246,28 +212,12 @@ async def test_contract_smoke_passes_when_etc_corp_is_huge():
 async def test_contract_smoke_raises_when_buy_sell_identity_breaks():
     """매수·매도 합이 안 맞으면 실패 — 컬럼 매핑이 밀리는 사고를 잡는 검사."""
     today_bizdate = date.today().strftime("%Y%m%d")
-    html = _investor_html(today_bizdate, etc_corp="0")
+    investor = _investor_json(today_bizdate, etc_corp=0)
     with respx.mock(assert_all_called=False) as mock:
-        _mock_all(mock, html)
+        _mock_all(mock, investor)
         async with httpx.AsyncClient() as client:
             news = _FakeNewsCrawler(
                 articles=[_FakeArticle(title="반도체 특허", ticker=CONTRACT_SMOKE_SENTINEL)]
             )
             with pytest.raises(ContractSmokeError, match="매수·매도 합이 안 맞음"):
-                await contract_smoke_test(client, news)
-
-
-@pytest.mark.asyncio
-async def test_contract_smoke_raises_when_institution_parts_mismatch():
-    """기관 하위 항목 합이 기관계와 다르면 실패."""
-    today_bizdate = date.today().strftime("%Y%m%d")
-    # 연기금만 0 으로 — 기관계는 그대로라 바깥 항등식은 유지되고 하위 합만 어긋난다.
-    html = _investor_html(today_bizdate, pension="0")
-    with respx.mock(assert_all_called=False) as mock:
-        _mock_all(mock, html)
-        async with httpx.AsyncClient() as client:
-            news = _FakeNewsCrawler(
-                articles=[_FakeArticle(title="반도체 특허", ticker=CONTRACT_SMOKE_SENTINEL)]
-            )
-            with pytest.raises(ContractSmokeError, match="기관 하위 합이 기관계와 다름"):
                 await contract_smoke_test(client, news)

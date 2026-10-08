@@ -8,6 +8,10 @@
 새 화면이 실제로 읽는 JSON API 는 `m.stock.naver.com/api` 에 있고 로그인·토큰이
 필요 없다. HTML 셀렉터 대신 이쪽을 읽는다. 주소가 또 바뀔 때 고칠 곳을 한 군데로
 모으려고 base URL 과 헤더를 여기에 둔다.
+
+시장 전체 투자자 수급은 모바일 API 에 없고 새 웹 화면(`stock.naver.com/api`)에만
+있다 (2026-09-16 무렵 옛 `investorDealTrendDay` 가 410 으로 닫힘). 그래서 웹 쪽
+base URL 도 여기에 같이 둔다.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 NAVER_API_BASE = "https://m.stock.naver.com/api"
+NAVER_WEB_API_BASE = "https://stock.naver.com/api"
 
 NAVER_HEADERS = {
     "User-Agent": (
@@ -37,13 +42,15 @@ async def get_json(
     *,
     params: dict[str, Any] | None = None,
     timeout: float = 10.0,
+    base: str = NAVER_API_BASE,
 ) -> Any | None:
     """`m.stock.naver.com/api` 의 한 경로를 읽어 파싱된 JSON 을 돌려준다.
+    웹 API 를 읽을 때는 ``base=NAVER_WEB_API_BASE``.
 
     실패(네트워크·비 200·JSON 아님)면 None. 옛 HTML 크롤러가 실패를 None 으로
     돌려주던 규약을 그대로 유지해 호출측 skip 카운트 처리가 안 바뀌게 한다.
     """
-    url = f"{NAVER_API_BASE}{path}"
+    url = f"{base}{path}"
     try:
         resp = await client.get(url, params=params, headers=NAVER_HEADERS, timeout=timeout)
         if resp.status_code != 200:
@@ -75,4 +82,10 @@ def parse_number(raw: Any) -> float | None:
         return None
 
 
-__all__ = ["NAVER_API_BASE", "NAVER_HEADERS", "get_json", "parse_number"]
+__all__ = [
+    "NAVER_API_BASE",
+    "NAVER_HEADERS",
+    "NAVER_WEB_API_BASE",
+    "get_json",
+    "parse_number",
+]

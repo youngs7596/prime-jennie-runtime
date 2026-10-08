@@ -185,9 +185,10 @@ async def contract_smoke_test(
         failed.append(f"fnguide_consensus: exception — {e}")
 
     try:
-        # 시장전체 수급은 두 항등식으로 검증한다. 매수와 매도는 짝이 맞아야 하므로
-        # 개인+외국인+기관계+기타법인 = 0 이고, 기관 하위 여섯 항목의 합은 기관계와
-        # 같아야 한다. 둘 다 참이면 컬럼 매핑이 밀리지 않았다는 뜻이다.
+        # 시장전체 수급은 매수·매도 항등식으로 검증한다. 매수와 매도는 짝이 맞아야
+        # 하므로 개인+외국인+기관계+기타법인 = 0 이다. 투자자 코드 대응이 틀렸거나
+        # 모르는 코드가 새로 생기면 이 합이 0 에서 벗어난다. (기관계는 2026-10 출처
+        # 교체 뒤 하위 항목 합으로 만들어서 "하위 합 = 기관계" 검사는 뜻이 없어 뺐다.)
         latest = None
         for d in range(7):
             bizdate = (date.today() - timedelta(days=d)).strftime("%Y%m%d")
@@ -204,26 +205,12 @@ async def contract_smoke_test(
                 + latest.institution_net
                 + latest.etc_corp_net
             )
-            inst_parts = (
-                latest.financial_inv_net
-                + latest.insurance_net
-                + latest.trust_net
-                + latest.bank_net
-                + latest.etc_finance_net
-                + latest.pension_net
-            )
-            inst_gap = inst_parts - latest.institution_net
             if abs(residual) > _INVESTOR_IDENTITY_TOLERANCE_EOK:
                 failed.append(
                     f"investor_flows: 매수·매도 합이 안 맞음 ({latest.trade_date}, "
                     f"individual={latest.individual_net}, foreign={latest.foreign_net}, "
                     f"institution={latest.institution_net}, "
                     f"etc_corp={latest.etc_corp_net}, residual={residual})"
-                )
-            elif abs(inst_gap) > _INVESTOR_IDENTITY_TOLERANCE_EOK:
-                failed.append(
-                    f"investor_flows: 기관 하위 합이 기관계와 다름 ({latest.trade_date}, "
-                    f"parts={inst_parts}, institution={latest.institution_net}, gap={inst_gap})"
                 )
             else:
                 passed.append(

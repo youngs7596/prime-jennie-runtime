@@ -689,3 +689,46 @@ async def test_quotation_calls_not_spaced(kis_config, monkeypatch):
 
     # 원장 간격(5.0s) 대기는 없어야 한다.
     assert all(abs(s - 5.0) > 1e-9 for s in sleeps), sleeps
+
+
+_MINUTE_PATH = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+_MINUTE_ROW = {
+    "stck_bsop_date": "20261008",
+    "stck_cntg_hour": "104500",
+    "stck_oprc": "100",
+    "stck_hgpr": "101",
+    "stck_lwpr": "99",
+    "stck_prpr": "100",
+    "cntg_vol": "10",
+}
+
+
+async def test_minute_prices_end_time_passes_through(kis_config):
+    """장애로 빠진 장중 구간을 메울 때 끝 시각을 지정한다 (2026-10-08)."""
+    with respx.mock(base_url=kis_config.base_url, assert_all_called=True) as mock:
+        _token_route(mock, kis_config.base_url)
+        route = mock.get(_MINUTE_PATH).mock(
+            return_value=httpx.Response(200, json={"rt_cd": "0", "output2": [_MINUTE_ROW]})
+        )
+        api = KISApi(kis_config)
+        try:
+            rows = await api.get_minute_prices("005930", "105500")
+        finally:
+            await api.close()
+    assert route.calls[0].request.url.params["FID_INPUT_HOUR_1"] == "105500"
+    assert rows[0].price_datetime.strftime("%Y%m%d%H%M") == "202610081045"
+
+
+async def test_minute_prices_default_uses_now(kis_config):
+    with respx.mock(base_url=kis_config.base_url, assert_all_called=True) as mock:
+        _token_route(mock, kis_config.base_url)
+        route = mock.get(_MINUTE_PATH).mock(
+            return_value=httpx.Response(200, json={"rt_cd": "0", "output2": []})
+        )
+        api = KISApi(kis_config)
+        try:
+            await api.get_minute_prices("005930")
+        finally:
+            await api.close()
+    hour = route.calls[0].request.url.params["FID_INPUT_HOUR_1"]
+    assert len(hour) == 6 and hour.isdigit()

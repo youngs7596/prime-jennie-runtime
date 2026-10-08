@@ -129,6 +129,16 @@ async def test_minute_happy_path_writes_cache():
 
 
 @pytest.mark.asyncio
+async def test_minute_end_time_passes_to_kis():
+    repo = InMemoryPriceRepo()
+    api = _kis_stub(minute=[_m(close=101)])
+    service = FallbackPriceService(api, _closed_circuit(), repo, observer=CollectingObserver())
+
+    await service.get_minute_prices("005930", "105500")
+    api.get_minute_prices.assert_awaited_once_with("005930", "105500")
+
+
+@pytest.mark.asyncio
 async def test_minute_kis_error_falls_back():
     repo = InMemoryPriceRepo()
     await repo.upsert_minute([_m(close=99)])

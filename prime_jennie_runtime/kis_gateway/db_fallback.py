@@ -57,9 +57,11 @@ class FallbackPriceService:
             label="daily",
         )
 
-    async def get_minute_prices(self, stock_code: str) -> list[MinutePrice]:
+    async def get_minute_prices(
+        self, stock_code: str, end_time: str | None = None
+    ) -> list[MinutePrice]:
         async def _call() -> list[MinutePrice]:
-            return await self._circuit.call(self._api.get_minute_prices, stock_code)
+            return await self._circuit.call(self._api.get_minute_prices, stock_code, end_time)
 
         return await self._with_fallback(
             stock_code=stock_code,

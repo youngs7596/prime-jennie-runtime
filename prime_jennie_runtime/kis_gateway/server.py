@@ -381,8 +381,10 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901 — 엔드포인트 �
         await gw.market_limiter.acquire()
         try:
             if gw.fallback is not None:
-                return await gw.fallback.get_minute_prices(body.stock_code)
-            return await gw.circuit_breaker.call(gw.kis_api.get_minute_prices, body.stock_code)
+                return await gw.fallback.get_minute_prices(body.stock_code, body.end_time)
+            return await gw.circuit_breaker.call(
+                gw.kis_api.get_minute_prices, body.stock_code, body.end_time
+            )
         except CircuitBreakerError as err:
             raise HTTPException(503, "Circuit breaker open") from err
         except KISApiError as e:

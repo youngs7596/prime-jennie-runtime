@@ -419,10 +419,15 @@ class KISApi:
 
         return prices
 
-    async def get_minute_prices(self, stock_code: str) -> list[MinutePrice]:
-        """분봉 조회 (FHKST03010200)."""
+    async def get_minute_prices(
+        self, stock_code: str, end_time: str | None = None
+    ) -> list[MinutePrice]:
+        """분봉 조회 (FHKST03010200). 오늘 ``end_time``(HHMMSS) 까지 거꾸로 30 개.
+
+        ``end_time`` 을 비우면 지금 시각. KIS 는 당일 분봉만 이 방식으로 준다.
+        """
         now = datetime.now()
-        time_str = now.strftime("%H%M%S")
+        time_str = end_time or now.strftime("%H%M%S")
 
         data = await self._request(
             "GET",

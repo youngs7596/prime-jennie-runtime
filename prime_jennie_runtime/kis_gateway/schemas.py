@@ -187,6 +187,9 @@ class DailyPricesRequest(BaseModel):
 
 class MinutePricesRequest(BaseModel):
     stock_code: str = Field(pattern=r"^\d{6}$")
+    # 이 시각(HHMMSS, 오늘)까지 거꾸로 30 개 분봉. 비우면 지금 시각 — 정기 수집용.
+    # 장애로 빠진 장중 구간을 나중에 메울 때 쓴다 (2026-10-08 KIS 키 교체 장애).
+    end_time: str | None = Field(default=None, pattern=r"^\d{6}$")
 
 
 class SubscribeRequest(BaseModel):

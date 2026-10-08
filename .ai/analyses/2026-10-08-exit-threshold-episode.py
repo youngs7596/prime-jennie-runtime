@@ -1,5 +1,7 @@
 import sys
-import numpy as np, pandas as pd
+
+import numpy as np
+import pandas as pd
 
 df = pd.read_csv(sys.argv[1], parse_dates=["gd"])
 df["alpha"] = df["pnl_pct"] - (df["b1"] / df["b0"] - 1) * 100

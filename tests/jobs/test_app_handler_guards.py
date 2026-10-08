@@ -62,3 +62,59 @@ async def test_handler_runs_on_trading_day(monkeypatch, handler_key, func_name):
     handlers = _build(monkeypatch, trading_day=True, calls=calls)
     await handlers[handler_key]()
     assert calls == [func_name]
+
+
+# ---------- 계약 검사 실패 알림 ----------
+# 9-16 부터 21 일 연속 실패가 아무에게도 안 알려져 뉴스·시장 수급이 3 주 멈췄다.
+
+
+class _FakeBot:
+    sent: list[str] = []
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    async def send_message(self, text: str, **_kwargs) -> bool:
+        _FakeBot.sent.append(text)
+        return True
+
+
+def _build_smoke(monkeypatch, smoke):
+    from prime_jennie_runtime.telegram_bot import bot as bot_module
+
+    _FakeBot.sent = []
+    monkeypatch.setattr(bot_module, "TelegramBot", _FakeBot)
+    monkeypatch.setattr(jobs_app, "contract_smoke_test", smoke)
+    return jobs_app.build_handlers(
+        pool=None,
+        http=None,
+        redis_client=None,
+        kis_gateway_url="http://gateway:8000",
+        kis_client=None,
+        engine=None,
+        telegram_config=object(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_contract_smoke_failure_alerts_and_reraises(monkeypatch):
+    async def _broken(*_args, **_kwargs) -> None:
+        raise jobs_app.ContractSmokeError("1 contract(s) broken: news: <html> 410")
+
+    handlers = _build_smoke(monkeypatch, _broken)
+    with pytest.raises(jobs_app.ContractSmokeError):
+        await handlers["contract_smoke_test"]()
+    [text] = _FakeBot.sent
+    assert "계약 검사 실패" in text
+    # 텔레그램 HTML 모드라 꺾쇠는 이스케이프돼야 전송이 안 깨진다
+    assert "&lt;html&gt;" in text and "<html>" not in text
+
+
+@pytest.mark.asyncio
+async def test_contract_smoke_pass_sends_nothing(monkeypatch):
+    async def _ok(*_args, **_kwargs) -> None:
+        return None
+
+    handlers = _build_smoke(monkeypatch, _ok)
+    await handlers["contract_smoke_test"]()
+    assert _FakeBot.sent == []

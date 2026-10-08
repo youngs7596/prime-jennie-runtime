@@ -14,6 +14,7 @@ v2 `prime_jennie/services/jobs/app.py` (FastAPI, 2883줄) 대체. FastAPI 엔드
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import signal
@@ -66,7 +67,7 @@ from .fundamentals import (
     collect_quarterly_financials,
 )
 from .investor_data import collect_foreign_holding, collect_investor_trading
-from .maintenance import contract_smoke_test, update_naver_sectors
+from .maintenance import ContractSmokeError, contract_smoke_test, update_naver_sectors
 from .market_data import (
     collect_index_daily_prices,
     collect_us_market,
@@ -155,7 +156,21 @@ def build_handlers(
         # 뉴스 크롤러는 Track E 의 공통 HTTP 클라이언트를 재사용하지 않고
         # 각자 client 를 열고 닫는다 (v2 에서도 분리). 핸들러 수명과 일치.
         news_crawler = NaverNewsCrawler(max_pages=1)
-        await contract_smoke_test(http, news_crawler)
+        try:
+            await contract_smoke_test(http, news_crawler)
+        except ContractSmokeError as exc:
+            # 외부 출처가 바뀐 걸 정확히 짚는 검사인데, 실패를 아무도 안 봐서 9-16 부터
+            # 21 일 연속 실패가 묻혔다 (뉴스·시장 수급 3 주 정지). 실패하면 알린다.
+            # 고칠 때까지 매일 한 번씩 오는 게 의도다. 텔레그램은 HTML 모드라 이스케이프.
+            if telegram_config is not None:
+                from prime_jennie_runtime.telegram_bot.bot import TelegramBot
+
+                bot = TelegramBot(telegram_config, client=http)
+                await bot.send_message(
+                    "⚠️ 외부 데이터 계약 검사 실패 — 수집 출처가 바뀌었을 수 있음\n"
+                    + html.escape(str(exc))
+                )
+            raise
 
     async def h_update_naver_sectors() -> None:
         await update_naver_sectors(pool, http)

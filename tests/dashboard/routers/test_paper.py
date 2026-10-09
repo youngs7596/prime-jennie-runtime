@@ -192,3 +192,52 @@ async def test_paper_outcomes_benchmark_missing_dates(app, session_factory):
         assert rows[0]["pnl_pct"] == 3.0
         assert rows[0]["benchmark_pnl_pct"] is None
         assert rows[0]["alpha_pct"] is None
+
+
+async def test_paper_v2_row_uses_open_benchmark_and_net_pnl(app, session_factory):
+    """v2 시트(진입일 첫 분봉 진입)는 벤치마크도 진입일 시가부터 잰다. 비용 차감 손익도 낸다."""
+    now = datetime.now(UTC)
+    entry = date.today() - timedelta(days=6)
+    exit_d = entry + timedelta(days=2)
+    async with session_factory() as session:
+        await session.execute(
+            text(
+                "INSERT INTO position_sheets "
+                "(sheet_id, schema_version, generated_at, valid_until, ticker, "
+                "strategy_tag, sheet_json, provenance_json) "
+                "VALUES ('ps_v2', '1.1', :g, :v, '005930', 'SECTOR_MOMENTUM', '{}', '{}')"
+            ),
+            {"g": now, "v": now + timedelta(hours=5)},
+        )
+        await session.execute(
+            text(
+                "INSERT INTO paper_outcomes "
+                "(sheet_id, simulator_version, entry_model, coverage, entry_date, entry_price, "
+                "exit_date, exit_price, exit_reason, holding_days, pnl_pct, net_pnl_pct) "
+                "VALUES ('ps_v2', 'v2', 'first_tick_after_publish', 'full', :entry, 100, "
+                ":exit, 103, 'trailing_tp', 2, 3.0, 2.59)"
+            ),
+            {"entry": entry, "exit": exit_d},
+        )
+        # 벤치마크: 진입일 시가 10000 · 종가 10200, 청산일 종가 10100.
+        for d, o, c in [(entry, 10000, 10200), (exit_d, 10100, 10100)]:
+            await session.execute(
+                text(
+                    "INSERT INTO daily_prices "
+                    "(stock_code, price_date, open_price, high_price, low_price, "
+                    "close_price, volume) "
+                    "VALUES ('069500', :d, :o, :c, :o, :c, 1000)"
+                ),
+                {"d": d, "o": o, "c": c},
+            )
+        await session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        rows = (await client.get("/api/paper/outcomes")).json()
+        assert rows[0]["entry_model"] == "first_tick_after_publish"
+        assert rows[0]["net_pnl_pct"] == 2.59
+        # 시가 10000 → 10100 = +1% (종가 기준이었다면 −0.98%)
+        assert rows[0]["benchmark_pnl_pct"] == 1.0
+        assert rows[0]["alpha_pct"] == 2.0
+        summary = (await client.get("/api/paper/summary")).json()
+        assert summary["overall"]["avg_net_pnl_pct"] == 2.59

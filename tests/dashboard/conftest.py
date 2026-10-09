@@ -215,6 +215,7 @@ _SCHEMA_STATEMENTS = [
         exit_reason TEXT,
         holding_days INT,
         pnl_pct NUMERIC,
+        net_pnl_pct NUMERIC,
         scale_out_legs TEXT DEFAULT '[]',
         rules_evaluated TEXT DEFAULT '[]',
         metadata_json TEXT DEFAULT '{}',

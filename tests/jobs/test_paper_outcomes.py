@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 
 from prime_jennie_runtime.jobs.paper_outcomes import (
+    ENTRY_DAILY_CLOSE,
+    ENTRY_DAILY_OPEN,
+    ENTRY_FIRST_TICK,
     MAX_MEASURABLE_HOLD_BDAYS,
+    ROUND_TRIP_COST_PCT,
+    SIMULATOR_VERSION,
     _weighted_exit_price,
     measure_paper_outcomes,
 )
@@ -117,6 +122,7 @@ class _FakeConn:
 
     async def fetch(self, sql: str, *args: Any) -> list[dict]:
         if "FROM position_sheets ps" in sql:
+            self.pending_args = args
             # 실 SQL 의 두 제외 필터 (placeholder hold 상한 + 휴장일 발행) 미러.
             out = []
             for row in self.sheets_pending:
@@ -265,7 +271,9 @@ async def test_fixed_tp_hit_on_high():
     # entry_date, entry_price, exit_date, exit_price,
     # exit_reason, holding_days, pnl_pct, ...
     assert args[0] == sheet.sheet_id
-    assert args[1] == "v1"
+    assert args[1] == SIMULATOR_VERSION
+    # 11:00 장중 시트인데 발행일 분봉이 없다 → 종가로 대신 진입
+    assert args[2] == ENTRY_DAILY_CLOSE
     assert args[3] == "daily_only"
     assert args[5] == 100.0
     assert args[8] == "fixed_tp"
@@ -817,3 +825,96 @@ async def test_minute_too_sparse_falls_back_to_daily():
     meta = json.loads(args[13])
     assert meta["minute_days"] == 0
     assert meta["daily_days"] >= 1
+
+
+def _pending(sheet: PositionSheet) -> list[dict]:
+    return [
+        {
+            "sheet_id": sheet.sheet_id,
+            "sheet_json": sheet.model_dump_json(),
+            "generated_at": sheet.generated_at,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_entry_at_first_minute_after_publish_and_same_day_exit():
+    """v2: 08:30 시트는 09:00 첫 분봉에 산다. 진입한 날 장중 급락도 손절로 잡힌다.
+
+    v1 은 발행일 종가(여기선 90)에 샀다고 쳐서 그날 하락을 통째로 빼먹었다.
+    """
+    publish = date(2026, 6, 1)
+    sheet = _make_sheet(
+        sheet_id="ps_20260601_083000_ab03",
+        generated_at=datetime(2026, 6, 1, 8, 30, tzinfo=KST),
+        fixed_sl_pct=0.05,
+        time_stop_days=3,
+    )
+    daily = _daily_series(publish, [90, 91, 92, 93, 94])
+    # 100 에서 시작해 매 분 −0.05 → 101 분째 95.0 (−5%) 에서 손절.
+    minute = {publish: _minute_series(publish, start_price=100.0, step=-0.05, count=320)}
+    conn = _FakeConn(daily=daily, minute=minute, sheets_pending=_pending(sheet))
+
+    stats = await measure_paper_outcomes(_FakePool(conn), today=publish + timedelta(days=10))
+
+    assert stats["measured"] == 1
+    args = conn.upserts[0]
+    assert args[2] == ENTRY_FIRST_TICK
+    assert args[5] == 100.0
+    assert args[6] == publish  # 진입한 날 청산
+    assert args[8] == "fixed_sl"
+    assert args[9] == 0
+    meta = json.loads(args[13])
+    assert meta["day_idx"] == 0
+
+
+@pytest.mark.asyncio
+async def test_preopen_sheet_without_minutes_enters_at_open():
+    """분봉 없는 날의 장 시작 전 시트는 시가에 산다."""
+    publish = date(2026, 6, 1)
+    sheet = _make_sheet(
+        sheet_id="ps_20260601_083000_ab04",
+        generated_at=datetime(2026, 6, 1, 8, 30, tzinfo=KST),
+        fixed_tp_pct=0.2,
+        fixed_sl_pct=0.1,
+        time_stop_days=2,
+    )
+    daily = _daily_series(publish, [100, 101, 102, 103])
+    daily[publish] = _ohlc(100, open_=95, high=101, low=94)
+    conn = _FakeConn(daily=daily, sheets_pending=_pending(sheet))
+
+    await measure_paper_outcomes(_FakePool(conn), today=publish + timedelta(days=10))
+
+    args = conn.upserts[0]
+    assert args[2] == ENTRY_DAILY_OPEN
+    assert args[5] == 95.0
+    assert args[8] == "time_stop"
+
+
+@pytest.mark.asyncio
+async def test_net_pnl_deducts_round_trip_cost():
+    """net_pnl_pct = pnl_pct − 왕복 비용. pnl_pct 는 비용 전 값 그대로."""
+    publish = date(2026, 5, 20)
+    sheet = _make_sheet(
+        sheet_id="ps_20260520_110000_ab05",
+        generated_at=datetime(2026, 5, 20, 11, 0, tzinfo=KST),
+        fixed_tp_pct=0.2,
+        fixed_sl_pct=0.1,
+        time_stop_days=2,
+    )
+    daily = _daily_series(publish, [100, 101, 104, 105])
+    conn = _FakeConn(daily=daily, sheets_pending=_pending(sheet))
+
+    await measure_paper_outcomes(_FakePool(conn), today=publish + timedelta(days=10))
+
+    args = conn.upserts[0]
+    assert args[10] == pytest.approx(4.0)
+    assert args[14] == pytest.approx(4.0 - ROUND_TRIP_COST_PCT)
+
+
+@pytest.mark.asyncio
+async def test_pending_query_remeasures_older_simulator_version():
+    """옛 버전으로 잰 행은 다시 측정 대상 — 현재 버전을 쿼리 인자로 넘긴다."""
+    conn = _FakeConn(daily={}, sheets_pending=[])
+    await measure_paper_outcomes(_FakePool(conn), today=date(2026, 6, 10))
+    assert conn.pending_args[3] == SIMULATOR_VERSION

@@ -42,9 +42,11 @@ class PaperOutcomeRecord(BaseModel):
     exit_date: date | None = None
     holding_days: int | None = None
     pnl_pct: float | None = None
+    net_pnl_pct: float | None = None  # 왕복 비용 차감 (simulator v2 부터)
     exit_reason: str | None = None
     coverage: str | None = None
     simulator_version: str | None = None
+    entry_model: str | None = None
     benchmark_pnl_pct: float | None = None
     alpha_pct: float | None = None
 
@@ -53,6 +55,7 @@ class GroupStats(BaseModel):
     count: int
     win_rate: float | None = None  # pnl > 0 비율 (측정 실패 제외)
     avg_pnl_pct: float | None = None
+    avg_net_pnl_pct: float | None = None
     avg_alpha_pct: float | None = None
 
 
@@ -71,33 +74,51 @@ class PaperSummary(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _load_benchmark_closes(session: AsyncSession) -> dict[date, float]:
-    """벤치마크 (KODEX200) 일봉 close 전체를 날짜 dict 로."""
+# 진입일 시가 기준으로 산 시트 (simulator v2). 벤치마크도 같은 날 시가에서 잰다.
+_OPEN_ENTRY_MODELS = {"first_tick_after_publish", "daily_open"}
+
+
+async def _load_benchmark_prices(
+    session: AsyncSession,
+) -> tuple[dict[date, float], dict[date, float]]:
+    """벤치마크 (KODEX200) 일봉 (시가, 종가) 전체를 날짜 dict 로."""
     result = await session.execute(
-        text("SELECT price_date, close_price FROM daily_prices WHERE stock_code = :ticker"),
+        text(
+            "SELECT price_date, open_price, close_price FROM daily_prices "
+            "WHERE stock_code = :ticker"
+        ),
         {"ticker": BENCHMARK_TICKER},
     )
+    opens: dict[date, float] = {}
     closes: dict[date, float] = {}
     for row in result.mappings().all():
         d = row["price_date"]
         # SQLite 는 DATE 를 문자열로 돌려줄 수 있다.
         if isinstance(d, str):
             d = date.fromisoformat(d)
+        opens[d] = float(row["open_price"])
         closes[d] = float(row["close_price"])
-    return closes
+    return opens, closes
 
 
 def _benchmark_pnl(
-    closes: dict[date, float], entry: date | str | None, exit_: date | str | None
+    closes: dict[date, float],
+    entry: date | str | None,
+    exit_: date | str | None,
+    *,
+    opens: dict[date, float] | None = None,
 ) -> float | None:
-    """같은 보유 기간의 벤치마크 수익률 (%). 어느 한쪽 일봉이 없으면 None."""
+    """같은 보유 기간의 벤치마크 수익률 (%). 어느 한쪽 일봉이 없으면 None.
+
+    opens 를 주면 진입일 시가에서 잰다 (시트가 시가 근처에 산 경우).
+    """
     if entry is None or exit_ is None:
         return None
     if isinstance(entry, str):
         entry = date.fromisoformat(entry)
     if isinstance(exit_, str):
         exit_ = date.fromisoformat(exit_)
-    b_in = closes.get(entry)
+    b_in = (opens if opens is not None else closes).get(entry)
     b_out = closes.get(exit_)
     if b_in is None or b_out is None or b_in <= 0:
         return None
@@ -111,10 +132,12 @@ def _group_stats(records: list[PaperOutcomeRecord]) -> GroupStats:
         return GroupStats(count=len(records))
     wins = sum(1 for r in measured if (r.pnl_pct or 0) > 0)
     alphas = [r.alpha_pct for r in measured if r.alpha_pct is not None]
+    nets = [r.net_pnl_pct for r in measured if r.net_pnl_pct is not None]
     return GroupStats(
         count=len(records),
         win_rate=round(wins / len(measured) * 100.0, 1),
         avg_pnl_pct=round(sum(r.pnl_pct or 0 for r in measured) / len(measured), 3),
+        avg_net_pnl_pct=round(sum(nets) / len(nets), 3) if nets else None,
         avg_alpha_pct=round(sum(alphas) / len(alphas), 3) if alphas else None,
     )
 
@@ -131,7 +154,8 @@ async def _load_outcome_records(
     result = await session.execute(
         text(
             "SELECT po.sheet_id, po.entry_date, po.exit_date, po.holding_days, po.pnl_pct, "
-            "po.exit_reason, po.coverage, po.simulator_version, ps.ticker, ps.strategy_tag "
+            "po.exit_reason, po.coverage, po.simulator_version, po.entry_model, "
+            "po.net_pnl_pct, ps.ticker, ps.strategy_tag "
             "FROM paper_outcomes po "
             "LEFT JOIN position_sheets ps ON ps.sheet_id = po.sheet_id "
             f"{where} "
@@ -140,7 +164,7 @@ async def _load_outcome_records(
         params,
     )
     rows = result.mappings().all()
-    closes = await _load_benchmark_closes(session)
+    opens, closes = await _load_benchmark_prices(session)
 
     records: list[PaperOutcomeRecord] = []
     for row in rows:
@@ -151,7 +175,9 @@ async def _load_outcome_records(
         if isinstance(exit_d, str):
             exit_d = date.fromisoformat(exit_d)
         pnl = float(row["pnl_pct"]) if row["pnl_pct"] is not None else None
-        bench = _benchmark_pnl(closes, entry_d, exit_d)
+        net = float(row["net_pnl_pct"]) if row["net_pnl_pct"] is not None else None
+        open_entry = row["entry_model"] in _OPEN_ENTRY_MODELS
+        bench = _benchmark_pnl(closes, entry_d, exit_d, opens=opens if open_entry else None)
         records.append(
             PaperOutcomeRecord(
                 sheet_id=row["sheet_id"],
@@ -161,9 +187,11 @@ async def _load_outcome_records(
                 exit_date=exit_d,
                 holding_days=row["holding_days"],
                 pnl_pct=pnl,
+                net_pnl_pct=net,
                 exit_reason=row["exit_reason"],
                 coverage=row["coverage"],
                 simulator_version=row["simulator_version"],
+                entry_model=row["entry_model"],
                 benchmark_pnl_pct=round(bench, 3) if bench is not None else None,
                 alpha_pct=round(pnl - bench, 3) if pnl is not None and bench is not None else None,
             )

@@ -24,6 +24,18 @@ v1 (2026-06-03) — 분봉 hybrid
   'daily_only'. metadata 에 minute_days/daily_days 기록.
 - ``scale_out`` 부분 청산: 전량 청산 시 exit_price 를 leg 가중 평균으로 계산
   (leg price × portion 합 + 최종가 × 잔여 portion).
+
+v2 (2026-10-09) — 진입 시각·비용 보정
+------------------------------------
+- entry: 발행 시각 이후 첫 분봉 가격. fast_loop 는 시트를 받자마자 사므로 08:30
+  시트는 09:00 첫 분봉에 산다. 분봉이 없는 날은 장 시작 전 시트면 시가, 장중
+  시트면 종가로 대신한다 (entry_model 에 어느 쪽인지 남긴다). 진입한 날 남은
+  장중에도 청산 규칙을 평가한다 (entered_business_days=0 — time_stop 은 안 걸림).
+  v1 은 발행일 종가에 샀다고 쳐서 실제보다 좋게 나왔다 — 2026-10-09 백테스트에서
+  유니버스 기준 시가 진입이 종가 진입보다 건당 0.0~0.8%p 나빴다.
+- net_pnl_pct: pnl_pct 에서 왕복 비용 ``ROUND_TRIP_COST_PCT`` 를 뺀 값. pnl_pct 는
+  지금처럼 비용 전 값으로 둔다.
+- 버전이 바뀌면 옛 버전 행도 측정 대상으로 다시 잡아 덮어쓴다 (점수판 기준 통일).
 """
 
 from __future__ import annotations
@@ -45,8 +57,15 @@ from prime_jennie_runtime.position_sheet.schema import (
 
 logger = logging.getLogger(__name__)
 
-SIMULATOR_VERSION = "v1"
-ENTRY_MODEL = "close_on_publish_date"
+SIMULATOR_VERSION = "v2"
+# 진입가를 어디서 잡았는지 — 행마다 기록한다.
+ENTRY_FIRST_TICK = "first_tick_after_publish"
+ENTRY_DAILY_OPEN = "daily_open"
+ENTRY_DAILY_CLOSE = "daily_close_fallback"
+ENTRY_MODEL = ENTRY_FIRST_TICK  # 기본 모델 (하위 호환 export)
+# 왕복 비용 % — 매수 수수료 0.015 + 매도 수수료·세금 0.195 + 슬리피지 0.1 × 2.
+# backtest.BacktestConfig 기본값과 같다.
+ROUND_TRIP_COST_PCT = 0.41
 DEFAULT_WINDOW_BDAYS = 20  # time_stop 없는 시트 (validator 가 막지만 안전망)
 MA_HISTORY_MARGIN_BDAYS = 5  # death_cross MA long lookback 마진
 MAX_BATCH_SHEETS = 500  # 한 cycle 안전망
@@ -150,6 +169,8 @@ async def measure_paper_outcomes(pool: Any, *, today: date | None = None) -> dic
 async def _fetch_pending_sheets(pool: Any, *, today: date) -> list[dict]:
     """측정 미완료 시트 중 ``generated_at::date <= today - 1 day`` 인 것 모음.
 
+    옛 simulator 버전으로 잰 행도 미완료로 본다 — 버전을 올리면 다시 재서 덮어쓴다.
+
     윈도우 닫힘 여부는 ``_simulate_sheet`` 안에서 시트별로 다시 판정 — time_stop
     hold_days 가 시트마다 다르기 때문. 여기선 단순히 어제 이전 발행 + 미측정만
     걸러낸다.
@@ -161,7 +182,8 @@ async def _fetch_pending_sheets(pool: Any, *, today: date) -> list[dict]:
             FROM position_sheets ps
             WHERE sheet_id LIKE 'ps_%'
             AND NOT EXISTS (
-                SELECT 1 FROM paper_outcomes po WHERE po.sheet_id = ps.sheet_id
+                SELECT 1 FROM paper_outcomes po
+                WHERE po.sheet_id = ps.sheet_id AND po.simulator_version = $4
             )
             AND generated_at < $1::date
             -- 휴장일 발행 잔재 제외: 발행일(KST)에 시장이 열린(daily_prices 에 그 날
@@ -186,6 +208,7 @@ async def _fetch_pending_sheets(pool: Any, *, today: date) -> list[dict]:
             today,
             MAX_BATCH_SHEETS,
             MAX_MEASURABLE_HOLD_BDAYS,
+            SIMULATOR_VERSION,
         )
     return [dict(r) for r in rows]
 
@@ -202,17 +225,19 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
         outcome dict — 측정 완료 (data_missing 포함, paper_outcomes 에 영속할 대상).
         None — 측정 윈도우가 아직 안 닫힘. 영속하지 않고 다음 cycle 에서 재시도.
     """
-    publish_date = sheet.generated_at.astimezone(KST).date()
+    publish_dt = sheet.generated_at.astimezone(KST)
+    publish_date = publish_dt.date()
     ticker = sheet.ticker
     rules_evaluated = [r.type for r in sheet.exit.rules]
 
-    # 1) entry 가격 — 시트 발행일 종가.
+    # 1) 발행일 일봉이 있어야 측정 가능 (종가는 분봉 없는 장중 시트의 대체 진입가).
     entry_close = await _fetch_daily_close(pool, ticker, publish_date)
     if entry_close is None:
         return _build_outcome(
             sheet=sheet,
             publish_date=publish_date,
             entry_price=None,
+            entry_model=ENTRY_DAILY_CLOSE,
             exit_date=None,
             exit_price=None,
             exit_reason="data_missing",
@@ -251,6 +276,7 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
             sheet=sheet,
             publish_date=publish_date,
             entry_price=float(entry_close),
+            entry_model=ENTRY_DAILY_CLOSE,
             exit_date=None,
             exit_price=None,
             exit_reason="data_missing",
@@ -264,22 +290,28 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
     history_closes = [
         float(r["close_price"]) for r in daily_rows if r["price_date"] <= publish_date
     ]
+    publish_row = next((r for r in daily_rows if r["price_date"] == publish_date), None)
 
-    # 5) state 초기화 — entry_price 기준.
+    # 5) 진입가 — 발행 시각 이후 첫 분봉. 진입한 날 남은 tick 도 청산 평가 대상.
+    entry_price, entry_model, day0_ticks, day0_minute = await _resolve_entry(
+        pool, ticker, publish_dt, publish_row, float(entry_close)
+    )
+
     state = PositionState(
         sheet_id=sheet.sheet_id,
         ticker=ticker,
-        entry_price=float(entry_close),
+        entry_price=entry_price,
         quantity=1,
         entered_at=sheet.generated_at,
-        high_watermark=float(entry_close),
+        high_watermark=entry_price,
         peak_return_pct=0.0,
     )
 
     scale_out_legs: list[dict] = []
 
     # 6) 매 거래일 tick 흘려보냄 — 분봉이 충분한 날은 분봉 (RSI 포함), 아니면 일봉 4-tick.
-    minute_days = 0
+    # 진입일(day_idx=0)은 진입 뒤 남은 tick 만.
+    minute_days = 1 if day0_minute else 0
     daily_days = 0
 
     def _coverage() -> str:
@@ -292,17 +324,41 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
     def _coverage_meta() -> dict:
         return {"minute_days": minute_days, "daily_days": daily_days}
 
-    for day_idx, day_row in enumerate(sim_days, start=1):
-        day = day_row["price_date"]
-        daily_closes = history_closes + [float(r["close_price"]) for r in sim_days[:day_idx]]
-
-        minute_bars = await _fetch_minute_bars(pool, ticker, day)
+    async def _ticks_for(day_row: dict) -> list[TickData]:
+        nonlocal minute_days, daily_days
+        minute_bars = await _fetch_minute_bars(pool, ticker, day_row["price_date"])
         if len(minute_bars) >= MIN_MINUTE_BARS_PER_DAY:
-            ticks = _build_minute_ticks(minute_bars, ticker)
             minute_days += 1
-        else:
-            ticks = _build_daily_ticks(day_row, ticker)
-            daily_days += 1
+            return _build_minute_ticks(minute_bars, ticker)
+        daily_days += 1
+        return _build_daily_ticks(day_row, ticker)
+
+    def _final(day: date, exit_price: float, reason: str, meta: dict) -> dict:
+        return _build_outcome(
+            sheet=sheet,
+            publish_date=publish_date,
+            entry_price=entry_price,
+            entry_model=entry_model,
+            exit_date=day,
+            exit_price=exit_price,
+            exit_reason=reason,
+            holding_days=(day - publish_date).days,
+            scale_out_legs=scale_out_legs,
+            rules_evaluated=rules_evaluated,
+            coverage=_coverage(),
+            metadata={**meta, **_coverage_meta()},
+        )
+
+    schedule: list[tuple[int, date, list[float], list[TickData] | None, dict | None]] = []
+    schedule.append((0, publish_date, history_closes, day0_ticks, None))
+    for day_idx, day_row in enumerate(sim_days, start=1):
+        closes = history_closes + [float(r["close_price"]) for r in sim_days[:day_idx]]
+        schedule.append((day_idx, day_row["price_date"], closes, None, day_row))
+
+    for day_idx, day, daily_closes, ticks, day_row in schedule:
+        if ticks is None:
+            assert day_row is not None
+            ticks = await _ticks_for(day_row)
 
         for tick in ticks:
             decision = evaluate(
@@ -318,25 +374,15 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
 
             if decision.should_close and decision.portion >= 1.0:
                 # 전량 청산. scale_out legs 가 있으면 가중 평균 exit price.
-                holding_days = (day - publish_date).days
-                exit_price = _weighted_exit_price(scale_out_legs, float(tick.price))
-                return _build_outcome(
-                    sheet=sheet,
-                    publish_date=publish_date,
-                    entry_price=float(entry_close),
-                    exit_date=day,
-                    exit_price=exit_price,
-                    exit_reason=decision.matched_rule_type or decision.reason,
-                    holding_days=holding_days,
-                    scale_out_legs=scale_out_legs,
-                    rules_evaluated=rules_evaluated,
-                    coverage=_coverage(),
-                    metadata={
+                return _final(
+                    day,
+                    _weighted_exit_price(scale_out_legs, float(tick.price)),
+                    decision.matched_rule_type or decision.reason,
+                    {
                         "day_idx": day_idx,
                         "decision_metadata": _safe_metadata(decision.metadata),
                         "tick_ts": tick.ts.isoformat(),
                         "final_tick_price": float(tick.price),
-                        **_coverage_meta(),
                     },
                 )
 
@@ -360,20 +406,38 @@ async def _simulate_sheet(pool: Any, sheet: PositionSheet, *, today: date) -> di
     # 7) 윈도우 끝 — 마지막 거래일 종가로 강제 close (scale_out 가중 평균 반영).
     last = sim_days[-1]
     last_close = float(last["close_price"])
-    holding_days = (last["price_date"] - publish_date).days
-    return _build_outcome(
-        sheet=sheet,
-        publish_date=publish_date,
-        entry_price=float(entry_close),
-        exit_date=last["price_date"],
-        exit_price=_weighted_exit_price(scale_out_legs, last_close),
-        exit_reason="window_expired",
-        holding_days=holding_days,
-        scale_out_legs=scale_out_legs,
-        rules_evaluated=rules_evaluated,
-        coverage=_coverage(),
-        metadata={"day_idx": len(sim_days), "final_tick_price": last_close, **_coverage_meta()},
+    return _final(
+        last["price_date"],
+        _weighted_exit_price(scale_out_legs, last_close),
+        "window_expired",
+        {"day_idx": len(sim_days), "final_tick_price": last_close},
     )
+
+
+async def _resolve_entry(
+    pool: Any,
+    ticker: str,
+    publish_dt: datetime,
+    publish_row: dict | None,
+    entry_close: float,
+) -> tuple[float, str, list[TickData], bool]:
+    """(진입가, entry_model, 진입 뒤 같은 날 남은 tick, 분봉 사용 여부).
+
+    fast_loop 는 시트를 받자마자 시장가로 산다 — 발행 시각 이후 첫 분봉 가격이 그 근사.
+    분봉이 없으면 장 시작 전 시트는 시가(그날 고가·저가·종가 tick 을 이어 평가),
+    장중 시트는 종가(그날 더 평가할 tick 없음)로 대신한다.
+    """
+    bars = await _fetch_minute_bars(pool, ticker, publish_dt.date())
+    if len(bars) >= MIN_MINUTE_BARS_PER_DAY:
+        ticks = _build_minute_ticks(bars, ticker)
+        for i, tick in enumerate(ticks):
+            if tick.ts >= publish_dt:
+                return float(tick.price), ENTRY_FIRST_TICK, ticks[i + 1 :], True
+        return entry_close, ENTRY_DAILY_CLOSE, [], True
+    if publish_row is not None and publish_dt.timetz().replace(tzinfo=None) < time(9, 0):
+        day_ticks = _build_daily_ticks(publish_row, ticker)
+        return float(day_ticks[0].price), ENTRY_DAILY_OPEN, day_ticks[1:], False
+    return entry_close, ENTRY_DAILY_CLOSE, [], False
 
 
 # =====================================================================
@@ -533,12 +597,14 @@ async def _upsert_outcome(pool: Any, outcome: dict) -> None:
                 sheet_id, simulator_version, entry_model, coverage,
                 entry_date, entry_price, exit_date, exit_price,
                 exit_reason, holding_days, pnl_pct,
-                scale_out_legs, rules_evaluated, metadata_json, computed_at
+                scale_out_legs, rules_evaluated, metadata_json, computed_at,
+                net_pnl_pct
             ) VALUES (
                 $1, $2, $3, $4,
                 $5, $6, $7, $8,
                 $9, $10, $11,
-                $12::jsonb, $13::jsonb, $14::jsonb, NOW()
+                $12::jsonb, $13::jsonb, $14::jsonb, NOW(),
+                $15
             )
             ON CONFLICT (sheet_id) DO UPDATE SET
                 simulator_version = EXCLUDED.simulator_version,
@@ -554,7 +620,8 @@ async def _upsert_outcome(pool: Any, outcome: dict) -> None:
                 scale_out_legs    = EXCLUDED.scale_out_legs,
                 rules_evaluated   = EXCLUDED.rules_evaluated,
                 metadata_json     = EXCLUDED.metadata_json,
-                computed_at       = NOW()
+                computed_at       = NOW(),
+                net_pnl_pct       = EXCLUDED.net_pnl_pct
             """,
             outcome["sheet_id"],
             outcome["simulator_version"],
@@ -570,6 +637,7 @@ async def _upsert_outcome(pool: Any, outcome: dict) -> None:
             json.dumps(outcome["scale_out_legs"]),
             json.dumps(outcome["rules_evaluated"]),
             json.dumps(outcome["metadata"]),
+            outcome["net_pnl_pct"],
         )
 
 
@@ -613,6 +681,7 @@ def _build_outcome(
     sheet: PositionSheet,
     publish_date: date,
     entry_price: float | None,
+    entry_model: str,
     exit_date: date | None,
     exit_price: float | None,
     exit_reason: str,
@@ -623,13 +692,15 @@ def _build_outcome(
     metadata: dict,
 ) -> dict:
     pnl_pct: float | None = None
+    net_pnl_pct: float | None = None
     if entry_price is not None and exit_price is not None and entry_price > 0:
         pnl_pct = (exit_price - entry_price) / entry_price * 100.0
+        net_pnl_pct = pnl_pct - ROUND_TRIP_COST_PCT
 
     return {
         "sheet_id": sheet.sheet_id,
         "simulator_version": SIMULATOR_VERSION,
-        "entry_model": ENTRY_MODEL,
+        "entry_model": entry_model,
         "coverage": coverage,
         "entry_date": publish_date,
         "entry_price": entry_price,
@@ -638,6 +709,7 @@ def _build_outcome(
         "exit_reason": exit_reason,
         "holding_days": holding_days,
         "pnl_pct": pnl_pct,
+        "net_pnl_pct": net_pnl_pct,
         "scale_out_legs": scale_out_legs,
         "rules_evaluated": rules_evaluated,
         "metadata": metadata,
@@ -646,6 +718,7 @@ def _build_outcome(
 
 __all__ = [
     "ENTRY_MODEL",
+    "ROUND_TRIP_COST_PCT",
     "SIMULATOR_VERSION",
     "measure_paper_outcomes",
 ]

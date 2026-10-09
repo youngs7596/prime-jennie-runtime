@@ -81,6 +81,7 @@ class KISWebSocketStreamer:
         calendar: MarketCalendar | None = None,
         ws_connect: Any = None,
         sink: Any = None,
+        window_check_interval: float = 30.0,
     ):
         self._redis = redis_client
         self._app_key = app_key
@@ -92,6 +93,7 @@ class KISWebSocketStreamer:
         # sink 가 있으면 체결·호가를 적재 버퍼로 흘리고 호가 채널도 구독한다.
         self._sink = sink
         self._subscribe_orderbook = sink is not None
+        self._window_check_interval = window_check_interval
 
         self._subscription_codes: set[str] = set()
         self._ws: Any = None
@@ -262,15 +264,21 @@ class KISWebSocketStreamer:
                     connected_at = time.time()
                     logger.info("KIS WebSocket connected")
 
-                    async with self._lock:
-                        codes = list(self._subscription_codes)
-                    await self._send_subscribe(ws, codes, tr_type="1")
-                    logger.info("Subscribed to %d codes", len(codes))
+                    watchdog = asyncio.create_task(self._close_when_streaming_ends(ws))
+                    try:
+                        async with self._lock:
+                            codes = list(self._subscription_codes)
+                        await self._send_subscribe(ws, codes, tr_type="1")
+                        logger.info("Subscribed to %d codes", len(codes))
 
-                    async for message in ws:
-                        if not self._is_running:
-                            break
-                        await self._handle_message(ws, message)
+                        async for message in ws:
+                            if not self._is_running:
+                                break
+                            await self._handle_message(ws, message)
+                    finally:
+                        watchdog.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await watchdog
             except ConnectionClosed as e:
                 logger.info("KIS WebSocket closed: %s", e)
             except Exception as e:
@@ -300,6 +308,22 @@ class KISWebSocketStreamer:
                 except Exception as e:
                     logger.warning("Failed to refresh approval key, reusing old: %s", e)
         _ = approval_key  # 재사용 방지 경고 회피
+
+    async def _close_when_streaming_ends(self, ws: Any) -> None:
+        """스트리밍 시간(~15:35)이 끝나면 연결을 직접 닫는다.
+
+        장 시간은 연결할 때만 확인하므로, 체결이 계속 오는 한 연결이 밤까지 이어진다.
+        2026-09-14 부터 장 마감 뒤에도 20:00 까지 체결(넥스트레이드 애프터마켓으로 추정)이
+        들어오면서 이 연결이 18:00 을 넘겼고, 같은 계정으로 붙는 야간선물 수집기
+        (`futures_night.py`)를 KIS 가 거부해 야간 미결제약정이 11밤 빠졌다. 장외 체결이
+        KRX 체결과 섞여 적재되는 것도 같이 막는다.
+        """
+        while self._is_running and self._calendar.is_streaming_hours():
+            await asyncio.sleep(self._window_check_interval)
+        if self._is_running:
+            logger.info("Streaming hours ended — closing KIS WebSocket")
+        with contextlib.suppress(Exception):
+            await ws.close()
 
     async def _handle_message(self, ws: Any, message: str | bytes) -> None:
         """WebSocket 메시지 파싱 → Redis XADD."""

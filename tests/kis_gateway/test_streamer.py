@@ -7,6 +7,7 @@ subscribe 송신, 메시지 파싱 → Redis XADD 흐름을 검증.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -172,8 +173,9 @@ async def test_ws_loop_subscribes_and_publishes(fake_redis, monkeypatch):
     original_sleep = asyncio.sleep
 
     async def fast_sleep(delay: float) -> None:
-        # 주기적인 50ms subscribe 간격만 허용, 그 외는 즉시 반환 후 루프 종료 유도
-        if delay <= 0.1:
+        # 재연결 backoff(60초~)에서만 루프 종료를 유도한다. subscribe 간격과
+        # 스트리밍 시간 감시 주기는 양보만 하고 넘어간다.
+        if delay < 60:
             await original_sleep(0)
         else:
             streamer._is_running = False
@@ -191,6 +193,49 @@ async def test_ws_loop_subscribes_and_publishes(fake_redis, monkeypatch):
     # Redis 에 1건 이상 발행
     entries = await fake_redis.xrange(STREAM_PRICES, "-", "+")
     assert len(entries) >= 1
+
+
+class _OpenWebSocket(FakeWebSocket):
+    """메시지가 없으면 닫힐 때까지 기다리는 WS — 체결이 끊기지 않는 연결을 흉내낸다."""
+
+    async def __anext__(self) -> str:
+        if self._incoming.empty():
+            await self.closed.wait()
+            raise StopAsyncIteration
+        return await self._incoming.get()
+
+
+async def test_ws_closes_when_streaming_hours_end(fake_redis):
+    """장 마감 뒤에도 체결이 오면 연결이 밤까지 이어져 야간선물 수집기를 막았다 (2026-09-14~)."""
+    now = {"t": datetime(2026, 10, 12, 15, 34, tzinfo=_KST)}
+    calendar = MarketCalendar(trading_day_checker=lambda _d: True)
+    calendar.set_clock(lambda: now["t"])
+
+    fake_ws = _OpenWebSocket([])
+    streamer = KISWebSocketStreamer(
+        redis_client=fake_redis,
+        app_key="k",
+        app_secret="s",
+        is_paper=True,
+        calendar=calendar,
+        ws_connect=FakeWsConnect(fake_ws),
+        window_check_interval=0.01,
+    )
+    await streamer.add_subscriptions(["005930"])
+    streamer._approval_key = "APPROVAL"
+    streamer._is_running = True
+
+    task = asyncio.create_task(streamer._ws_loop(approval_key="APPROVAL"))
+    await asyncio.sleep(0.05)
+    assert not fake_ws.closed.is_set()  # 15:34 — 아직 스트리밍 시간
+
+    now["t"] = datetime(2026, 10, 12, 15, 36, tzinfo=_KST)
+    await asyncio.wait_for(fake_ws.closed.wait(), timeout=1.0)
+
+    streamer._is_running = False
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
 
 
 async def test_stop_flips_flag_and_cancels_task(fake_redis):

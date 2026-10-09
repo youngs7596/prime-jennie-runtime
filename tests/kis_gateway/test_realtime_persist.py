@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -108,3 +108,26 @@ async def test_stop_flushes_remaining():
 
 # pytest 네임스페이스 워닝 억제
 _ = pytest
+
+
+async def test_flush_marks_after_close_rows():
+    """KST 15:31 이후 행만 after_close=TRUE, 정규장은 NULL (migration 035 와 같은 규칙)."""
+    kst = timezone(timedelta(hours=9))
+    pool = _FakePool()
+    buf = RealtimeBuffer(pool, flush_interval=100)
+    regular = datetime(2026, 10, 12, 15, 30, 59, tzinfo=kst)
+    after = datetime(2026, 10, 12, 15, 31, 0, tzinfo=kst)
+    buf.add_tick(("005930", regular, 71200, 13, 123456, 1, 112.5, 71210, 71190))
+    buf.add_tick(("005930", after, 71200, 13, 123456, 1, 112.5, 71210, 71190))
+    # UTC 로 들어와도 KST 로 판정 (06:31 UTC = 15:31 KST)
+    buf.add_orderbook(("005930", datetime(2026, 10, 12, 6, 31, tzinfo=UTC), *_ob()[2:]))
+
+    await buf.flush()
+
+    tables = {c[0]: c for c in pool.conn.copied}
+    _, ticks, tick_cols = tables["realtime_ticks"]
+    _, obs, ob_cols = tables["realtime_orderbook"]
+    assert tick_cols[-1] == "after_close" and ob_cols[-1] == "after_close"
+    assert all(len(r) == len(tick_cols) for r in ticks)
+    assert [r[-1] for r in ticks] == [None, True]
+    assert obs[0][-1] is True

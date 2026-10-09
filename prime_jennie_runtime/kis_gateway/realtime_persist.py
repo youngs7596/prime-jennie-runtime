@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ _TICK_COLUMNS = (
     "strength",
     "best_ask",
     "best_bid",
+    "after_close",
 )
 
 _OB_TABLE = "realtime_orderbook"
@@ -43,7 +45,17 @@ _OB_COLUMNS = (
     "bid_volumes",
     "total_ask",
     "total_bid",
+    "after_close",
 )
+
+_KST = timezone(timedelta(hours=9))
+# 이 시각 이후 행은 장 마감 뒤로 표시한다 (migration 035 와 같은 규칙).
+_AFTER_CLOSE_FROM = time(15, 31)
+
+
+def _after_close(ts: datetime) -> bool | None:
+    """KST 15:31 이후면 TRUE, 정규장은 NULL. 시각 칸(ts)은 레코드 두 번째 값."""
+    return True if ts.astimezone(_KST).time() >= _AFTER_CLOSE_FROM else None
 
 
 class RealtimeBuffer:
@@ -67,14 +79,14 @@ class RealtimeBuffer:
         self._dropped = 0
 
     def add_tick(self, record: tuple) -> None:
-        """체결 레코드 추가 (_TICK_COLUMNS 순서). 버퍼 초과 시 드롭."""
+        """체결 레코드 추가 (_TICK_COLUMNS 순서, after_close 제외). 버퍼 초과 시 드롭."""
         if self._buffered >= self._max_buffer:
             self._dropped += 1
             return
         self._ticks.append(record)
 
     def add_orderbook(self, record: tuple) -> None:
-        """호가 레코드 추가 (_OB_COLUMNS 순서). 버퍼 초과 시 드롭."""
+        """호가 레코드 추가 (_OB_COLUMNS 순서, after_close 제외). 버퍼 초과 시 드롭."""
         if self._buffered >= self._max_buffer:
             self._dropped += 1
             return
@@ -118,6 +130,10 @@ class RealtimeBuffer:
             return
         ticks, self._ticks = self._ticks, []
         orderbook, self._orderbook = self._orderbook, []
+
+        # 스트리머가 만든 레코드 끝에 장 마감 뒤 표시를 붙인다 (적재 칸 순서 맞춤).
+        ticks = [(*r, _after_close(r[1])) for r in ticks]
+        orderbook = [(*r, _after_close(r[1])) for r in orderbook]
 
         async with self._pool.acquire() as conn:
             if ticks:

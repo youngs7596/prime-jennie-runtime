@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 
 from prime_jennie_runtime.slow_loop.scout.enrichment import (
+    ConsensusInfo,
     DailyPrice,
     EnrichedCandidate,
     FinancialTrend,
@@ -19,6 +20,7 @@ from prime_jennie_runtime.slow_loop.scout.enrichment import (
     StockSnapshot,
 )
 from prime_jennie_runtime.slow_loop.scout.quant import (
+    RAW_MAX,
     V2_NEUTRAL,
     QuantScore,
     _compute_rsi,
@@ -133,30 +135,61 @@ class TestScoreCandidate:
         assert result.value_score >= 0
         assert result.is_valid is True
 
-    def test_total_equals_sum_of_subscores(self):
+    def test_total_is_scaled_sum_without_technical(self):
+        """총점 = 기술 제외 서브점수 합 × 100/70 (2026-10-09 @3)."""
         candidate = _make_candidate(
             prices=_make_prices(150),
             ft=FinancialTrend(per=10.0, pbr=0.8, roe=15.0),
         )
         result = score_candidate(candidate)
 
-        expected = (
+        raw = (
             result.momentum_score
             + result.quality_score
             + result.value_score
-            + result.technical_score
             + result.news_score
             + result.supply_demand_score
             + result.sector_momentum_score
         )
-        assert abs(result.total_score - max(0.0, min(100.0, expected))) <= 1.5
+        assert RAW_MAX == 70
+        assert abs(result.total_score - min(100.0, raw * 100 / 70)) <= 1.5
+
+    def test_technical_does_not_move_total(self):
+        """거래량이 터져 기술 점수가 크게 달라도 총점은 같다 — 기술은 참고용."""
+        quiet = _make_prices(150)
+        loud = [
+            p.model_copy(update={"volume": p.volume * 5}) if i >= 145 else p
+            for i, p in enumerate(quiet)
+        ]
+        ft = FinancialTrend(per=10.0, pbr=0.8, roe=15.0)
+        a = score_candidate(_make_candidate(prices=quiet, ft=ft))
+        b = score_candidate(_make_candidate(prices=loud, ft=ft))
+        assert a.technical_score != b.technical_score
+        assert a.total_score == b.total_score
+
+    def test_full_raw_score_maps_to_100(self):
+        assert (
+            QuantScore(
+                stock_code="x",
+                stock_name="x",
+                total_score=100.0,
+                momentum_score=5.0,
+                quality_score=20.0,
+                value_score=15.0,
+                technical_score=0.0,
+                news_score=10.0,
+                supply_demand_score=10.0,
+                sector_momentum_score=10.0,
+            ).total_score
+            == 100.0
+        )
 
     def test_insufficient_data_returns_neutral(self):
         candidate = _make_candidate(prices=_make_prices(5))
         result = score_candidate(candidate)
 
         assert result.is_valid is False
-        assert result.total_score == sum(V2_NEUTRAL.values())
+        assert result.total_score == 50.0
 
     def test_score_bounded_0_100(self):
         candidate = _make_candidate(
@@ -192,9 +225,20 @@ class TestMomentumScore:
         result = _momentum_score(_make_prices(10), None)
         assert result == V2_NEUTRAL["momentum"]
 
-    def test_uptrend_gets_higher_score(self):
-        result = _momentum_score(_make_prices(150, trend=0.003), None)
-        assert result > 5.0
+    def test_rsi_only_capped_at_five(self):
+        """지난 수익률·눌림목 부품이 빠져 RSI 0-5 만 남는다 (2026-10-09)."""
+        for trend in (-0.005, 0.0, 0.003, 0.008):
+            assert 0.0 <= _momentum_score(_make_prices(150, trend=trend), None) <= 5.0
+
+    def test_past_return_not_rewarded(self):
+        """꾸준히 오른 종목은 지난 수익률로 점수를 받지 않고 RSI 과열로 1점만 받는다."""
+        hot = _momentum_score(_make_prices(150, trend=0.003), None)
+        assert hot == 1.0  # 매일 오름 → RSI 100 → 극단 과매수
+
+    def test_eps_revision_no_bonus(self):
+        prices = _make_prices(150, trend=0.003)
+        cons = ConsensusInfo(eps_revision_pct=20.0)
+        assert _momentum_score(prices, None, consensus=cons) == _momentum_score(prices, None)
 
     def test_rsi_70_80_bull_no_penalty(self):
         prices = _make_prices(150, trend=0.008)
@@ -230,6 +274,19 @@ class TestValueScore:
     def test_high_per_low_score(self):
         candidate = _make_candidate(ft=FinancialTrend(per=100.0, pbr=5.0))
         assert _value_score(candidate) < 6.0
+
+    def test_52w_high_proximity_ignored(self):
+        """52주 고점 근접 부품은 2026-10-09 에 뺐다 — 고점 대비 위치가 가치 점수를 안 바꾼다."""
+        ft = FinancialTrend(per=10.0, pbr=0.8)
+        near = _make_candidate(
+            ft=ft,
+            snapshot=StockSnapshot(stock_code="005930", price=89000, high_52w=90000),
+        )
+        far = _make_candidate(
+            ft=ft,
+            snapshot=StockSnapshot(stock_code="005930", price=50000, high_52w=90000),
+        )
+        assert _value_score(near) == _value_score(far) <= 15.0
 
     def test_low_per_pctile_max_discount(self):
         candidate = _make_candidate(ft=FinancialTrend(per=50.0, pbr=8.0))

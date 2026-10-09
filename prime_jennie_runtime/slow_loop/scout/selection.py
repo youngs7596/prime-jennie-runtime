@@ -31,6 +31,17 @@ v2 측정상 hybrid ≈ quant (LLM 이동 평균 +1.12) 라 entry/exit 임계는
 중앙값 42/50 에서 28/50 으로 줄어든다 — 이 문턱은 사실상 보유 기간 손잡이다.
 히스테리시스 폭은 7 점에서 4 점이 됐다. 표본이 여드레·29 종목뿐이고 성과로 검증한
 것은 아직 없다. 한 주 관찰 후 재검토한다.
+
+**2026-10-09: 72.5/68.5 로 이동 (스코어러 @3).** 기술 점수를 총점에서 빼고 모멘텀은
+RSI 만, 가치에서 52주 고점 부품을 빼면서 원점수 합 70 을 100점 눈금으로 환산했다.
+유니버스 평균이 5.5점쯤 올라가서 문턱도 같이 옮겼다. 방법은 8-27 과 같다 — @2 회차
+(8-15~10-08) 점수에 RSI·52주 고점 부품을 일봉으로 다시 계산해 붙이고(옛 모멘텀
+재현은 EPS 보너스 차이 말고 일치), 같은 규칙으로 선정을 재현해(현행 문턱으로 열린
+회차 218 중 217 일치) 새 점수에 문턱을 대 봤다. 72.5/68.5 가 현행 66/62 의 규모를
+그대로 낸다 — 아침 선정 17.5 (현행 17.4), 진입권 14.4 (14.5), 이월 3.1 (2.8), 상한
+걸린 회차 9 (11). 폭 4 점도 그대로다. 10-08 판정에서 이월분이 오히려 나았기 때문에
+문턱을 조이는 쪽으로는 움직이지 않고 규모만 맞췄다. 아침 선정 20 개 중 현행과 겹치는
+것은 평균 11 개다.
 """
 
 from __future__ import annotations
@@ -42,8 +53,8 @@ logger = logging.getLogger(__name__)
 
 # v2 ScoutConfig 기본값 — env override 가능 (v2 도 env 주입식이었음).
 MA_WINDOW: int = int(os.environ.get("SELECTION_MA_WINDOW", "3"))
-ENTRY_THRESHOLD: float = float(os.environ.get("SELECTION_ENTRY_THRESHOLD", "66.0"))
-EXIT_THRESHOLD: float = float(os.environ.get("SELECTION_EXIT_THRESHOLD", "62.0"))
+ENTRY_THRESHOLD: float = float(os.environ.get("SELECTION_ENTRY_THRESHOLD", "72.5"))
+EXIT_THRESHOLD: float = float(os.environ.get("SELECTION_EXIT_THRESHOLD", "68.5"))
 
 
 def compute_ma_scores(

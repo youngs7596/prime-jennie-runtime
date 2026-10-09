@@ -44,7 +44,9 @@ logger = logging.getLogger(__name__)
 # 팩터 수식/가중치/임계 의미 변경 시 bump.
 # @2 (2026-08-15): 섹터 모멘텀 일별 중심화. 이 버전 앞뒤로 점수 수준이 달라지므로
 # 코호트 비교 시 섞지 말 것.
-SCORER_VERSION = "deterministic-quant-v2-port@2"
+# @3 (2026-10-09): 기술 점수 총점 제외, 모멘텀 RSI 만, 가치에서 52주 고점 제외,
+# 원점수 합 70 을 100점 눈금으로 환산. 이 버전 앞뒤도 섞지 말 것.
+SCORER_VERSION = "deterministic-quant-v2-port@3"
 
 
 def _apply_candidate_cap(survivors: list[tuple[str, float]]) -> list[tuple[str, float]]:

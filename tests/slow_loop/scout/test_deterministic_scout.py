@@ -72,14 +72,14 @@ def _candidate(
 
 
 def _quant(code: str = "005930", total: float = 50.0) -> QuantScore:
-    """검증 통과하는 QuantScore — 서브점수 합 50 (V2_NEUTRAL, 5-25 수급 절반화 반영)."""
+    """검증 통과하는 QuantScore — 중립 서브점수 (원점수 35 → 100점 눈금 50, @3)."""
     return QuantScore(
         stock_code=code,
         stock_name=f"종목{code}",
         total_score=total,
-        momentum_score=10.0,
+        momentum_score=2.5,
         quality_score=10.0,
-        value_score=10.0,
+        value_score=7.5,
         technical_score=5.0,
         news_score=5.0,
         supply_demand_score=5.0,

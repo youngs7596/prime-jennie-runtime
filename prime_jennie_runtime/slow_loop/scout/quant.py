@@ -12,13 +12,25 @@ v2 `prime_jennie/services/scout/quant.py` 의 **faithful 포팅** (2026-05-22, P
     가 size_multiplier 로부터 환산). 내부 모멘텀 로직은 v2 와 동일.
   - sector_group 은 str (v2 SectorGroup enum — quant 는 dict 키로만 사용).
 
-7개 서브팩터 (가중치 합 100):
-  - 모멘텀 0-20 / 품질 0-20 / 가치 0-20 / 기술 0-10 / 뉴스 0-10 / 수급 0-10 / 섹터모멘텀 0-10
+총점에 들어가는 서브팩터 6개 (원점수 합 70 → 100점 눈금으로 비례 환산):
+  - 모멘텀(RSI) 0-5 / 품질 0-20 / 가치 0-15 / 뉴스 0-10 / 수급 0-10 / 섹터모멘텀 0-10
+  - 기술 0-10 은 계산·저장만 하고 총점에서 뺀다 (참고용)
 
 2026-05-25 변경: 수급 가중치 20 → 10. 5-22 이후 결정론 코어가 거래대금 큰 대형주에
 자동 쏠려 v2 winners (자동차/항공/통신/산업재) 가 top 25 에 못 들어오던 문제를 잡기 위해
 sub-score 의 외인·기관·외인비율 버킷 모두 절반으로 축소. SQL `supply_demand × 0.5`
 시뮬레이션 (5-25 분석) 과 동일한 효과. 가중치 합 110/100 미스매치도 함께 해소.
+
+2026-10-09 변경 (스코어러 @3): 단기 과열을 높게 쳐 주던 부품을 뺐다. 근거는
+`.ai/analyses/2026-10-08-score-composition-review.md` — 세 국면 모두 상위권 안에서
+기술 점수가 높을수록 성과가 나빴고, 모멘텀의 지난 1·3개월 수익률 부품은 최근 두
+국면에서 되돌림 쪽이었다. 그래서
+  - 기술 점수는 총점에서 뺀다 (계산·저장은 유지 — 앞으로도 IC 를 볼 수 있게).
+  - 모멘텀은 RSI 부품(0-5)만 남긴다. 지난 수익률·눌림목·EPS 상향 보너스는 뺀다.
+  - 가치에서 52주 고점 근접 5점을 뺀다. 이름만 가치인 모멘텀이었다
+    (`.ai/analyses/2026-08-30-value-score-decomposition.md`, 모멘텀 팩터와 상관 0.486).
+남은 원점수 합이 70 이라 총점은 100/70 을 곱해 0-100 눈금으로 되돌린다. 요인 사이
+상대 비중은 그대로이고, 진입·이탈 문턱과 conviction(=점수/100) 이 같은 범위를 쓴다.
 """
 
 from __future__ import annotations
@@ -41,15 +53,15 @@ logger = logging.getLogger(__name__)
 
 
 class QuantScore(BaseModel):
-    """Quant Scorer v2 출력 — 7개 서브팩터 합산 (100pt 캡)."""
+    """Quant Scorer 출력 — 서브팩터 6개 합산을 100점 눈금으로 환산 (기술은 참고용)."""
 
     stock_code: str
     stock_name: str
     total_score: float
-    momentum_score: float = 0.0  # 0-20
+    momentum_score: float = 0.0  # 0-5 (RSI 만, 2026-10-09)
     quality_score: float = 0.0  # 0-20
-    value_score: float = 0.0  # 0-20
-    technical_score: float = 0.0  # 0-10
+    value_score: float = 0.0  # 0-15 (52주 고점 부품 제외, 2026-10-09)
+    technical_score: float = 0.0  # 0-10, 총점 미포함 (참고용)
     news_score: float = 0.0  # 0-10
     supply_demand_score: float = 0.0  # 0-10 (2026-05-25 20→10 축소)
     sector_momentum_score: float = 0.0  # 0-10
@@ -62,12 +74,11 @@ class QuantScore(BaseModel):
             self.momentum_score
             + self.quality_score
             + self.value_score
-            + self.technical_score
             + self.news_score
             + self.supply_demand_score
             + self.sector_momentum_score
         )
-        expected = max(0.0, min(100.0, raw_sum))
+        expected = _scale_total(raw_sum)
         if abs(self.total_score - expected) > 1.5:
             raise ValueError(
                 f"total_score({self.total_score:.1f}) != capped subscores({expected:.1f}), "
@@ -81,11 +92,13 @@ class QuantScore(BaseModel):
 # 근거: 5-25 분석 메모리 (project_2026_05_25_selection_analysis) — v3 promoted
 # 종목의 supply_demand 평균이 universe 평균보다 +3.5 높아 거래대금 큰 대형주로
 # 자동 쏠림. v2 winners 의 supply_demand 평균은 universe 평균과 거의 같았음.
+# 2026-10-09: 모멘텀 20 → 5 (RSI 만), 가치 20 → 15 (52주 고점 제외), 기술 10 → 0
+# (총점 제외). 원점수 합 70 을 100점 눈금으로 환산한다 (`_scale_total`).
 V2_WEIGHTS = {
-    "momentum": 20,
+    "momentum": 5,
     "quality": 20,
-    "value": 20,
-    "technical": 10,
+    "value": 15,
+    "technical": 0,
     "news": 10,
     "supply_demand": 10,
     "sector_momentum": 10,
@@ -93,9 +106,9 @@ V2_WEIGHTS = {
 
 # ─── 기본값 (데이터 없을 때) ────────────────────────────────────
 V2_NEUTRAL = {
-    "momentum": 10.0,
+    "momentum": 2.5,
     "quality": 10.0,
-    "value": 10.0,
+    "value": 7.5,
     "technical": 5.0,
     "news": 5.0,
     "supply_demand": 5.0,
@@ -105,6 +118,14 @@ V2_NEUTRAL = {
 # 섹터 모멘텀 일별 중심화의 최소 표본 — 이보다 적으면 기준선을 안 만든다
 # (섹터 데이터가 몇 종목뿐인 날 평균이 튀는 것을 막는다).
 SECTOR_CENTERING_MIN_SAMPLES = 20
+
+# 총점 환산 배수 — 원점수 만점(가중치 합)을 100점으로 늘린다.
+RAW_MAX = sum(V2_WEIGHTS.values())
+
+
+def _scale_total(raw_sum: float) -> float:
+    """총점에 들어가는 서브팩터 원점수 합 → 0-100 눈금."""
+    return max(0.0, min(100.0, raw_sum * 100.0 / RAW_MAX))
 
 
 def score_candidate(
@@ -125,7 +146,7 @@ def score_candidate(
             None 이면 v2 원본과 같은 절대 점수.
 
     Returns:
-        QuantScore with 7 subscores.
+        QuantScore — 서브팩터 7개 (기술은 총점 미포함).
     """
     prices = candidate.daily_prices
 
@@ -143,8 +164,8 @@ def score_candidate(
     supply_demand = _supply_demand_score(candidate)
     sector_momentum = _sector_momentum_score(candidate, sector_baseline)
 
-    total = momentum + quality + value + technical + news + supply_demand + sector_momentum
-    total = max(0.0, min(100.0, total))
+    # 기술 점수는 총점에 넣지 않는다 (2026-10-09, 모듈 docstring 참조)
+    total = _scale_total(momentum + quality + value + news + supply_demand + sector_momentum)
 
     return QuantScore(
         stock_code=candidate.master.stock_code,
@@ -170,61 +191,30 @@ def _momentum_score(
     is_bull: bool = False,
     consensus: object | None = None,
 ) -> float:
-    """모멘텀 점수 (0-20): RSI + 가격 모멘텀 + 눌림목 + Earnings Revision."""
+    """모멘텀 점수 (0-5): RSI 만.
+
+    2026-10-09 이전에는 RSI + 6개월(3개월)·1개월 수익률 + 눌림목 + EPS 상향 보너스로
+    0-20 이었다. 지난 수익률 부품이 최근 두 국면에서 거꾸로 작동해 RSI 만 남겼다.
+    ``benchmark`` / ``consensus`` 는 호출부 호환을 위해 받기만 한다.
+    """
     if len(prices) < 20:
         return V2_NEUTRAL["momentum"]
 
-    score = 0.0
     closes = [p.close_price for p in prices]
 
-    # 1. RSI 기반 (0-5): Regime 연동 — BULL에서 70-80은 페널티 없음
+    # RSI 기반 (0-5): Regime 연동 — BULL에서 70-80은 페널티 없음
     rsi = _compute_rsi(closes, period=14)
-    if rsi is not None:
-        if 40 <= rsi <= 70:
-            score += 5.0
-        elif 70 < rsi <= 80:
-            score += 5.0 if is_bull else 3.0  # BULL: 강한 추세, 그 외: 모멘텀 인정
-        elif 30 <= rsi < 40:
-            score += 3.5
-        elif rsi < 30:
-            score += 4.0  # 과매도 = 반등 잠재력
-        else:
-            score += 1.0  # 극단 과매수 (>80)
-
-    # 2. 6개월 상대 모멘텀 (0-5)
-    if len(closes) >= 120:
-        mom_6m = (closes[-1] / closes[-120] - 1) * 100
-        score += _linear_map(mom_6m, -20, 30, 0, 5)
-    elif len(closes) >= 60:
-        mom_3m = (closes[-1] / closes[-60] - 1) * 100
-        score += _linear_map(mom_3m, -15, 20, 0, 5)
-
-    # 3. 1개월 단기 모멘텀 (0-5)
-    if len(closes) >= 20:
-        mom_1m = (closes[-1] / closes[-20] - 1) * 100
-        score += _linear_map(mom_1m, -10, 15, 0, 5)
-
-    # 4. 눌림목/추세 감지 (0-5): 6M↑ + 1M↓ = 눌림목, 6M↑ + 1M↑ = 추세 지속
-    if len(closes) >= 120:
-        mom_6m = (closes[-1] / closes[-120] - 1) * 100
-        mom_1m = (closes[-1] / closes[-20] - 1) * 100
-        if mom_6m > 5 and mom_1m < -3:
-            score += 5.0  # 눌림목 보너스
-        elif mom_6m > 0 and mom_1m < 0:
-            score += 2.5
-        elif mom_6m > 10 and mom_1m > 3:
-            score += 3.5  # 추세 지속 보너스 (꾸준한 상승)
-
-    # 5. Earnings Revision 보너스 (0-2): EPS 상향 시 추가 점수
-    if consensus is not None:
-        eps_rev = getattr(consensus, "eps_revision_pct", None)
-        if eps_rev is not None:
-            if eps_rev >= 10:
-                score += 2.0  # EPS 10%+ 상향
-            elif eps_rev >= 5:
-                score += 1.0  # EPS 5%+ 상향
-
-    return min(20.0, score)
+    if rsi is None:
+        return V2_NEUTRAL["momentum"]
+    if 40 <= rsi <= 70:
+        return 5.0
+    if 70 < rsi <= 80:
+        return 5.0 if is_bull else 3.0  # BULL: 강한 추세, 그 외: 모멘텀 인정
+    if 30 <= rsi < 40:
+        return 3.5
+    if rsi < 30:
+        return 4.0  # 과매도 = 반등 잠재력
+    return 1.0  # 극단 과매수 (>80)
 
 
 def _quality_score(candidate: EnrichedCandidate) -> float:
@@ -297,12 +287,12 @@ def _quality_score(candidate: EnrichedCandidate) -> float:
 
 
 def _value_score(candidate: EnrichedCandidate) -> float:
-    """가치 점수 (0-20): PER 할인 + PBR 평가.
+    """가치 점수 (0-15): PER 할인 + PBR 평가.
 
-    Forward PER 컨센서스 우선, 없으면 trailing PER 사용.
+    Forward PER 컨센서스 우선, 없으면 trailing PER 사용. 52주 고점 근접 부품(0-5)은
+    2026-10-09 에 뺐다 — 오른 종목을 보상하는 모멘텀이었다.
     """
     ft = candidate.financial_trend
-    snap = candidate.snapshot
     cons = candidate.consensus
     if not ft:
         return V2_NEUTRAL["value"]
@@ -350,23 +340,11 @@ def _value_score(candidate: EnrichedCandidate) -> float:
         else:
             score += 1.0
 
-    # 52주 고점 대비 (0-5): 고점 근접 = 강한 추세 보상
-    if snap and snap.high_52w and snap.price:
-        drawdown = (snap.price / snap.high_52w - 1) * 100
-        if drawdown < -30:
-            score += 1.5  # 추세 하락
-        elif drawdown < -15:
-            score += 3.5  # 큰 할인
-        elif drawdown < -5:
-            score += 4.0  # 적절한 조정
-        else:
-            score += 5.0  # 고점 근접 = 상승 추세 확인
-
-    return min(20.0, score)
+    return min(15.0, score)
 
 
 def _technical_score(prices: list[DailyPrice]) -> float:
-    """기술 점수 (0-10): 이평선 + 거래량 패턴."""
+    """기술 점수 (0-10): 이평선 + 거래량 패턴. 2026-10-09 부터 총점 미포함 (참고용)."""
     if len(prices) < 20:
         return V2_NEUTRAL["technical"]
 
@@ -602,7 +580,7 @@ def _pctile_to_score_10(pctile: float) -> float:
 
 def _neutral_score(candidate: EnrichedCandidate, reason: str = "") -> QuantScore:
     """데이터 부족 시 중립 점수."""
-    neutral_total = sum(V2_NEUTRAL.values())
+    neutral_total = _scale_total(sum(v for k, v in V2_NEUTRAL.items() if k != "technical"))
     return QuantScore(
         stock_code=candidate.master.stock_code,
         stock_name=candidate.master.stock_name,

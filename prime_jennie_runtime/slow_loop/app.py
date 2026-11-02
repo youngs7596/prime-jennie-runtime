@@ -3,16 +3,15 @@
 `scheduled_jobs` (owner='slow_loop') 에 등록된 cron 을 apscheduler 가 트리거하면
 `scout_daily` handler 가 `run_slow_loop()` 를 호출한다.
 
-Role tier 매핑 (2026-04-22 재개정 — Opus 비용 부담으로 DeepSeek 복귀):
-  - Scout (strong)    → DeepSeek chat (V3.2 flagship, DEEPSEEK_API_KEY)
-  - Macro (reasoning) → DeepSeek chat (V3.2 flagship, DEEPSEEK_API_KEY)
-  - Scout shadow      → Claude Opus 4.7 (회귀 검증용, ANTHROPIC_API_KEY)
-  - Macro shadow      → Claude Opus 4.7 (회귀 검증용, ANTHROPIC_API_KEY)
+Role tier 매핑:
+  - Macro (reasoning) → DeepSeek chat (DEEPSEEK_API_KEY) — 실제 게이트 판단
+  - Macro shadow      → Claude Opus 5.5 (ANTHROPIC_API_KEY) — 기록만, 게이트에 영향 없음.
+    MACRO_SHADOW_ENABLED=1 일 때만 돈다.
+    비교 설계: .ai/designs/2026-11-02-macro-gate-claude-shadow.md
+  - Scout 는 2026-05-22 부터 결정론 코어라 LLM 을 안 쓴다 (strong tier 는 남아 있지만 호출처 없음).
 
-배경: Macro shadow 4일치 (35 successful run) 비교에서 Gate 100% / Size 86%
-일치 (불일치 4건 중 3건은 DeepSeek 가 더 보수적, 1건만 공격). 비용은 약 50×
-저렴 ($0.003 vs $0.147/run). Scout 는 2026-04-19 이전엔 DeepSeek 으로 안정
-운영. Opus shadow 로 1~2주 회귀 데이터 추가 수집 후 shadow 도 종료 가능.
+이력: 2026-04-18~22 에 Opus 4.7 그림자 40회는 게이트 100% 일치(조용한 장), 비용 때문에 껐다.
+2026-11-02 크레딧 확보 후 Opus 5.5 로 다시 켠다.
 
 Scout/Macro feeder 는 Phase 2 기준 Stub — Track E feeder 완성 시 교체 (AGENTS.md §위임 경계).
 
@@ -21,8 +20,8 @@ Scout/Macro feeder 는 Phase 2 기준 Stub — Track E feeder 완성 시 교체 
 
 환경:
     POSTGRES_* / REDIS_* — 공통
-    DEEPSEEK_API_KEY — Scout 호출용
-    ANTHROPIC_API_KEY — Macro 호출용
+    DEEPSEEK_API_KEY — Macro 게이트 호출용
+    ANTHROPIC_API_KEY — Macro 그림자 호출용
     (선택) DEEPSEEK_MODEL, DEEPSEEK_BASE_URL, ANTHROPIC_MODEL 으로 모델 override
     어느 하나 누락 시 스케줄은 기동하지만 handler 는 skip.
 """
@@ -91,18 +90,37 @@ OWNER = "slow_loop"
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+# 게이트 출력은 짧지만 생각(thinking) 토큰이 출력에 같이 잡힌다 — 넉넉히 둔다.
+_CLAUDE_SHADOW_MAX_TOKENS = 16000
+
+
+def _make_claude_shadow(chat_anthropic_cls: Any, model: str, api_key: str) -> Any:
+    """구조화 출력을 JSON 스키마 방식으로 부르는 Claude 모델을 만든다.
+
+    Opus 5.5 는 특정 도구를 강제로 부르게 하는 방식(tool_choice any/tool)을 거부한다.
+    langchain_anthropic 기본값(function_calling)은 이를 자동 선택으로 바꿔 부르지만,
+    모델이 도구를 안 부르면 그 회차가 실패한다. 하네스(minyoung-mah)는 method 를
+    지정하지 않으므로 이쪽에서 기본값을 바꾼다 (DeepSeek 래퍼와 같은 방식).
+    sampling 파라미터(temperature 등)는 최신 모델에서 400 이라 넘기지 않는다.
+    """
+
+    class _ClaudeJsonSchemaChat(chat_anthropic_cls):  # type: ignore[misc, valid-type]
+        def with_structured_output(self, schema, *, method=None, **kwargs):  # type: ignore[override]
+            return super().with_structured_output(schema, method=method or "json_schema", **kwargs)
+
+    return _ClaudeJsonSchemaChat(model=model, api_key=api_key, max_tokens=_CLAUDE_SHADOW_MAX_TOKENS)
+
+
 def _try_build_tiered_router() -> Any | None:
     """Role tier → ChatModel 매핑 반환. 필수 키 누락 시 None.
 
-    tier 매핑 (2026-04-22 재개정):
-      - strong    → Scout      = DeepSeek chat (DEEPSEEK_API_KEY)
-      - reasoning → Macro Gate = DeepSeek chat (DEEPSEEK_API_KEY)
-      - shadow_strong    → Scout shadow = Claude Opus 4.7 (ANTHROPIC_API_KEY)
-      - shadow_reasoning → Macro shadow = Claude Opus 4.7 (ANTHROPIC_API_KEY)
-      - fast      → 현재 slow_loop 에선 사용 X (news_pipeline 이 별도로 vLLM EXAONE 호출)
+    tier 매핑:
+      - strong / reasoning → DeepSeek chat (DEEPSEEK_API_KEY). 실제 게이트 판단.
+      - shadow_strong / shadow_reasoning → Claude (ANTHROPIC_MODEL, 기본 claude-opus-5-5).
+      - fast      → 현재 slow_loop 에선 사용 X (news_pipeline 이 별도로 vLLM 호출)
 
-    DeepSeek 하나는 Scout + Macro 둘 다 같은 인스턴스로 재사용 (stateless API 라
-    무해). Opus shadow 도 동일하게 단일 인스턴스 재사용.
+    DeepSeek·Claude 모두 단일 인스턴스를 재사용한다 (stateless API 라 무해).
     DeepSeek/Anthropic key 중 하나라도 없으면 slow_loop handler 는 skip.
     """
     deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -126,7 +144,7 @@ def _try_build_tiered_router() -> Any | None:
 
     deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     deepseek_base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-    anthropic_model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+    anthropic_model = os.environ.get("ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
 
     # DeepSeek chat: function_calling 만 지원 (json_schema response_format 미지원).
     class _DeepSeekChatOpenAI(ChatOpenAI):
@@ -145,18 +163,15 @@ def _try_build_tiered_router() -> Any | None:
     strong = deepseek_chat
     reasoning = deepseek_chat
 
-    # Shadow = Claude Opus 4.7 (회귀 검증용). temperature 파라미터 미지원 (API 400).
-    opus_shadow = ChatAnthropic(
-        model=anthropic_model,
-        api_key=anthropic_key,
-    )
+    # Shadow = Claude. 구조화 출력은 JSON 스키마 방식으로 고정한다 (_ClaudeJsonSchemaChat).
+    claude_shadow = _make_claude_shadow(ChatAnthropic, anthropic_model, anthropic_key)
     return {
         "strong": strong,
         "reasoning": reasoning,
         "default": strong,
         # shadow tier — primary orchestrator 와 동일 role 이 다른 모델로 병렬 평가
-        "shadow_strong": opus_shadow,
-        "shadow_reasoning": opus_shadow,
+        "shadow_strong": claude_shadow,
+        "shadow_reasoning": claude_shadow,
     }
 
 
@@ -195,8 +210,8 @@ def _build_slow_loop_components(
         resilience=default_resilience(),
     )
 
-    # Shadow orchestrator — Macro gate 만 DeepSeek 로 병렬 평가. Opus 결정이 primary.
-    # MACRO_SHADOW_ENABLED=0 으로 비활성화. (scout shadow 는 2026-05-22 결정론 코어
+    # Shadow orchestrator — Macro gate 만 Claude 로 병렬 평가. 실제 게이트는 DeepSeek 결정.
+    # MACRO_SHADOW_ENABLED=1 일 때만 켠다 (compose 기본 0). (scout shadow 는 2026-05-22 결정론 코어
     # 전환으로 은퇴 — codegen 이 없으면 비교 대상이 무의미.)
     shadow_orchestrator: Orchestrator | None = None
     macro_shadow_on = os.environ.get("MACRO_SHADOW_ENABLED", "1") == "1"

@@ -41,7 +41,7 @@ from minyoung_mah import (
 
 from prime_jennie_runtime.control.state import SystemState
 from prime_jennie_runtime.infra.observer_impl import pj_event
-from prime_jennie_runtime.position_sheet.schema import MacroStateSnapshot
+from prime_jennie_runtime.position_sheet.schema import KST, MacroStateSnapshot
 
 from .macro.context_builder import MacroContextBuilder
 from .macro.post_processor import MacroPostResult, run_post_processing
@@ -204,12 +204,90 @@ class SlowLoopComponents:
     state_store: MacroStateStore
     observer: Observer
     db_engine: Any = None  # AsyncEngine | None — macro_runs/scout_runs 기록용
-    shadow_orchestrator: Any = None  # Orchestrator | None — Macro 를 DeepSeek 로 shadow 평가
+    shadow_orchestrator: Any = None  # Orchestrator | None — Macro 를 Claude 로 그림자 평가 (기록만)
     redis_client: Any = None  # aioredis.Redis | None — LLM stats 누적용 (llm:stats:{date}:{svc})
     system_state: SystemState | None = None  # control.state:* 읽기. None 이면 STOP/PAUSE 미체크.
     # scout 단계 주입점 — None 이면 deterministic_scout.run_deterministic_scout 사용.
     # 테스트가 canned 후보를 주입할 때 fake runner 를 넣는다 (engine/checker 와 동일 패턴).
     scout_runner: Any = None
+
+
+# 매크로 게이트 그림자(Claude) 안전장치 — .ai/designs/2026-11-02-macro-gate-claude-shadow.md
+# 하루 호출 상한: 급변 감시 재발화일도 20회 안팎이라 평소엔 안 걸린다. 회차 폭주 버그만 막는다.
+SHADOW_DAILY_CAP = 40
+# 시간 상한: 주 판단과 함께 기다리므로 그림자가 늦으면 08:30 회차 전체가 늦어진다.
+SHADOW_TIMEOUT_S = 90.0
+_SHADOW_CALLS_KEY = "macro:shadow:calls:{date}"
+
+
+async def _shadow_budget_ok(redis_client: Any, now: datetime | None = None) -> bool:
+    """오늘(KST) 그림자 호출 횟수를 하나 올리고 상한 안이면 True.
+
+    Redis 가 없거나 오류면 True — 상한은 폭주 방지용 보조 장치라 기록을 막지 않는다.
+    """
+    if redis_client is None:
+        return True
+    today = (now or datetime.now(KST)).astimezone(KST).date().isoformat()
+    key = _SHADOW_CALLS_KEY.format(date=today)
+    try:
+        count = int(await redis_client.incr(key))
+        if count == 1:
+            await redis_client.expire(key, 2 * 24 * 3600)
+    except Exception:
+        logger.exception("macro shadow 호출 횟수 기록 실패 — 상한 없이 진행")
+        return True
+    return count <= SHADOW_DAILY_CAP
+
+
+async def _run_shadow_macro(
+    comp: SlowLoopComponents, macro_ctx: Any, observer: Observer
+) -> dict[str, Any] | None:
+    """그림자 매크로 판단 1회. 결과는 기록용이고 실제 게이트에는 쓰지 않는다.
+
+    반환: None(그림자 꺼짐) | {"error": ...} | {"result", "duration_ms", "metadata"}.
+    어떤 실패도 예외로 올리지 않는다 — 주 판단을 절대 막지 않기 위해서다.
+    """
+    import asyncio
+    import time
+
+    if comp.shadow_orchestrator is None:
+        return None
+    if not await _shadow_budget_ok(comp.redis_client):
+        logger.warning("macro shadow 하루 상한(%d회) 초과 — 이번 회차 건너뜀", SHADOW_DAILY_CAP)
+        return {"error": "daily_cap_exceeded"}
+
+    t0 = time.monotonic()
+    try:
+        res = await asyncio.wait_for(
+            _run_macro_with_retry(
+                comp.shadow_orchestrator,
+                macro_ctx,
+                observer,
+                role_name="macro_gate_shadow",
+                user_request="daily macro gate (shadow)",
+            ),
+            timeout=SHADOW_TIMEOUT_S,
+        )
+    except TimeoutError:
+        logger.warning("macro shadow 시간 상한(%.0f초) 초과", SHADOW_TIMEOUT_S)
+        return {"error": f"timeout_{int(SHADOW_TIMEOUT_S)}s"}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("macro shadow failed: %s", e)
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    # metadata (usage 포함 — minyoung-mah 0.1.2+) 를 함께 실어 cost 계산에 활용.
+    shadow_meta: dict[str, Any] = {}
+    try:
+        step = res.state["macro_gate"]
+        if step.outputs:
+            shadow_meta = dict(step.outputs[0].metadata or {})
+    except Exception:
+        shadow_meta = {}
+    return {
+        "result": res,
+        "duration_ms": int((time.monotonic() - t0) * 1000),
+        "metadata": shadow_meta,
+    }
 
 
 def _macro_pipeline(macro_ctx: Any) -> StaticPipeline:
@@ -293,35 +371,7 @@ async def run_slow_loop(
         )
 
     async def _shadow_macro():
-        if comp.shadow_orchestrator is None:
-            return None
-        import time
-
-        t0 = time.monotonic()
-        try:
-            res = await _run_macro_with_retry(
-                comp.shadow_orchestrator,
-                macro_ctx,
-                observer,
-                role_name="macro_gate_shadow",
-                user_request="daily macro gate (shadow)",
-            )
-            # metadata (usage 포함 — minyoung-mah 0.1.2+) 를 함께 실어 cost 계산에 활용.
-            shadow_meta: dict[str, Any] = {}
-            try:
-                step = res.state["macro_gate"]
-                if step.outputs:
-                    shadow_meta = dict(step.outputs[0].metadata or {})
-            except Exception:
-                shadow_meta = {}
-            return {
-                "result": res,
-                "duration_ms": int((time.monotonic() - t0) * 1000),
-                "metadata": shadow_meta,
-            }
-        except Exception as e:
-            logger.warning("macro shadow failed: %s", e)
-            return {"error": f"{type(e).__name__}: {e}"}
+        return await _run_shadow_macro(comp, macro_ctx, observer)
 
     import asyncio
 
@@ -351,7 +401,7 @@ async def run_slow_loop(
 
     macro_prompt_chars = len(MACRO_SYSTEM_PROMPT) + len(_build_macro_user(macro_ctx))
 
-    # Shadow 결과 구성 — DeepSeek 가 낸 동일 스키마 output 을 그대로 기록
+    # Shadow 결과 구성 — Claude 가 낸 동일 스키마 output 을 그대로 기록
     shadow_payload_for_db: dict[str, Any] | None = None
     if shadow_payload is not None and "error" not in shadow_payload:
         try:
@@ -364,7 +414,7 @@ async def run_slow_loop(
                 try:
                     from .persistence import _resolve_cost, _tier_model
 
-                    shadow_model_name = _tier_model("shadow_reasoning")  # DeepSeek V3.2 flagship
+                    shadow_model_name = _tier_model("shadow_reasoning")  # ANTHROPIC_MODEL (Claude)
                     # shadow_payload 에 metadata (usage 포함 가능) 가 실려 있으면 우선 사용.
                     shadow_meta = shadow_payload.get("metadata") or {}
                     shadow_out_chars = len(shadow_raw.reasoning or "") + sum(

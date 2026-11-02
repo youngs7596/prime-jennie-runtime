@@ -113,8 +113,8 @@ def _service_model(service: str, cfg: LLMConfig) -> tuple[str, str]:
         model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         return model, "DeepSeek"
     if service == "macro_shadow":
-        # Macro shadow = Claude Opus 4.7 (회귀 검증용 병렬 축적, 1~2주 후 종료).
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+        # Macro shadow = Claude (기록만, 2026-11-02 Opus 5.5 로 재가동).
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
         return model, "Anthropic"
     if service == "briefing":
         # 2026-04-24: briefing 도 DeepSeek 로 전환 (Opus 월 ~$30-50 절감).

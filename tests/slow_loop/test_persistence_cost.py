@@ -16,13 +16,23 @@ from prime_jennie_runtime.slow_loop.persistence import (
 
 
 def test_real_cost_uses_exact_tokens():
-    # Opus 4.7: $15/$75 per 1M
+    # Opus 4.7: $5/$25 per 1M (2026-11-02 정정 — 예전 표는 15/75 로 세 배 비쌌다)
     cost = _real_cost(
         "claude-opus-4-7",
         {"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500},
     )
-    # 1000 * 15/1e6 + 500 * 75/1e6 = 0.015 + 0.0375 = 0.0525
-    assert cost == pytest.approx(0.0525)
+    # 1000 * 5/1e6 + 500 * 25/1e6 = 0.005 + 0.0125 = 0.0175
+    assert cost == pytest.approx(0.0175)
+
+
+def test_real_cost_opus_5_5_shadow_model():
+    # 매크로 그림자 모델 Opus 5.5: $4/$20 per 1M. 가격표에 없으면 비용 칸이 비어 기록된다.
+    cost = _real_cost(
+        "claude-opus-5-5",
+        {"input_tokens": 8000, "output_tokens": 1000, "total_tokens": 9000},
+    )
+    # 8000 * 4/1e6 + 1000 * 20/1e6 = 0.032 + 0.02 = 0.052
+    assert cost == pytest.approx(0.052)
 
 
 def test_real_cost_missing_fields_returns_none():
@@ -51,7 +61,7 @@ def test_resolve_cost_prefers_real_usage_over_chars():
         prompt_chars=99999,  # char estimate 와 확연히 다른 값
         output_chars=99999,
     )
-    assert cost == pytest.approx(0.0525)
+    assert cost == pytest.approx(0.0175)
 
 
 def test_resolve_cost_falls_back_to_chars_when_no_usage():
@@ -62,7 +72,7 @@ def test_resolve_cost_falls_back_to_chars_when_no_usage():
         output_chars=1000,
     )
     # _estimate_tokens: 2000//2=1000, 1000//2=500
-    # 1000 * 15/1e6 + 500 * 75/1e6 = 0.0525
+    # 1000 * 5/1e6 + 500 * 25/1e6 = 0.0175
     expected = _estimate_cost("claude-opus-4-7", 2000, 1000)
     assert cost == expected
 

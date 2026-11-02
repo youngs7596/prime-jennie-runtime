@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 # _real_cost 로 정확 비용 계산. 0.1.1 이하 provider 거나 mock 인 경우 prompt+output
 # 문자수 기반 추정(±20%) 으로 fallback.
 _PRICING: dict[str, tuple[float, float]] = {
-    "claude-opus-4-7": (15.0, 75.0),
+    "claude-opus-5-5": (4.0, 20.0),
+    "claude-opus-4-7": (5.0, 25.0),
     "claude-opus-4": (15.0, 75.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5-20251001": (0.80, 4.0),
@@ -47,13 +48,13 @@ _PRICING: dict[str, tuple[float, float]] = {
 def _tier_model(tier: str) -> str | None:
     """tier → 설정된 모델명 (DEEPSEEK_MODEL / ANTHROPIC_MODEL).
 
-    2026-04-22: Opus 비용 부담으로 primary 를 DeepSeek 로 복귀, Opus 는 shadow
-    회귀 검증용. tier 매핑은 app.py `_try_build_tiered_router` 와 1:1 동기.
+    primary = DeepSeek, shadow = Claude (기록만). tier 매핑은 app.py
+    `_try_build_tiered_router` 와 1:1 동기.
     """
     if tier in ("reasoning", "strong"):
         return os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     if tier in ("shadow_reasoning", "shadow_strong"):
-        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
+        return os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
     return None
 
 

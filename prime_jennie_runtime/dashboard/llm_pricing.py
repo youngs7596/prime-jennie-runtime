@@ -23,8 +23,9 @@ PRICING: dict[str, dict[str, dict[str, float]]] = {
         "gpt-4o-mini": {"in_per_million_usd": 0.15, "out_per_million_usd": 0.60},
     },
     "anthropic": {
-        # claude-opus-4-7 1M token 가격 (참고용, 현재 라우팅에서는 macro_shadow 만).
-        "claude-opus-4-7": {"in_per_million_usd": 15.0, "out_per_million_usd": 75.0},
+        # 1M token 가격. 현재 라우팅에서는 매크로 게이트 그림자만 Claude 를 쓴다.
+        "claude-opus-5-5": {"in_per_million_usd": 4.0, "out_per_million_usd": 20.0},
+        "claude-opus-4-7": {"in_per_million_usd": 5.0, "out_per_million_usd": 25.0},
     },
 }
 
